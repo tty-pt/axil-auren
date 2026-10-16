@@ -26,6 +26,7 @@ enum {
 	QE_JOB_EMBED = 1, /* OpenAI-style embeddings for a single text string */
 	QE_JOB_CHAT,      /* telnet: incremental session chat (sid) */
 	QE_JOB_CHAT_ONESHOT, /* HTTP: stateless chat, input = full request JSON */
+	QE_JOB_SYSTEMONE, /* HTTP: Jev-compatible System One decision */
 	QE_JOB_OPEN,      /* meta: open/ensure a session slot for sid */
 	QE_JOB_RESET,     /* meta: reset session history + KV */
 	QE_JOB_CLOSE,     /* meta: close/free a session slot */
@@ -70,6 +71,7 @@ void qllm_engine_shutdown(void);
  * engine is not initialized or the job queue is full.
  */
 int qllm_engine_submit(int kind, const char *input, void *ud, int *job_id_out);
+int qllm_engine_submit_model(int kind, const char *model, const char *input, void *ud, int *job_id_out);
 
 /*
  * Submit a telnet chat turn for an already-open (or to-be-opened) session.
@@ -87,6 +89,13 @@ int qllm_engine_chat(int sid, const char *input, void *ud, int *job_id_out);
  * final streaming-closed delta; otherwise a single chat.completion JSON result.
  */
 int qllm_engine_chat_oneshot(const char *request_json, void *ud, int *job_id_out);
+int qllm_engine_chat_oneshot_model(const char *model, const char *request_json, void *ud, int *job_id_out);
+
+/*
+ * Submit a Jev-compatible System One decision request.
+ */
+int qllm_engine_systemone(const char *request_json, void *ud, int *job_id_out);
+int qllm_engine_systemone_model(const char *model, const char *request_json, void *ud, int *job_id_out);
 
 /*
  * Session bookkeeping. These are all queued to the worker (like any job) so the

@@ -6,7 +6,7 @@ engine-test-obj-y :=
 LDLIBS-engine-test := -laxil-qllm -ljson-c -lpthread -lm
 LDFLAGS-engine-test = -Wl,-rpath,${pwd}/lib
 
-libaxil-qllm-obj-y := src/libqllm.o src/qllm-engine.o src/openai_embed.o src/openai_chat.o
+libaxil-qllm-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/systemone.o
 libaxil-qllm-obj-y-Linux := src/vulkan.o
 libaxil-qllm-obj-y-Darwin := src/metal.o
 

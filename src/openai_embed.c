@@ -2,6 +2,7 @@
 
 #include "openai_embed.h"
 #include "qllm-engine.h"
+#include "qllm-registry.h"
 #include "qllm-pending.h"
 
 #include <ttypt/axil.h>
@@ -58,6 +59,20 @@ handler_embeddings(socket_t cfd, char *body)
 		goto out;
 	}
 
+	struct json_object *mo = json_object_object_get(req, "model");
+	const char *model_id = mo && json_object_is_type(mo, json_type_string) ? json_object_get_string(mo) : NULL;
+	if (model_id && model_id[0] && strcmp(model_id, "default") != 0) {
+		const struct qllm_model_entry *me = qllm_registry_find_for_cap(QLLM_CAP_EMBED, model_id);
+		if (!me) {
+			embed_respond_error(cfd, 404, "unknown model");
+			goto out;
+		}
+		if (!(me->capabilities & QLLM_CAP_EMBED)) {
+			embed_respond_error(cfd, 400, "model does not support embed capability");
+			goto out;
+		}
+	}
+
 	/* Send status + headers now, complete the body later from the loop
 	 * thread when the engine's worker finishes (`drain` in qllmd.c). */
 	axil_header_set(cfd, "Content-Type", "application/json");
@@ -67,7 +82,7 @@ handler_embeddings(socket_t cfd, char *body)
 		goto out;
 	}
 
-	if (qllm_engine_submit(QE_JOB_EMBED, input,
+	if (qllm_engine_submit_model(QE_JOB_EMBED, model_id, input,
 	    make_pending(handle, 0, 0), NULL) != 0) {
 		axil_respond_defer_abort(handle);
 		embed_respond_error(cfd, 503, "engine busy");
@@ -83,9 +98,7 @@ out:
 int
 openai_embed_init(const char *model_path)
 {
-	if (!model_path || !model_path[0])
-		return -1;
-
+	(void)model_path;
 	axil_register_handler("POST:/v1/embeddings", handler_embeddings);
 	return 0;
 }

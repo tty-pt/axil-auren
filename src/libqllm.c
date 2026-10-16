@@ -874,14 +874,14 @@ qllm_create(const struct qllm_config *cfg)
 		int nl = 0, ne = 0, nc = 0, nh = 0, nkh = 0;
 
 		get_model_dims(cfg->model_path, &nl, &ne, &nc, &nh, &nkh);
-		if (nc > 0)
+		if (nc > 0 && nc <= 4096)
 			ctx_params.n_ctx = (uint32_t) nc;
 		else
 			ctx_params.n_ctx = 2048; /* Fallback */
 	}
 
-	ctx_params.n_batch = ctx_params.n_ctx;
-	ctx_params.n_ubatch = 0;
+	ctx_params.n_batch = ctx_params.n_ctx < 2048 ? ctx_params.n_ctx : 2048;
+	ctx_params.n_ubatch = ctx_params.n_batch < 512 ? ctx_params.n_batch : 512;
 	ctx_params.n_seq_max = cfg->n_contexts > 0 ? (uint32_t)cfg->n_contexts : 1;
 
 	/* Enable embeddings and mean pooling only if requested.

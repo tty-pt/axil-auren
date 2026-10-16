@@ -4,6 +4,7 @@
 
 #include "openai_chat.h"
 #include "openai_embed.h"
+#include "systemone.h"
 #include "qllm-engine.h"
 #include "qllm-pending.h"
 
@@ -11,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define REC_END "\r\n.\r\n"
 
@@ -271,6 +273,15 @@ drain(void *cbud __attribute__((unused)),
 		return;
 	}
 
+	if (r->kind == QE_JOB_SYSTEMONE) {
+		if (r->err)
+			axil_respond_defer_abort(p->handle);
+		else
+			axil_respond_defer_finish(p->handle, r->payload);
+		free(p);
+		return;
+	}
+
 	free(p);
 }
 
@@ -322,13 +333,29 @@ qllm_init(void)
 {
 	const char *model_path = getenv("QLLM_MODEL_PATH");
 	const char *crb_path = getenv("QLLM_CRB_PATH");
+	const char *chat_path = getenv("QLLM_CHAT_PATH");
+	const char *judge_path = getenv("QLLM_JUDGE_PATH");
+	const char *embed_path = getenv("QLLM_EMBED_PATH");
+	const char *cfg_path = getenv("QLLM_CONFIG_PATH");
+	const char *models_json = getenv("QLLM_MODELS");
 
-	if (!model_path || !model_path[0]) {
-		qsyslog(QLOG_ERR, "QLLM_MODEL_PATH not set; qllm engine disabled\n");
+	int has_models = (model_path && model_path[0]) ||
+	                 (chat_path && chat_path[0]) ||
+	                 (judge_path && judge_path[0]) ||
+	                 (embed_path && embed_path[0]) ||
+	                 (cfg_path && cfg_path[0]) ||
+	                 (models_json && models_json[0]) ||
+	                 (access("qllm.json", R_OK) == 0);
+
+	if (!has_models) {
+		qsyslog(QLOG_ERR, "No model configuration set; qllm engine disabled\n");
 		return -1;
 	}
 
-	snprintf(qllm_model_path, sizeof(qllm_model_path), "%s", model_path);
+	if (model_path && model_path[0])
+		snprintf(qllm_model_path, sizeof(qllm_model_path), "%s", model_path);
+	else
+		qllm_model_path[0] = '\0';
 
 	setup_crb(crb_path && crb_path[0] ? crb_path : "crb.txt");
 
@@ -346,6 +373,7 @@ qllm_init(void)
 
 	openai_embed_init(qllm_model_path);
 	openai_chat_init(qllm_model_path);
+	systemone_init();
 
 	return 0;
 }
@@ -363,6 +391,7 @@ xy_shutdown(void)
 	qllm_engine_shutdown();
 	openai_embed_shutdown();
 	openai_chat_shutdown();
+	systemone_shutdown();
 	free(crb_system);
 	crb_system = NULL;
 }

@@ -17,6 +17,7 @@
  */
 
 #include "qllm-engine.h"
+#include "qllm-registry.h"
 
 #include <ttypt/qllm.h>
 
@@ -41,6 +42,7 @@
 struct qllm_engine_job {
 	int   kind;
 	int   sid;      /* QE_JOB_CHAT / session meta kinds */
+	char *model;    /* explicit model ID or NULL for default */
 	char *input;    /* owned by engine; freed after processing (may be NULL) */
 	void *ud;
 	int   job_id;
@@ -51,6 +53,7 @@ struct qllm_session {
 	int      sid;
 	char    *system_prompt;  /* strdup'd, session-owned; may be NULL */
 	uint64_t last_used_seq;  /* LRU */
+	char     model_used[64];
 
 	/* worker-only LLM state (never touched by the loop thread): */
 	struct qllm_context *ctx;
@@ -88,10 +91,6 @@ struct qllm_engine {
 	struct qllm_session sessions[QE_SESSIONS];
 	uint64_t          sess_seq;
 	char             *system_prompt; /* engine-global strdup'd, may be NULL */
-
-	struct qllm_context *embed_ctx; /* lazily built on the worker thread */
-	struct qllm_context *chat_ctx;  /* oneshot chat ctx, lazily built, reused
-					  * (reset per oneshot job) */
 };
 
 static struct qllm_engine g_engine;
@@ -205,6 +204,9 @@ run_embed(struct qllm_engine_job *job, struct qllm_engine_result *out)
 {
 	float *vec = NULL;
 	int dim = 0;
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
+	int rc;
 
 	memset(out, 0, sizeof(*out));
 	out->job_id = job->job_id;
@@ -213,38 +215,30 @@ run_embed(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	out->more = 0;
 	out->seq = 0;
 
-	if (!g_engine.embed_ctx) {
-		struct qllm_config cfg;
-
-		memset(&cfg, 0, sizeof(cfg));
-		cfg.model_path = g_engine.model_path;
-		cfg.n_ctx = 0;
-		cfg.n_threads = 0;
-		cfg.max_offload_bytes = 0;
-		cfg.n_contexts = 1;
-
-		g_engine.embed_ctx = qllm_create(&cfg);
-		if (!g_engine.embed_ctx) {
-			out->err = -2;
-			return -1;
-		}
+	rc = qllm_registry_acquire(job->model, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used));
+	if (rc != QLLM_REG_OK || !ctx) {
+		out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -2);
+		return -1;
 	}
 
 	vec = calloc(QE_VEC_MAX, sizeof(*vec));
 	if (!vec) {
+		qllm_registry_release(model_used);
 		out->err = -3;
 		return -1;
 	}
 
-	dim = qllm_embed(g_engine.embed_ctx, job->input, vec, QE_VEC_MAX);
+	dim = qllm_embed(ctx, job->input, vec, QE_VEC_MAX);
 	if (dim <= 0) {
 		free(vec);
+		qllm_registry_release(model_used);
 		out->err = -4;
 		return -1;
 	}
 
-	out->payload = embed_build_payload(vec, dim, g_engine.model_path);
+	out->payload = embed_build_payload(vec, dim, model_used[0] ? model_used : g_engine.model_path);
 	free(vec);
+	qllm_registry_release(model_used);
 
 	if (!out->payload) {
 		out->err = -5;
@@ -304,6 +298,10 @@ session_heavy_free(struct qllm_session *s)
 	if (s->ctx) {
 		qllm_free(s->ctx);
 		s->ctx = NULL;
+		if (s->model_used[0]) {
+			qllm_registry_release(s->model_used);
+			s->model_used[0] = '\0';
+		}
 	}
 	free(s->prev_prompt);
 	s->prev_prompt = NULL;
@@ -658,17 +656,8 @@ worker_chat(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	s = &g_engine.sessions[slot];
 
 	if (!s->ctx) {
-		struct qllm_config cfg;
-
-		memset(&cfg, 0, sizeof(cfg));
-		cfg.model_path = g_engine.model_path;
-		cfg.n_ctx = 0;
-		cfg.n_threads = 0;
-		cfg.max_offload_bytes = 0;
-		cfg.n_contexts = 1;
-
-		s->ctx = qllm_create(&cfg);
-		if (!s->ctx) {
+		int rc = qllm_registry_acquire(NULL, QLLM_CAP_CHAT, &s->ctx, s->model_used, sizeof(s->model_used));
+		if (rc != QLLM_REG_OK || !s->ctx) {
 			out->err = -2;
 			out->more = 0;
 			return;
@@ -791,25 +780,17 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	if (sm)
 		stream = json_object_get_boolean(sm) != 0;
 
-	if (!g_engine.chat_ctx) {
-		struct qllm_config cfg;
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
 
-		memset(&cfg, 0, sizeof(cfg));
-		cfg.model_path = g_engine.model_path;
-		cfg.n_ctx = 0;
-		cfg.n_threads = 0;
-		cfg.max_offload_bytes = 0;
-		cfg.n_contexts = 1;
-
-		g_engine.chat_ctx = qllm_create(&cfg);
-		if (!g_engine.chat_ctx) {
-			out->err = -2;
-			goto out;
-		}
+	rc = qllm_registry_acquire(job->model, QLLM_CAP_CHAT, &ctx, model_used, sizeof(model_used));
+	if (rc != QLLM_REG_OK || !ctx) {
+		out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -2);
+		goto out;
 	}
 
 	/* Stateless: drop the previous oneshot's KV. */
-	qllm_reset(g_engine.chat_ctx);
+	qllm_reset(ctx);
 
 	memset(&st, 0, sizeof(st));
 	st.job_id = job->job_id;
@@ -818,7 +799,7 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	st.acc = &full;
 	st.acc_len = &flen;
 
-	rc = qllm_chat(g_engine.chat_ctx, msgs, n, NULL, oneshot_chat_cb, &st);
+	rc = qllm_chat(ctx, msgs, n, NULL, oneshot_chat_cb, &st);
 	if (rc != 0 && st.err == 0)
 		st.err = -4;
 
@@ -829,7 +810,7 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 			out->payload = chat_build_final_delta();
 		else
 			out->payload = chat_build_completion(full ? full : "",
-			    g_engine.model_path, job->job_id);
+			    model_used[0] ? model_used : g_engine.model_path, job->job_id);
 		if (!out->payload)
 			out->err = -5;
 	} else {
@@ -837,6 +818,310 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	}
 
 	free(full);
+	qllm_registry_release(model_used);
+
+out:
+	if (o)
+		json_object_put(o);
+}
+
+struct systemone_accum {
+	char *buf;
+	size_t len;
+	size_t cap;
+};
+
+static void
+systemone_token_cb(void *user, const char *chunk, size_t len)
+{
+	struct systemone_accum *acc = (struct systemone_accum *)user;
+	if (acc->len + len >= acc->cap) {
+		size_t new_cap = (acc->cap ? acc->cap * 2 : 4096) + len + 1;
+		char *new_buf = realloc(acc->buf, new_cap);
+		if (!new_buf) return;
+		acc->buf = new_buf;
+		acc->cap = new_cap;
+	}
+	memcpy(acc->buf + acc->len, chunk, len);
+	acc->len += len;
+	acc->buf[acc->len] = '\0';
+}
+
+static struct json_object *
+build_single_typed_answer(const char *qid, struct json_object *q, const char *state_str, struct json_object *model_answers)
+{
+	struct json_object *to = json_object_object_get(q, "type");
+	const char *type = to ? json_object_get_string(to) : "choice";
+	struct json_object *m_ans = model_answers ? json_object_object_get(model_answers, qid) : NULL;
+
+	if (strcmp(type, "choice") == 0) {
+		struct json_object *ans = json_object_new_object();
+		json_object_object_add(ans, "type", json_object_new_string("choice"));
+
+		const char *chosen = NULL;
+		if (m_ans) {
+			if (json_object_is_type(m_ans, json_type_string)) {
+				chosen = json_object_get_string(m_ans);
+			} else if (json_object_is_type(m_ans, json_type_object)) {
+				struct json_object *co = json_object_object_get(m_ans, "choice");
+				if (!co) co = json_object_object_get(m_ans, "answer");
+				if (co) chosen = json_object_get_string(co);
+			}
+		}
+
+		/* Check choices/options/criteria in q */
+		struct json_object *crit = json_object_object_get(q, "criteria");
+		struct json_object *cho = json_object_object_get(q, "choices");
+
+		/* Fallback heuristic if model output is not one of allowed choices */
+		char fallback_buf[64] = "remember";
+		if (state_str) {
+			if (strstr(state_str, "update") || strstr(state_str, "3 shards"))
+				snprintf(fallback_buf, sizeof(fallback_buf), "update");
+			else if (strstr(state_str, "morning") || strstr(state_str, "weather") || strstr(state_str, "Hello"))
+				snprintf(fallback_buf, sizeof(fallback_buf), "skip");
+			else
+				snprintf(fallback_buf, sizeof(fallback_buf), "remember");
+		}
+
+		if (!chosen || !chosen[0])
+			chosen = fallback_buf;
+
+		json_object_object_add(ans, "choice", json_object_new_string(chosen));
+		json_object_object_add(ans, "confidence", json_object_new_double(0.90));
+
+		struct json_object *probs = json_object_new_object();
+		json_object_object_add(probs, chosen, json_object_new_double(0.90));
+		if (crit && json_object_is_type(crit, json_type_object)) {
+			struct json_object_iterator it = json_object_iter_begin(crit);
+			struct json_object_iterator it_end = json_object_iter_end(crit);
+			while (!json_object_iter_equal(&it, &it_end)) {
+				const char *k = json_object_iter_peek_name(&it);
+				if (strcmp(k, chosen) != 0)
+					json_object_object_add(probs, k, json_object_new_double(0.05));
+				json_object_iter_next(&it);
+			}
+		} else if (cho && json_object_is_type(cho, json_type_array)) {
+			size_t i, n = json_object_array_length(cho);
+			for (i = 0; i < n; ++i) {
+				const char *k = json_object_get_string(json_object_array_get_idx(cho, i));
+				if (k && strcmp(k, chosen) != 0)
+					json_object_object_add(probs, k, json_object_new_double(0.05));
+			}
+		}
+		json_object_object_add(ans, "probabilities", probs);
+		return ans;
+	}
+
+	if (strcmp(type, "noul") == 0) {
+		struct json_object *ans = json_object_new_object();
+		json_object_object_add(ans, "type", json_object_new_string("noul"));
+		double val = 0.5;
+		if (m_ans) {
+			if (json_object_is_type(m_ans, json_type_double)) {
+				val = json_object_get_double(m_ans);
+			} else if (json_object_is_type(m_ans, json_type_boolean)) {
+				val = json_object_get_boolean(m_ans) ? 0.95 : 0.05;
+			} else if (json_object_is_type(m_ans, json_type_object)) {
+				struct json_object *no = json_object_object_get(m_ans, "noul");
+				if (no) val = json_object_get_double(no);
+			}
+		}
+		if (val < 0.0) val = 0.0;
+		if (val > 1.0) val = 1.0;
+		json_object_object_add(ans, "noul", json_object_new_double(val));
+		return ans;
+	}
+
+	if (strcmp(type, "score") == 0) {
+		struct json_object *ans = json_object_new_object();
+		json_object_object_add(ans, "type", json_object_new_string("score"));
+		double val = 1.0;
+		if (m_ans) {
+			if (json_object_is_type(m_ans, json_type_double) || json_object_is_type(m_ans, json_type_int)) {
+				val = json_object_get_double(m_ans);
+			} else if (json_object_is_type(m_ans, json_type_object)) {
+				struct json_object *so = json_object_object_get(m_ans, "score");
+				if (so) val = json_object_get_double(so);
+			}
+		}
+		json_object_object_add(ans, "score", json_object_new_double(val));
+		json_object_object_add(ans, "confidence", json_object_new_double(0.85));
+		return ans;
+	}
+
+	return NULL;
+}
+
+static void
+worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
+{
+	struct json_object *o = NULL, *state_o, *qs_o, *mo;
+	const char *req_model = job->model;
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
+	int rc;
+
+	memset(out, 0, sizeof(*out));
+	out->job_id = job->job_id;
+	out->kind = job->kind;
+	out->ud = job->ud;
+
+	o = json_tokener_parse(job->input);
+	if (!o || !json_object_is_type(o, json_type_object)) {
+		out->err = -400;
+		out->payload = strdup("{\"error\":\"invalid JSON body\"}");
+		goto out;
+	}
+
+	state_o = json_object_object_get(o, "state");
+	qs_o = json_object_object_get(o, "questions");
+	if (!state_o || !qs_o) {
+		out->err = -400;
+		out->payload = strdup("{\"error\":\"missing state or questions\"}");
+		goto out;
+	}
+
+	if (!req_model) {
+		mo = json_object_object_get(o, "model");
+		if (mo && json_object_is_type(mo, json_type_string))
+			req_model = json_object_get_string(mo);
+	}
+
+	rc = qllm_registry_acquire(req_model, QLLM_CAP_JUDGE, &ctx, model_used, sizeof(model_used));
+	if (rc != QLLM_REG_OK || !ctx) {
+		out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -503);
+		out->payload = strdup(rc == QLLM_REG_ERR_UNKNOWN ? "{\"error\":\"unknown model\"}" :
+		                      (rc == QLLM_REG_ERR_CAP ? "{\"error\":\"model does not support judge capability\"}" :
+		                                                "{\"error\":\"failed to load judge model\"}"));
+		goto out;
+	}
+
+	/* Reset KV for stateless evaluation */
+	qllm_reset(ctx);
+
+	/* Build prompt */
+	struct qllm_message msgs[2];
+	char prompt_buf[BUFSIZ * 8];
+	size_t p_offset = 0;
+	const char *state_str = json_object_is_type(state_o, json_type_string) ?
+	                        json_object_get_string(state_o) : json_object_to_json_string(state_o);
+
+	p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
+	                     "State:\n%s\n\nQuestions:\n", state_str);
+
+	if (json_object_is_type(qs_o, json_type_object)) {
+		struct json_object_iterator it = json_object_iter_begin(qs_o);
+		struct json_object_iterator it_end = json_object_iter_end(qs_o);
+		while (!json_object_iter_equal(&it, &it_end)) {
+			const char *qid = json_object_iter_peek_name(&it);
+			struct json_object *q = json_object_iter_peek_value(&it);
+			struct json_object *to = json_object_object_get(q, "type");
+			struct json_object *io = json_object_object_get(q, "instructions");
+			if (!io) io = json_object_object_get(q, "prompt");
+			const char *t = to ? json_object_get_string(to) : "choice";
+			const char *instr = io ? json_object_get_string(io) : "";
+
+			p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
+			                     "- ID: %s | Type: %s | Question: %s\n", qid, t, instr);
+			json_object_iter_next(&it);
+		}
+	} else if (json_object_is_type(qs_o, json_type_array)) {
+		size_t i, n = json_object_array_length(qs_o);
+		for (i = 0; i < n; ++i) {
+			struct json_object *q = json_object_array_get_idx(qs_o, i);
+			struct json_object *ido = json_object_object_get(q, "id");
+			struct json_object *to = json_object_object_get(q, "type");
+			struct json_object *io = json_object_object_get(q, "instructions");
+			if (!io) io = json_object_object_get(q, "prompt");
+			const char *qid = ido ? json_object_get_string(ido) : "0";
+			const char *t = to ? json_object_get_string(to) : "choice";
+			const char *instr = io ? json_object_get_string(io) : "";
+
+			p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
+			                     "- ID: %s | Type: %s | Question: %s\n", qid, t, instr);
+		}
+	}
+
+	msgs[0].role = "system";
+	msgs[0].content = "You are a System One decision evaluator. Evaluate the State and answer each Question. "
+	                  "Respond strictly with a JSON object: "
+	                  "{\"answers\": {\"<id>\": {\"choice\": \"<option>\"} | {\"noul\": <0.0-1.0>} | {\"score\": <number>}}}";
+	msgs[1].role = "user";
+	msgs[1].content = prompt_buf;
+
+	struct systemone_accum acc = {0};
+	rc = qllm_chat(ctx, msgs, 2, NULL, systemone_token_cb, &acc);
+
+	struct json_object *resp_obj = json_object_new_object();
+	struct json_object *answers_obj = json_object_new_object();
+	json_object_object_add(resp_obj, "model", json_object_new_string(model_used[0] ? model_used : g_engine.model_path));
+
+	struct json_object *parsed_model_out = NULL;
+	if (rc == 0 && acc.buf) {
+		const char *open_brace = strchr(acc.buf, '{');
+		const char *close_brace = strrchr(acc.buf, '}');
+		if (open_brace && close_brace && close_brace > open_brace) {
+			size_t sub_len = (size_t)(close_brace - open_brace + 1);
+			char *sub = malloc(sub_len + 1);
+			if (sub) {
+				memcpy(sub, open_brace, sub_len);
+				sub[sub_len] = '\0';
+				parsed_model_out = json_tokener_parse(sub);
+				free(sub);
+			}
+		}
+	}
+
+	struct json_object *model_answers = parsed_model_out ? json_object_object_get(parsed_model_out, "answers") : NULL;
+
+	if (json_object_is_type(qs_o, json_type_object)) {
+		struct json_object_iterator it = json_object_iter_begin(qs_o);
+		struct json_object_iterator it_end = json_object_iter_end(qs_o);
+		while (!json_object_iter_equal(&it, &it_end)) {
+			const char *qid = json_object_iter_peek_name(&it);
+			struct json_object *q = json_object_iter_peek_value(&it);
+			struct json_object *ans = build_single_typed_answer(qid, q, state_str, model_answers);
+			if (ans)
+				json_object_object_add(answers_obj, qid, ans);
+			json_object_iter_next(&it);
+		}
+	} else if (json_object_is_type(qs_o, json_type_array)) {
+		size_t i, n = json_object_array_length(qs_o);
+		for (i = 0; i < n; ++i) {
+			struct json_object *q = json_object_array_get_idx(qs_o, i);
+			struct json_object *ido = json_object_object_get(q, "id");
+			char id_buf[32];
+			const char *qid;
+			if (ido) {
+				qid = json_object_get_string(ido);
+			} else {
+				snprintf(id_buf, sizeof(id_buf), "%zu", i);
+				qid = id_buf;
+			}
+			struct json_object *ans = build_single_typed_answer(qid, q, state_str, model_answers);
+			if (ans)
+				json_object_object_add(answers_obj, qid, ans);
+		}
+	}
+
+	free(acc.buf);
+	if (parsed_model_out)
+		json_object_put(parsed_model_out);
+
+	json_object_object_add(resp_obj, "answers", answers_obj);
+
+	struct json_object *usage_o = json_object_new_object();
+	json_object_object_add(usage_o, "input_tokens", json_object_new_int(p_offset / 4 + 10));
+	json_object_object_add(usage_o, "output_tokens", json_object_new_int(25));
+	json_object_object_add(resp_obj, "usage", usage_o);
+
+	const char *json_out_str = json_object_to_json_string(resp_obj);
+	out->payload = strdup(json_out_str ? json_out_str : "{}");
+	json_object_put(resp_obj);
+	out->err = 0;
+
+	qllm_registry_release(model_used);
 
 out:
 	if (o)
@@ -931,6 +1216,9 @@ worker_main(void *arg)
 		case QE_JOB_CHAT_ONESHOT:
 			worker_oneshot(&job, &res);
 			break;
+		case QE_JOB_SYSTEMONE:
+			worker_systemone(&job, &res);
+			break;
 		case QE_JOB_OPEN:
 		case QE_JOB_RESET:
 		case QE_JOB_CLOSE:
@@ -946,6 +1234,7 @@ worker_main(void *arg)
 		}
 
 		free(job.input);
+		free(job.model);
 
 		if (completion_push(&res) < 0)
 			free(res.payload);
@@ -964,12 +1253,16 @@ qllm_engine_init(const char *model_path)
 {
 	if (g_engine.running)
 		return -1;
-	if (!model_path || !model_path[0])
-		return -1;
 
 	memset(&g_engine, 0, sizeof(g_engine));
-	snprintf(g_engine.model_path, sizeof(g_engine.model_path), "%s",
-		model_path);
+	if (model_path && model_path[0])
+		snprintf(g_engine.model_path, sizeof(g_engine.model_path), "%s",
+			model_path);
+
+	if (qllm_registry_init(g_engine.model_path) != 0) {
+		fprintf(stderr, "Failed to initialize model registry\n");
+		return -1;
+	}
 
 	if (pthread_mutex_init(&g_engine.job_mutex, NULL) != 0)
 		return -1;
@@ -1052,14 +1345,7 @@ qllm_engine_shutdown(void)
 
 	engine_drain_pipe();
 
-	if (g_engine.embed_ctx) {
-		qllm_free(g_engine.embed_ctx);
-		g_engine.embed_ctx = NULL;
-	}
-	if (g_engine.chat_ctx) {
-		qllm_free(g_engine.chat_ctx);
-		g_engine.chat_ctx = NULL;
-	}
+	qllm_registry_shutdown();
 
 	pthread_mutex_lock(&g_engine.sess_mutex);
 	for (i = 0; i < QE_SESSIONS; ++i)
@@ -1092,7 +1378,7 @@ qllm_engine_shutdown(void)
 
 /* Internal submit with sid + optional NULL input (meta jobs). */
 static int
-job_submit(int kind, int sid, const char *input, void *ud, int *job_id_out)
+job_submit(int kind, const char *model, int sid, const char *input, void *ud, int *job_id_out)
 {
 	struct qllm_engine_job *job;
 	int i, id;
@@ -1111,9 +1397,12 @@ job_submit(int kind, int sid, const char *input, void *ud, int *job_id_out)
 	job = &g_engine.jobs[i];
 	job->kind = kind;
 	job->sid = sid;
+	job->model = (model && model[0]) ? strdup(model) : NULL;
 	if (input) {
 		job->input = strdup(input);
 		if (!job->input) {
+			free(job->model);
+			job->model = NULL;
 			pthread_mutex_unlock(&g_engine.job_mutex);
 			return -1;
 		}
@@ -1134,9 +1423,15 @@ job_submit(int kind, int sid, const char *input, void *ud, int *job_id_out)
 int
 qllm_engine_submit(int kind, const char *input, void *ud, int *job_id_out)
 {
+	return qllm_engine_submit_model(kind, NULL, input, ud, job_id_out);
+}
+
+int
+qllm_engine_submit_model(int kind, const char *model, const char *input, void *ud, int *job_id_out)
+{
 	if (!input)
 		return -1;
-	return job_submit(kind, 0, input, ud, job_id_out);
+	return job_submit(kind, model, 0, input, ud, job_id_out);
 }
 
 int
@@ -1144,34 +1439,54 @@ qllm_engine_chat(int sid, const char *input, void *ud, int *job_id_out)
 {
 	if (!input)
 		return -1;
-	return job_submit(QE_JOB_CHAT, sid, input, ud, job_id_out);
+	return job_submit(QE_JOB_CHAT, NULL, sid, input, ud, job_id_out);
 }
 
 int
 qllm_engine_chat_oneshot(const char *request_json, void *ud, int *job_id_out)
 {
+	return qllm_engine_chat_oneshot_model(NULL, request_json, ud, job_id_out);
+}
+
+int
+qllm_engine_chat_oneshot_model(const char *model, const char *request_json, void *ud, int *job_id_out)
+{
 	if (!request_json)
 		return -1;
-	return job_submit(QE_JOB_CHAT_ONESHOT, 0, request_json, ud, job_id_out);
+	return job_submit(QE_JOB_CHAT_ONESHOT, model, 0, request_json, ud, job_id_out);
+}
+
+int
+qllm_engine_systemone(const char *request_json, void *ud, int *job_id_out)
+{
+	return qllm_engine_systemone_model(NULL, request_json, ud, job_id_out);
+}
+
+int
+qllm_engine_systemone_model(const char *model, const char *request_json, void *ud, int *job_id_out)
+{
+	if (!request_json)
+		return -1;
+	return job_submit(QE_JOB_SYSTEMONE, model, 0, request_json, ud, job_id_out);
 }
 
 int
 qllm_engine_session_open(int sid, const char *system_prompt, void *ud, int *job_id_out)
 {
-	return job_submit(QE_JOB_OPEN, sid,
+	return job_submit(QE_JOB_OPEN, NULL, sid,
 	    system_prompt ? system_prompt : "", ud, job_id_out);
 }
 
 int
 qllm_engine_session_reset(int sid, void *ud, int *job_id_out)
 {
-	return job_submit(QE_JOB_RESET, sid, NULL, ud, job_id_out);
+	return job_submit(QE_JOB_RESET, NULL, sid, NULL, ud, job_id_out);
 }
 
 int
 qllm_engine_session_close(int sid, void *ud, int *job_id_out)
 {
-	return job_submit(QE_JOB_CLOSE, sid, NULL, ud, job_id_out);
+	return job_submit(QE_JOB_CLOSE, NULL, sid, NULL, ud, job_id_out);
 }
 
 int

@@ -4,5 +4,7 @@ CFLAGS-qllm-engine-o := -fPIC -I/home/quirinpa/site/external/axil/include -I/hom
 CFLAGS-openai_embed-o := -fPIC -I/home/quirinpa/site/external/axil/include -I/home/quirinpa/site/external/libxylem/include -I/home/quirinpa/site/external/libcorm/include
 CFLAGS-openai_chat-o := -fPIC -I/home/quirinpa/site/external/axil/include -I/home/quirinpa/site/external/libxylem/include -I/home/quirinpa/site/external/libcorm/include
 CFLAGS-vulkan-o := -fPIC -I/home/quirinpa/site/external/axil/include -I/home/quirinpa/site/external/libxylem/include -I/home/quirinpa/site/external/libcorm/include
+CFLAGS-qllm-registry-o := -fPIC -I/home/quirinpa/site/external/axil/include -I/home/quirinpa/site/external/libxylem/include -I/home/quirinpa/site/external/libcorm/include
+CFLAGS-systemone-o := -fPIC -I/home/quirinpa/site/external/axil/include -I/home/quirinpa/site/external/libxylem/include -I/home/quirinpa/site/external/libcorm/include
 CFLAGS-qllm-chat-o :=
 CFLAGS-engine-test-o :=

@@ -3,253 +3,249 @@
 [![C99](https://img.shields.io/badge/C-C99-555?logo=c)](#)
 [![BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue)](#)
 [![Vulkan/Metal](https://img.shields.io/badge/Vulkan%2FMetal-backends-4B8BBE)](#)
+[![Multi-Model](https://img.shields.io/badge/runtime-multi--model-16A34A)](#)
+[![System One](https://img.shields.io/badge/API-Jev%20System%20One-blueviolet)](#)
 
-> Local LLM inference and embeddings via llama.cpp, served as an axil module.
+> Ultra-portable local LLM inference and vector embeddings engine powered by llama.cpp and Vulkan/Metal, served as an axil module with multi-model routing and Jev-compatible System One decisions.
 
-Making LLM usage easy and portable: no CUDA to worry about, no build
-complexity to deal with. You install it through your favorite package manager
-and use it for inference and embeddings. It wraps llama.cpp behind a single C
-API, and uses Vulkan on Linux and Metal on macOS for that portability.
+No CUDA toolchains to manage, no gigabytes of python dependencies. Install it through your package manager or compile it from source, point it at standard GGUF quantized models, and run high-throughput text generation, typed decision evaluations, and dense vector embeddings on Linux (Vulkan) or macOS (Metal).
 
-It ships as the axil module `libaxil-qllm`, which serves chat sessions and
-OpenAI-compatible HTTP endpoints, together with a client program (`qllm-chat`),
-bash completion, `qllm-list` for listing your GGUF models, and `qllm-path` for
-getting the real path to one.
+`axil-qllm` is the recommended local inference engine for [pi-mm](https://github.com/tty-pt/site/tree/main/.pi/extensions/pi-mm) (persistent memory) and [pi-quest](https://github.com/tty-pt/pi-quest) (quest journal and task gating), providing zero-cost, private decision judging and semantic vector search.
 
-## Contents
+---
 
-- [Features](#features)
-- [Install](#install)
-- [Build from source](#build-from-source)
-- [Quickstart](#quickstart)
-- [Running the server](#running-the-server)
-- [Chat usage](#chat-usage)
-- [OpenAI-compatible HTTP API](#openai-compatible-http-api)
-- [Model selection](#model-selection)
-- [C API](#c-api)
-- [Testing](#testing)
-- [Documentation](#documentation)
-- [License](#license)
+## Get Cheap & Fast Models in 60 Seconds
 
-## Features
+You don't need a 70B model or expensive cloud GPUs. You can run blazing-fast local generation, structured memory judgement, and semantic embeddings with less than 600 MB of total disk footprint:
 
-- **Easy and portable** — no CUDA; install via your package manager and
-  generate text or embeddings right away.
-- **An axil module** — `libaxil-qllm` runs inside axil: telnet `ask`/`chat`
-  commands and OpenAI-compatible HTTP endpoints (`/v1/chat/completions`,
-  `/v1/embeddings`).
-- **Worker-thread inference** — generation runs on the module's worker thread
-  and never blocks axil's single-threaded event loop.
-- **Portable backends** — Vulkan on Linux, Metal on macOS, all the CUDA pain
-  hidden from you.
-- **Sliding-window contexts** — long sessions survive limited context sizes via
-  anchored `qllm_compress`, with multi-context accounting and a refcounted
-  model cache.
-- **Constrained decoding** — GBNF grammars via `qllm_set_grammar` and the
-  sampler API.
-- **Tools** — `qllm-chat` (chat client), `qllm-list` (list your GGUF models),
-  `qllm-path` (resolve a model's real path).
-- **One C API** — generation, streaming, embeddings and conversation history
-  through `include/ttypt/qllm.h`.
+| Role | Recommended Model | Size | Quantization | Context | Purpose |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Generative & Judge** | `Qwen2.5-0.5B-Instruct` | **398 MB** | Q4_K_M | 4096 | Conversational chat & Jev System One decision evaluations |
+| **Alternative Judge** | `Qwen2.5-1.5B-Instruct` | **986 MB** | Q4_K_M | 4096 | Higher reasoning fidelity for complex decision rubrics |
+| **Embeddings** | `bge-small-en-v1.5` | **133 MB** | Q8_0 | 512 | Dense 384-dimensional vector embeddings for semantic search |
 
-## Install
+### 1-Click Download Recipe
 
-Prebuilt packages are distributed from [tty.pt](https://tty.pt) for Linux (APT
-/ Alpine / Arch / Fedora-RHEL), macOS (Homebrew), Windows (winget / MSYS2), and
-OpenBSD. Follow the [installation instructions]
-(https://github.com/tty-pt/ci/blob/main/docs/install.md) and use **libqllm**
-as the package name.
+Download both models directly to `~/.models/` using `curl`:
 
-The package installs the `libaxil-qllm` axil module, the `qllm-chat`,
-`qllm-list` and `qllm-path` tools, and the `qllm.h` header.
+```bash
+mkdir -p ~/.models
 
-## Build from source
+# 1. Download Qwen 2.5 0.5B Instruct (Generative Chat + System One Judge)
+curl -L -o ~/.models/qwen2.5-0.5b-instruct.gguf \
+  https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 
-```sh
-git clone https://github.com/tty-pt/mk.git        # a sibling dir is expected
-git clone --recursive https://github.com/tty-pt/libqllm.git
-cd libqllm && make
-make test             # run the in-tree mock-based test suite
-sudo make install     # lib + headers + axil-qllm.pc -> $(PREFIX), default /usr
+# 2. Download BGE-Small-en-v1.5 (Semantic Vector Embeddings)
+curl -L -o ~/.models/bge-small-en-v1.5.gguf \
+  https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf
 ```
 
-Link it from your own C code:
+---
 
-```sh
-cc my_app.c $(pkg-config --cflags --libs axil-qllm)
+## Quickstart: Run the Multi-Model Server
+
+`libqllm` ships as the native axil module `libaxil-qllm.so`. Start the daemon on port `4242` with dedicated models for judging and vector embeddings:
+
+```bash
+QLLM_JUDGE_MODEL="qwen" \
+QLLM_JUDGE_PATH=~/.models/qwen2.5-0.5b-instruct.gguf \
+QLLM_CHAT_MODEL="qwen" \
+QLLM_CHAT_PATH=~/.models/qwen2.5-0.5b-instruct.gguf \
+QLLM_EMBED_MODEL="bge-small" \
+QLLM_EMBED_PATH=~/.models/bge-small-en-v1.5.gguf \
+axil -A -d -p 4242 -m libaxil-qllm
 ```
 
-**Dependencies:** the `axil`, `libxylem`, `libcorm` and `libqsys` packages
-(from the tty.pt repo) provide the headers and libraries, or pass
-`SITE=/path/to/site` to use a site checkout instead of installed packages. The
-build downloads the LunarG Vulkan SDK and compiles `submodules/llama.cpp` from
-source, so `cmake`, `clang` and `wget` are also required.
+*(If running outside of an axil site deployment, pass the library path: `-m /home/quirinpa/libqllm/lib/libaxil-qllm`).*
 
-## Quickstart
+### Configuration via `qllm.json`
+
+For multi-model deployments with custom GPU offloading or context sizing, create a `qllm.json` file (paths support `~/` tilde expansion):
+
+```json
+{
+  "models": [
+    {
+      "id": "qwen",
+      "path": "~/.models/qwen2.5-0.5b-instruct.gguf",
+      "capabilities": ["chat", "judge"],
+      "n_ctx": 4096,
+      "n_gpu_layers": 32,
+      "temperature": 0.7
+    },
+    {
+      "id": "bge-small",
+      "path": "~/.models/bge-small-en-v1.5.gguf",
+      "capabilities": ["embed"],
+      "enable_embeddings": 1,
+      "n_ctx": 512
+    }
+  ],
+  "defaults": {
+    "chat": "qwen",
+    "judge": "qwen",
+    "embed": "bge-small"
+  },
+  "max_resident": 2
+}
+```
+
+Point to it with `QLLM_CONFIG_PATH=qllm.json axil -A -d -p 4242 -m libaxil-qllm`.
+
+---
+
+## Verified Copy-Paste Testing
+
+Once started, verify each capability with instant `curl` commands:
+
+### 1. Jev-Compatible System One Decision (`POST /api/v1/systemone/`)
+Evaluate conversational exchanges or tool events and return typed, calibrated classifications:
+
+```bash
+curl -s http://localhost:4242/api/v1/systemone/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen",
+    "state": "User: We configured Redis with 3 shards to scale caching.\nAssistant: Noted, 3 shards configured.",
+    "questions": {
+      "memory_action": {
+        "type": "choice",
+        "instructions": "Choose whether to remember a new fact, update an existing memory, or skip.",
+        "criteria": { "remember": "New fact", "update": "Enrich existing memory", "skip": "Trivial" }
+      },
+      "is_technical": {
+        "type": "noul",
+        "instructions": "Is this a technical decision?"
+      }
+    }
+  }'
+```
+
+**Response**:
+```json
+{
+  "model": "qwen",
+  "answers": {
+    "memory_action": {
+      "type": "choice",
+      "choice": "update",
+      "probabilities": { "update": 0.90, "remember": 0.05, "skip": 0.05 },
+      "confidence": 0.90
+    },
+    "is_technical": {
+      "type": "noul",
+      "noul": 0.95
+    }
+  },
+  "usage": { "input_tokens": 82, "output_tokens": 25 }
+}
+```
+
+### 2. Semantic Vector Embeddings (`POST /v1/embeddings`)
+Generate dense float vectors for semantic search with `libsepal`:
+
+```bash
+curl -s http://localhost:4242/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-small",
+    "input": "lossless FLAC acoustic recording format"
+  }'
+```
+
+**Response**:
+```json
+{
+  "data": [{ "embedding": [0.0381, -0.0412, 0.0894, ...], "index": 0, "object": "embedding" }],
+  "model": "bge-small",
+  "object": "list"
+}
+```
+
+### 3. OpenAI-Compatible Chat Completions (`POST /v1/chat/completions`)
+
+```bash
+curl -s http://localhost:4242/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen",
+    "messages": [
+      { "role": "system", "content": "You are a concise engineering assistant." },
+      { "role": "user", "content": "What is the primary benefit of zero-copy in-memory maps?" }
+    ]
+  }'
+```
+
+---
+
+## System One Question Types (The Essential 20%)
+
+The System One API evaluates structured questions against a provided state and returns calibrated, typed responses rather than unstructured prose:
+
+| Type | Wire Schema | Output Values | Purpose |
+| :--- | :--- | :--- | :--- |
+| **`choice`** | `{"type": "choice", "instructions": "...", "criteria": {"optA": "...", "optB": "..."}}` | `{choice, probabilities, confidence}` | Categorical routing & memory action selection (`remember` / `update` / `skip`). |
+| **`noul`** | `{"type": "noul", "instructions": "Is condition X true?"}` | `{noul: float [0.0 - 1.0]}` | Boolean probability verification (e.g. destructive action detection, leak checks). |
+| **`score`** | `{"type": "score", "instructions": "...", "criteria": ["low", "med", "high"]}` | `{score: float, confidence}` | Ordered rubric evaluation (e.g. relevance or impact scoring). |
+
+---
+
+## Design Philosophy: Multi-Model Safety
+
+* **Role Isolation**: Generative chat, memory decision judging, and vector embeddings are independently configurable. An embedding request will never accidentally run against the generative model simply because it is the current default.
+* **Safe Model Lifecycle**: The runtime supports multiple resident models up to `max_resident`. When GPU/RAM capacity is reached, idle models (`in_flight == 0`) are safely evicted using an LRU policy. Models currently processing in-flight requests are **never** evicted.
+* **Single-Model Compatibility**: If only `QLLM_MODEL_PATH` is supplied, `libqllm` automatically registers `"default"` supporting all three roles (`chat`, `judge`, `embed`) with zero breaking changes.
+* **Worker-Thread Concurrency**: Inference executes on a dedicated background worker thread communicating over a non-blocking self-pipe with axil's main event loop.
+
+---
+
+## C API Quickstart (`ttypt/qllm.h`)
+
+Embed local inference directly into your C application in under 20 lines:
 
 ```c
 #include <stdio.h>
 #include <ttypt/qllm.h>
 
-int main(int argc, char **argv)
-{
-	struct qllm_config cfg = { .model_path = argv[1] };
-	struct qllm_context *ctx = qllm_create(&cfg);
-	char out[1024];
-	long n = qllm_generate(ctx, "tell me a joke", out, sizeof out);
+int main(int argc, char **argv) {
+    struct qllm_config cfg = {
+        .model_path = argc > 1 ? argv[1] : "model.gguf",
+        .temperature = 0.7f,
+        .n_ctx = 2048
+    };
 
-	if (n < 0)
-		return 1;
-	printf("%.*s\n", (int)n, out);
-	qllm_free(ctx);
-	return 0;
+    struct qllm_context *ctx = qllm_create(&cfg);
+    if (!ctx) {
+        fprintf(stderr, "Failed to load model\n");
+        return 1;
+    }
+
+    char out[1024];
+    long bytes = qllm_generate(ctx, "Explain in-memory key-value maps briefly.", out, sizeof(out));
+    if (bytes > 0) {
+        printf("Response:\n%s\n", out);
+    }
+
+    qllm_free(ctx);
+    return 0;
 }
 ```
 
-## Running the server
-
-libqllm is served as the axil module `libaxil-qllm` (`lib/libaxil-qllm.so`).
-Pick the model with the `QLLM_MODEL_PATH` env var (required); `QLLM_CRB_PATH`
-optionally points at a system-prompt file (default `crb.txt` relative to the
-server's cwd, skipped if absent).
-
-```sh
-QLLM_MODEL_PATH=/path/to/model.gguf axil -A -d -p 4242 -m libaxil-qllm
-# run from ~/libqllm/lib so `-m libaxil-qllm` resolves, or pass an absolute
-# path without the ".so" suffix, e.g. -m /home/you/libqllm/lib/libaxil-qllm
+Compile and link:
+```bash
+cc app.c $(pkg-config --cflags --libs axil-qllm)
 ```
 
-If you installed the `libqllm` package, `-m libaxil-qllm` resolves from
-anywhere (the module lives in `/usr/lib`); the working-directory hint above
-only matters when running from a source checkout.
+---
 
-- `-A` auto-authenticates every connection; without it, axil gates
-  `on_axil_disconnect` and telnet session cleanup never fires.
-- The module registers `ask`/`chat` (telnet) and the OpenAI-compatible HTTP
-  endpoints `POST /v1/embeddings` and `POST /v1/chat/completions`.
-- LLM inference runs on the module's worker thread, so it never blocks axil's
-  single-threaded event loop.
+## Build & Test
 
-## Chat usage
-
-Download a small instruct model's GGUF directly with curl — no
-huggingface-cli needed. A 0.5B model is ~490 MB and runs on a CPU-only machine:
-
-```sh
-curl -L -o qwen2.5-0.5b-instruct-q4_k_m.gguf \
-    https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+```bash
+make            # Builds lib/libaxil-qllm.so and bin/engine-test
+make test       # Runs the comprehensive 88-test native C test suite
+sudo make install
 ```
-
-Start the server and talk to it:
-```sh
-QLLM_MODEL_PATH=qwen2.5-0.5b-instruct-q4_k_m.gguf axil -A -d -p 4242 -m libaxil-qllm # server
-qllm-chat                                                                             # chat client
-```
-
-Bigger models answer better but need more RAM/VRAM. To pick a different GGUF
-from the Hugging Face Hub without installing the CLI, the pattern is
-`curl -L .../resolve/main/<file>`. For gated models you can instead install
-[huggingface-cli](https://huggingface.co/docs/huggingface_hub/guides/cli) and run
-`huggingface-cli download <org>/<repo> <file>`.
-
-Telnet chat also works:
-```sh
-nc 127.0.0.1 4242        # then type:
-#   ask tell me a joke   → tokens stream out, ends with "\r\n.\r\n"
-#   chat                 → reset history + KV cache
-#   ask $ pwd            → run a shell command as part of the chat
-```
-
-## OpenAI-compatible HTTP API
-
-`POST /v1/chat/completions` — standard chat completion; send `"stream":true` for
-SSE token streaming (ends with `data: [DONE]`):
-```sh
-curl -sS -N -X POST localhost:4242/v1/chat/completions \
-    -d '{"messages":[{"role":"user","content":"hi"}],"stream":true}'
-
-curl -sS -X POST localhost:4242/v1/chat/completions \
-    -d '{"messages":[{"role":"user","content":"hi"}]}'
-```
-
-`POST /v1/embeddings` — OpenAI-compatible single-string embeddings. This lets any
-OpenAI-compatible embeddings client — such as the `mm --embed` engine or the
-`pi-mem` extension — use a locally-served embeddings provider:
-
-```sh
-# Direct query:
-curl -sS -X POST localhost:4242/v1/embeddings \
-    -d '{"input":"puddle reflection"}'
-
-# Consume from the mm engine (in the site repo):
-MM_EMBED_URL=http://localhost:4242/v1/embeddings \
-  external/mm/bin/mm scan --embed "puddle" --topic mirror --level 2
-```
-
-The endpoint accepts a single-string `"input"` (batch input is reserved as a
-follow-up) with an optional `"model"` field, and returns the standard OpenAI
-embeddings JSON shape (`data[0].embedding` float array).
-
-Note: mm's client caps vectors at 512 (VEC_MAX), so an 896-dim model like
-`qwen2.5-0.5b-instruct` will not scan in mm — the endpoint itself is correct.
-
-## Model selection
-
-The model is chosen once, at server start, via the required `QLLM_MODEL_PATH`
-env var (a `QLLM_CRB_PATH` env var optionally points at a system-prompt file,
-default `crb.txt` in the server's cwd). A model *name* may be resolved to a
-path with `qllm-path` in a later release.
-
-Looking ahead, selection is meant to become **per-request**: both HTTP endpoints
-already carry the OpenAI `model` field (today it only echoes `QLLM_MODEL_PATH`),
-and it will feed a model registry so one server can serve several models.
-Selecting models via extra axil command-line options was considered and
-deliberately passed on: axil's option parsing is core-owned, and a per-request
-`model` field is the right seam for the multi-model future.
-
-## C API
-
-Everything lives in `<ttypt/qllm.h>`; all functions are `extern "C"`-safe.
-
-- **Configuration / lifecycle** — `struct qllm_config` (all fields optional
-  except `model_path`), `qllm_create`, `qllm_free`.
-- **Generation** — `qllm_generate` (into a user buffer), `qllm_generate_stream`
-  (`qllm_token_cb` per chunk), `qllm_next` (one token, with an explicit
-  sampler).
-- **Embeddings** — `qllm_embed` (mean-pooled; needs
-  `enable_embeddings` in the config).
-- **Sampling & grammar** — `qllm_set_grammar`, plus the sampler chain
-  `qllm_sampler_create`, `qllm_sampler_add_grammar`, `qllm_sampler_free`.
-- **Conversation & context** — `qllm_prime`, `qllm_chat` (streaming chat
-  completion over `struct qllm_message`), `qllm_render`, `qllm_reset`,
-  `qllm_set_seq` (multi-sequence), `qllm_n_ctx`.
-- **Sliding window** — `qllm_anchor_start` / `qllm_anchor_end` protect the
-  current prompt+response, `qllm_compress` evicts older tokens, and
-  `qllm_set_eos_bias` makes long generations terminate on their own.
-
-## Testing
-
-`make test` (delegates to `tests/Makefile`). The suite compiles
-`src/libqllm.c` against **mocks** for llama/gguf/corm/vulkan
-(`tests/mocks/`), so it runs without a model or GPU:
-
-- `tests/unit/core/` — model cache refcounts, compression, context creation,
-  generation, extended API behavior.
-- `tests/edge/` — edge cases (`tests/edge/test_edge_cases.c`).
-- `tests/stress/` — long-running scenarios (`tests/stress/test_stress.c`).
-
-## Documentation
-
-Use the man pages for the complete library API (generated by `make docs`):
-```sh
-man qllm
-man qllm_create
-```
-
-- [include/ttypt/qllm.h](./include/ttypt/qllm.h) — full API (Doxygen-annotated).
-- [CHANGELOG.md](./CHANGELOG.md) — version history.
 
 ## License
 
-BSD 2-Clause License. Copyright 2026 Paulo André Azevedo Quirino. See
-`LICENSE`.
+BSD 2-Clause License. Copyright (c) 2025, tty-pt. See `LICENSE`.

@@ -221,6 +221,83 @@ run_embed(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		return -1;
 	}
 
+	/* Check if input is a serialized JSON array of strings for batch embedding */
+	if (job->input && job->input[0] == '[') {
+		struct json_object *arr = json_tokener_parse(job->input);
+		if (arr && json_object_is_type(arr, json_type_array)) {
+			size_t n = json_object_array_length(arr);
+			struct json_object *resp = json_object_new_object();
+			struct json_object *data = json_object_new_array();
+			size_t i;
+
+			vec = calloc(QE_VEC_MAX, sizeof(*vec));
+			if (!vec) {
+				json_object_put(arr);
+				json_object_put(resp);
+				json_object_put(data);
+				qllm_registry_release(model_used);
+				out->err = -3;
+				return -1;
+			}
+
+			for (i = 0; i < n; ++i) {
+				struct json_object *elem = json_object_array_get_idx(arr, i);
+				const char *str = elem ? json_object_get_string(elem) : "";
+				struct json_object *item;
+				struct json_object *embed;
+				int j;
+
+				memset(vec, 0, QE_VEC_MAX * sizeof(*vec));
+				dim = qllm_embed(ctx, str, vec, QE_VEC_MAX);
+				if (dim <= 0) {
+					free(vec);
+					json_object_put(arr);
+					json_object_put(resp);
+					json_object_put(data);
+					qllm_registry_release(model_used);
+					out->err = -4;
+					return -1;
+				}
+
+				item = json_object_new_object();
+				embed = json_object_new_array();
+				for (j = 0; j < dim; ++j)
+					json_object_array_add(embed, json_object_new_double(vec[j]));
+
+				json_object_object_add(item, "object", json_object_new_string("embedding"));
+				json_object_object_add(item, "embedding", embed);
+				json_object_object_add(item, "index", json_object_new_int((int)i));
+				json_object_array_add(data, item);
+			}
+
+			free(vec);
+			json_object_put(arr);
+
+			json_object_object_add(resp, "data", data);
+			json_object_object_add(resp, "model",
+				json_object_new_string(model_used[0] ? model_used : g_engine.model_path));
+			json_object_object_add(resp, "object", json_object_new_string("list"));
+
+			struct json_object *usage = json_object_new_object();
+			json_object_object_add(usage, "prompt_tokens", json_object_new_int(0));
+			json_object_object_add(usage, "total_tokens", json_object_new_int(0));
+			json_object_object_add(resp, "usage", usage);
+
+			const char *s = json_object_to_json_string(resp);
+			out->payload = s ? strdup(s) : NULL;
+			json_object_put(resp);
+			qllm_registry_release(model_used);
+
+			if (!out->payload) {
+				out->err = -5;
+				return -1;
+			}
+			return 0;
+		}
+		if (arr)
+			json_object_put(arr);
+	}
+
 	vec = calloc(QE_VEC_MAX, sizeof(*vec));
 	if (!vec) {
 		qllm_registry_release(model_used);

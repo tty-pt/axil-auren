@@ -73,6 +73,11 @@ void qllm_registry_release(const char *model_id);
 const struct qllm_model_entry *qllm_registry_find(const char *model_id);
 const struct qllm_model_entry *qllm_registry_find_for_cap(uint32_t cap, const char *model_id);
 
+struct json_object;
+
+/* Build OpenAI-compatible JSON list of all registered models. Caller must json_object_put(). */
+struct json_object *qllm_registry_models_json(void);
+
 /* Unload all loaded contexts and reset registry. */
 void qllm_registry_shutdown(void);
 

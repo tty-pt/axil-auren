@@ -102,6 +102,12 @@ qllm_embed(struct qllm_context *ctx,
 	   size_t out_dim);
 
 /**
+ * Get the model embedding dimension (returns 0 if ctx invalid).
+ */
+int
+qllm_n_embd(struct qllm_context *ctx);
+
+/**
  * Prime the context with a prompt.
  *
  * Returns:

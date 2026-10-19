@@ -48,6 +48,26 @@ TEST(qllm_n_ctx_basic)
 	qllm_free(ctx);
 }
 
+TEST(qllm_n_embd_basic)
+{
+	struct qllm_config cfg = {
+		.model_path = "/fake/model.gguf",
+		.n_ctx = 1024,
+		.n_threads = 1,
+	};
+
+	mock_llama_init();
+	mock_corm_init();
+
+	ASSERT_EQ(qllm_n_embd(NULL), 0);
+
+	struct qllm_context *ctx = qllm_create(&cfg);
+	ASSERT_NOT_NULL(ctx);
+	ASSERT_EQ(qllm_n_embd(ctx), 4096);
+
+	qllm_free(ctx);
+}
+
 TEST(qllm_set_seq_basic)
 {
 	struct qllm_config cfg = {

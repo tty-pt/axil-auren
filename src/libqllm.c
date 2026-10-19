@@ -1031,6 +1031,14 @@ qllm_n_ctx(struct qllm_context *qctx)
 	return qctx->max_tokens;
 }
 
+int
+qllm_n_embd(struct qllm_context *qctx)
+{
+	if (!QLLM_VALID(qctx))
+		return 0;
+	return (int)qctx->n_embd;
+}
+
 struct llama_sampler *
 qllm_sampler_create(struct qllm_context *qctx,
 		    const struct qllm_config *cfg)

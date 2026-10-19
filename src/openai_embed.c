@@ -32,7 +32,8 @@ static int
 handler_embeddings(socket_t cfd, char *body)
 {
 	struct json_object *req = NULL, *input_obj;
-	const char *input;
+	const char *input = NULL;
+	char *serialized_arr = NULL;
 	void *handle;
 
 	if (!body || !body[0]) {
@@ -47,15 +48,37 @@ handler_embeddings(socket_t cfd, char *body)
 	}
 
 	input_obj = json_object_object_get(req, "input");
-	if (!input_obj || !json_object_is_type(input_obj, json_type_string)) {
-		embed_respond_error(cfd, 400,
-		    "missing or invalid \"input\" (expected a string)");
+	if (!input_obj) {
+		embed_respond_error(cfd, 400, "missing \"input\" field");
 		goto out;
 	}
 
-	input = json_object_get_string(input_obj);
-	if (!input || !input[0]) {
-		embed_respond_error(cfd, 400, "\"input\" must not be empty");
+	if (json_object_is_type(input_obj, json_type_string)) {
+		input = json_object_get_string(input_obj);
+		if (!input || !input[0]) {
+			embed_respond_error(cfd, 400, "\"input\" must not be empty");
+			goto out;
+		}
+	} else if (json_object_is_type(input_obj, json_type_array)) {
+		size_t arr_len = json_object_array_length(input_obj);
+		size_t i;
+		if (arr_len == 0) {
+			embed_respond_error(cfd, 400, "\"input\" array must not be empty");
+			goto out;
+		}
+		for (i = 0; i < arr_len; ++i) {
+			struct json_object *elem = json_object_array_get_idx(input_obj, i);
+			if (!elem || !json_object_is_type(elem, json_type_string)) {
+				embed_respond_error(cfd, 400,
+				    "each element in \"input\" array must be a string");
+				goto out;
+			}
+		}
+		serialized_arr = strdup(json_object_to_json_string(input_obj));
+		input = serialized_arr;
+	} else {
+		embed_respond_error(cfd, 400,
+		    "missing or invalid \"input\" (expected a string or array of strings)");
 		goto out;
 	}
 
@@ -90,6 +113,7 @@ handler_embeddings(socket_t cfd, char *body)
 	}
 
 out:
+	free(serialized_arr);
 	if (req)
 		json_object_put(req);
 	return 0;

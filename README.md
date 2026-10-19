@@ -58,6 +58,8 @@ axil -A -d -p 4242 -m libaxil-qllm
 
 *(If running outside of an axil site deployment, pass the library path: `-m /home/quirinpa/libqllm/lib/libaxil-qllm`).*
 
+> **Tip — Automatic Model Deduplication**: If `QLLM_CHAT_PATH` and `QLLM_JUDGE_PATH` point to the identical canonical model file and explicit IDs (`QLLM_CHAT_MODEL`, `QLLM_JUDGE_MODEL`) are omitted, `libqllm` automatically merges capabilities into a single shared resident model instance (`<stem>-shared`, e.g. `qwen-shared`), preventing redundant VRAM allocation.
+
 ### Configuration via `qllm.json`
 
 For multi-model deployments with custom GPU offloading or context sizing, create a `qllm.json` file (paths support `~/` tilde expansion):
@@ -90,7 +92,25 @@ For multi-model deployments with custom GPU offloading or context sizing, create
 }
 ```
 
-Point to it with `QLLM_CONFIG_PATH=qllm.json axil -A -d -p 4242 -m libaxil-qllm`.
+Point to it with `QLLM_CONFIG_PATH=/path/to/qllm.json axil -A -d -p 4242 -m libaxil-qllm`.
+
+#### Configuration Discovery & Search Order
+
+When `QLLM_CONFIG_PATH` is specified, `libqllm` attempts to read that exact path (with tilde `~` expansion). If unset, `libqllm` automatically discovers configuration files in the following priority order:
+1. `./qllm.json` (current working directory)
+2. `~/.config/qllm/config.json` (standard user configuration directory)
+3. `~/.qllm.json` (user home directory)
+
+The first readable configuration file is loaded. If `QLLM_CONFIG_PATH` is explicitly set but unreadable, an error is logged via `qsyslog(QLOG_ERR, ...)`.
+
+#### Inline `QLLM_MODELS` (Bare Array or Object)
+
+For containerized environments or one-liner launches, `QLLM_MODELS` accepts either a full configuration object or a bare JSON array of models:
+
+```bash
+QLLM_MODELS='[{"id":"qwen","path":"~/.models/qwen2.5-0.5b-instruct.gguf","capabilities":["chat","judge"]},{"id":"bge-small","path":"~/.models/bge-small-en-v1.5.gguf","capabilities":["embed"]}]' \
+axil -A -d -p 4242 -m libaxil-qllm
+```
 
 ---
 
@@ -142,14 +162,23 @@ curl -s http://localhost:4242/api/v1/systemone/ \
 ```
 
 ### 2. Semantic Vector Embeddings (`POST /v1/embeddings`)
-Generate dense float vectors for semantic search with `libsepal`:
+Generate dense float vectors for semantic search with `libsepal`. Supports single strings or batch arrays:
 
 ```bash
+# Single string:
 curl -s http://localhost:4242/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{
     "model": "bge-small",
     "input": "lossless FLAC acoustic recording format"
+  }'
+
+# Or batch array:
+curl -s http://localhost:4242/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-small",
+    "input": ["lossless FLAC acoustic format", "in-memory zero-copy vectors"]
   }'
 ```
 
@@ -175,6 +204,40 @@ curl -s http://localhost:4242/v1/chat/completions \
     ]
   }'
 ```
+
+### 4. Model Discovery (`GET /v1/models`)
+OpenAI-compatible model listing for automated client and SDK discovery:
+
+```bash
+curl -s http://localhost:4242/v1/models
+```
+
+**Response**:
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "qwen", "object": "model", "owned_by": "local" },
+    { "id": "bge-small", "object": "model", "owned_by": "local" }
+  ]
+}
+```
+
+### 5. Interactive Terminal Chat (`qllm-chat`)
+
+Talk directly to the running server from the command line:
+
+```bash
+# Connect to localhost:4242 (or configure port via QLLM_PORT)
+qllm-chat
+
+# Or specify a custom port:
+QLLM_PORT=4242 qllm-chat
+```
+
+Additional CLI utilities:
+- `qllm-list [filter]` — List local GGUF models cached in `~/.cache/huggingface/hub/` with sizes and hashes.
+- `qllm-path <pattern>` — Print the resolved filesystem path for a cached GGUF model.
 
 ---
 
@@ -242,7 +305,7 @@ cc app.c $(pkg-config --cflags --libs axil-qllm)
 
 ```bash
 make            # Builds lib/libaxil-qllm.so and bin/engine-test
-make test       # Runs the comprehensive 88-test native C test suite
+make test       # Runs the comprehensive 91-test native C test suite
 sudo make install
 ```
 

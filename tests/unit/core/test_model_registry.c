@@ -2,6 +2,8 @@
 
 #include "../framework/test_utils.h"
 #include "../../src/qllm-registry.h"
+#include <json-c/json.h>
+#include <stdlib.h>
 #include <string.h>
 
 TEST(model_registry_add_and_find)
@@ -166,6 +168,127 @@ TEST(model_registry_legacy_fallback)
 	ASSERT_STR_EQ(def_j, "default");
 	const char *def_e = qllm_registry_default_id(QLLM_CAP_EMBED);
 	ASSERT_STR_EQ(def_e, "default");
+
+	qllm_registry_shutdown();
+}
+
+TEST(model_registry_models_json)
+{
+	struct qllm_config cfg;
+	memset(&cfg, 0, sizeof(cfg));
+
+	qllm_registry_init(NULL);
+
+	qllm_registry_add("qwen-chat", "/models/qwen.gguf", QLLM_CAP_CHAT, &cfg);
+	qllm_registry_add("bge-embed", "/models/bge.gguf", QLLM_CAP_EMBED, &cfg);
+
+	struct json_object *models = qllm_registry_models_json();
+	ASSERT_NOT_NULL(models);
+
+	struct json_object *obj_type = json_object_object_get(models, "object");
+	ASSERT_NOT_NULL(obj_type);
+	ASSERT_STR_EQ(json_object_get_string(obj_type), "list");
+
+	struct json_object *data = json_object_object_get(models, "data");
+	ASSERT_NOT_NULL(data);
+	ASSERT_EQ((int)json_object_array_length(data), 2);
+
+	struct json_object *m1 = json_object_array_get_idx(data, 0);
+	ASSERT_NOT_NULL(m1);
+	struct json_object *id1 = json_object_object_get(m1, "id");
+	ASSERT_NOT_NULL(id1);
+	ASSERT_STR_EQ(json_object_get_string(id1), "qwen-chat");
+
+	struct json_object *m2 = json_object_array_get_idx(data, 1);
+	ASSERT_NOT_NULL(m2);
+	struct json_object *id2 = json_object_object_get(m2, "id");
+	ASSERT_NOT_NULL(id2);
+	ASSERT_STR_EQ(json_object_get_string(id2), "bge-embed");
+
+	json_object_put(models);
+	qllm_registry_shutdown();
+}
+
+TEST(model_registry_bare_array_json)
+{
+	const char *bare_array = "["
+		"{\"id\":\"qwen-bare\",\"path\":\"/models/qwen-bare.gguf\",\"capabilities\":[\"chat\"]},"
+		"{\"id\":\"bge-bare\",\"path\":\"/models/bge-bare.gguf\",\"capabilities\":[\"embed\"]}"
+	"]";
+
+	setenv("QLLM_MODELS", bare_array, 1);
+	int rc = qllm_registry_init(NULL);
+	unsetenv("QLLM_MODELS");
+
+	ASSERT_EQ(rc, 0);
+
+	const struct qllm_model_entry *m1 = qllm_registry_find("qwen-bare");
+	ASSERT_NOT_NULL(m1);
+	ASSERT_STR_EQ(m1->id, "qwen-bare");
+	ASSERT_STR_EQ(m1->path, "/models/qwen-bare.gguf");
+	ASSERT_EQ((int)m1->capabilities, (int)QLLM_CAP_CHAT);
+
+	const struct qllm_model_entry *m2 = qllm_registry_find("bge-bare");
+	ASSERT_NOT_NULL(m2);
+	ASSERT_STR_EQ(m2->id, "bge-bare");
+	ASSERT_STR_EQ(m2->path, "/models/bge-bare.gguf");
+	ASSERT_EQ((int)m2->capabilities, (int)QLLM_CAP_EMBED);
+
+	qllm_registry_shutdown();
+}
+
+TEST(model_registry_config_diagnostics)
+{
+	/* Test malformed JSON does not crash */
+	setenv("QLLM_MODELS", "{ malformed json string: [", 1);
+	int rc = qllm_registry_init(NULL);
+	unsetenv("QLLM_MODELS");
+	ASSERT_EQ(rc, -1);
+	qllm_registry_shutdown();
+
+	/* Test unreadable / nonexistent QLLM_CONFIG_PATH logs error and does not crash */
+	setenv("QLLM_CONFIG_PATH", "/nonexistent/path/to/nonexistent-config.json", 1);
+	rc = qllm_registry_init(NULL);
+	unsetenv("QLLM_CONFIG_PATH");
+	ASSERT_EQ(rc, -1);
+	qllm_registry_shutdown();
+}
+
+TEST(model_registry_env_path_deduplication)
+{
+	setenv("QLLM_CHAT_PATH", "/models/qwen.gguf", 1);
+	setenv("QLLM_JUDGE_PATH", "/models/qwen.gguf", 1);
+	unsetenv("QLLM_CHAT_MODEL");
+	unsetenv("QLLM_JUDGE_MODEL");
+
+	int rc = qllm_registry_init(NULL);
+	unsetenv("QLLM_CHAT_PATH");
+	unsetenv("QLLM_JUDGE_PATH");
+
+	ASSERT_EQ(rc, 0);
+
+	/* Should be assigned shared ID 'qwen-shared' */
+	const struct qllm_model_entry *m = qllm_registry_find("qwen-shared");
+	ASSERT_NOT_NULL(m);
+	ASSERT_STR_EQ(m->id, "qwen-shared");
+	ASSERT_STR_EQ(m->path, "/models/qwen.gguf");
+	ASSERT_EQ((int)m->capabilities, (int)(QLLM_CAP_CHAT | QLLM_CAP_JUDGE));
+
+	const char *def_chat = qllm_registry_default_id(QLLM_CAP_CHAT);
+	ASSERT_NOT_NULL(def_chat);
+	ASSERT_STR_EQ(def_chat, "qwen-shared");
+
+	const char *def_judge = qllm_registry_default_id(QLLM_CAP_JUDGE);
+	ASSERT_NOT_NULL(def_judge);
+	ASSERT_STR_EQ(def_judge, "qwen-shared");
+
+	/* Total registered models should be exactly 1, not 2 */
+	struct json_object *models = qllm_registry_models_json();
+	ASSERT_NOT_NULL(models);
+	struct json_object *data = json_object_object_get(models, "data");
+	ASSERT_NOT_NULL(data);
+	ASSERT_EQ((int)json_object_array_length(data), 1);
+	json_object_put(models);
 
 	qllm_registry_shutdown();
 }

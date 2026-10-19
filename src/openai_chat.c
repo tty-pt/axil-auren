@@ -125,11 +125,24 @@ out:
 	return 0;
 }
 
+static int
+handler_models(socket_t cfd, char *body __attribute__((unused)))
+{
+	struct json_object *resp = qllm_registry_models_json();
+	const char *s = json_object_to_json_string(resp);
+	axil_header_set(cfd, "Content-Type", "application/json");
+	axil_respond(cfd, 200, s);
+	json_object_put(resp);
+	return 0;
+}
+
 int
 openai_chat_init(const char *model_path)
 {
 	(void)model_path;
 	axil_register_handler("POST:/v1/chat/completions", handler_chat_completions);
+	axil_register_handler("GET:/v1/models", handler_models);
+	axil_register_handler("GET:/v1/models/", handler_models);
 	return 0;
 }
 

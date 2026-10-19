@@ -4,6 +4,7 @@
 #include <ttypt/qsys.h>
 
 #include <json-c/json.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +69,44 @@ expand_path(const char *in, char *out, size_t out_sz)
 		}
 	}
 	snprintf(out, out_sz, "%s", in);
+}
+
+static void
+derive_shared_id(const char *path, char *out, size_t out_sz)
+{
+	const char *slash;
+	const char *base;
+	const char *dot;
+	char stem[64];
+	size_t len;
+
+	if (!path || !path[0]) {
+		snprintf(out, out_sz, "shared-model");
+		return;
+	}
+
+	slash = strrchr(path, '/');
+	base = slash ? slash + 1 : path;
+	dot = strrchr(base, '.');
+	if (dot && dot != base)
+		len = (size_t)(dot - base);
+	else
+		len = strlen(base);
+
+	if (len == 0) {
+		snprintf(out, out_sz, "shared-model");
+		return;
+	}
+
+	if (len >= sizeof(stem))
+		len = sizeof(stem) - 1;
+	memcpy(stem, base, len);
+	stem[len] = '\0';
+
+	if (strstr(stem, "shared"))
+		snprintf(out, out_sz, "%s", stem);
+	else
+		snprintf(out, out_sz, "%s-shared", stem);
 }
 
 int
@@ -232,75 +271,88 @@ qllm_registry_find_for_cap(uint32_t cap, const char *model_id)
 }
 
 static void
+parse_models_array(struct json_object *models_arr)
+{
+	size_t i, n;
+
+	if (!models_arr || !json_object_is_type(models_arr, json_type_array))
+		return;
+
+	n = (size_t)json_object_array_length(models_arr);
+	for (i = 0; i < n; ++i) {
+		struct json_object *item = json_object_array_get_idx(models_arr, i);
+		struct json_object *id_o, *path_o, *caps_o, *n_ctx_o, *n_gpu_o, *temp_o, *emb_o;
+		const char *id_str, *path_str;
+		uint32_t caps;
+		struct qllm_config cfg;
+
+		if (!item || !json_object_is_type(item, json_type_object))
+			continue;
+
+		id_o = json_object_object_get(item, "id");
+		path_o = json_object_object_get(item, "path");
+		if (!id_o || !path_o) continue;
+
+		id_str = json_object_get_string(id_o);
+		path_str = json_object_get_string(path_o);
+		caps_o = json_object_object_get(item, "capabilities");
+		caps = parse_capabilities(caps_o);
+
+		memset(&cfg, 0, sizeof(cfg));
+		n_ctx_o = json_object_object_get(item, "n_ctx");
+		if (n_ctx_o) cfg.n_ctx = json_object_get_int(n_ctx_o);
+
+		n_gpu_o = json_object_object_get(item, "n_gpu_layers");
+		if (n_gpu_o) cfg.n_gpu_layers = json_object_get_int(n_gpu_o);
+
+		temp_o = json_object_object_get(item, "temperature");
+		if (temp_o) cfg.temperature = (float)json_object_get_double(temp_o);
+		else cfg.temperature = 0.7f;
+
+		emb_o = json_object_object_get(item, "enable_embeddings");
+		if (emb_o) cfg.enable_embeddings = json_object_get_int(emb_o);
+		else if (caps & QLLM_CAP_EMBED) cfg.enable_embeddings = 1;
+
+		qllm_registry_add(id_str, path_str, caps, &cfg);
+	}
+}
+
+static void
 parse_json_config(const char *json_text)
 {
-	struct json_object *root, *models_arr, *defs_obj, *max_res_obj;
-	size_t i, n;
+	struct json_object *root;
 
 	if (!json_text || !json_text[0])
 		return;
 
 	root = json_tokener_parse(json_text);
-	if (!root || !json_object_is_type(root, json_type_object)) {
-		if (root) json_object_put(root);
+	if (!root) {
+		qsyslog(QLOG_ERR, "qllm: failed to parse JSON configuration\n");
 		return;
 	}
 
-	max_res_obj = json_object_object_get(root, "max_resident");
-	if (max_res_obj && json_object_is_type(max_res_obj, json_type_int)) {
-		int m = json_object_get_int(max_res_obj);
-		if (m > 0) g_reg.max_resident = m;
-	}
-
-	models_arr = json_object_object_get(root, "models");
-	if (models_arr && json_object_is_type(models_arr, json_type_array)) {
-		n = (size_t)json_object_array_length(models_arr);
-		for (i = 0; i < n; ++i) {
-			struct json_object *item = json_object_array_get_idx(models_arr, i);
-			struct json_object *id_o, *path_o, *caps_o, *n_ctx_o, *n_gpu_o, *temp_o, *emb_o;
-			const char *id_str, *path_str;
-			uint32_t caps;
-			struct qllm_config cfg;
-
-			if (!item || !json_object_is_type(item, json_type_object))
-				continue;
-
-			id_o = json_object_object_get(item, "id");
-			path_o = json_object_object_get(item, "path");
-			if (!id_o || !path_o) continue;
-
-			id_str = json_object_get_string(id_o);
-			path_str = json_object_get_string(path_o);
-			caps_o = json_object_object_get(item, "capabilities");
-			caps = parse_capabilities(caps_o);
-
-			memset(&cfg, 0, sizeof(cfg));
-			n_ctx_o = json_object_object_get(item, "n_ctx");
-			if (n_ctx_o) cfg.n_ctx = json_object_get_int(n_ctx_o);
-
-			n_gpu_o = json_object_object_get(item, "n_gpu_layers");
-			if (n_gpu_o) cfg.n_gpu_layers = json_object_get_int(n_gpu_o);
-
-			temp_o = json_object_object_get(item, "temperature");
-			if (temp_o) cfg.temperature = (float)json_object_get_double(temp_o);
-			else cfg.temperature = 0.7f;
-
-			emb_o = json_object_object_get(item, "enable_embeddings");
-			if (emb_o) cfg.enable_embeddings = json_object_get_int(emb_o);
-			else if (caps & QLLM_CAP_EMBED) cfg.enable_embeddings = 1;
-
-			qllm_registry_add(id_str, path_str, caps, &cfg);
+	if (json_object_is_type(root, json_type_array)) {
+		parse_models_array(root);
+	} else if (json_object_is_type(root, json_type_object)) {
+		struct json_object *max_res_obj = json_object_object_get(root, "max_resident");
+		if (max_res_obj && json_object_is_type(max_res_obj, json_type_int)) {
+			int m = json_object_get_int(max_res_obj);
+			if (m > 0) g_reg.max_resident = m;
 		}
-	}
 
-	defs_obj = json_object_object_get(root, "defaults");
-	if (defs_obj && json_object_is_type(defs_obj, json_type_object)) {
-		struct json_object *c = json_object_object_get(defs_obj, "chat");
-		struct json_object *j = json_object_object_get(defs_obj, "judge");
-		struct json_object *e = json_object_object_get(defs_obj, "embed");
-		if (c) qllm_registry_set_default(QLLM_ROLE_CHAT, json_object_get_string(c));
-		if (j) qllm_registry_set_default(QLLM_ROLE_JUDGE, json_object_get_string(j));
-		if (e) qllm_registry_set_default(QLLM_ROLE_EMBED, json_object_get_string(e));
+		struct json_object *models_arr = json_object_object_get(root, "models");
+		if (models_arr)
+			parse_models_array(models_arr);
+
+		struct json_object *defs_obj = json_object_object_get(root, "defaults");
+		if (defs_obj && json_object_is_type(defs_obj, json_type_object)) {
+			struct json_object *c = json_object_object_get(defs_obj, "chat");
+			struct json_object *j = json_object_object_get(defs_obj, "judge");
+			struct json_object *e = json_object_object_get(defs_obj, "embed");
+			if (c) qllm_registry_set_default(QLLM_ROLE_CHAT, json_object_get_string(c));
+			if (j) qllm_registry_set_default(QLLM_ROLE_JUDGE, json_object_get_string(j));
+			if (e) qllm_registry_set_default(QLLM_ROLE_EMBED, json_object_get_string(e));
+		}
 	}
 
 	json_object_put(root);
@@ -347,13 +399,16 @@ qllm_registry_init(const char *legacy_fallback_path)
 	const char *chat_id = getenv("QLLM_CHAT_MODEL");
 	const char *judge_id = getenv("QLLM_JUDGE_MODEL");
 	const char *embed_id = getenv("QLLM_EMBED_MODEL");
+	int same_chat_judge = 0;
+	int def_ctx = 2048;
+	const char *env_ctx;
 
 	pthread_mutex_lock(&g_reg_lock);
 	memset(&g_reg, 0, sizeof(g_reg));
 	g_reg.max_resident = 2; /* Default: up to 2 models resident simultaneously */
 	pthread_mutex_unlock(&g_reg_lock);
 
-	/* 1. Try QLLM_CONFIG_PATH */
+	/* 1. Try QLLM_CONFIG_PATH or default candidate search order */
 	if (cfg_path && cfg_path[0]) {
 		char resolved_cfg[BUFSIZ];
 		expand_path(cfg_path, resolved_cfg, sizeof(resolved_cfg));
@@ -361,12 +416,27 @@ qllm_registry_init(const char *legacy_fallback_path)
 		if (text) {
 			parse_json_config(text);
 			free(text);
+		} else {
+			qsyslog(QLOG_ERR, "qllm: failed to open config at '%s'\n", resolved_cfg);
 		}
-	} else if (access("qllm.json", R_OK) == 0) {
-		char *text = read_file_text("qllm.json");
-		if (text) {
-			parse_json_config(text);
-			free(text);
+	} else {
+		static const char *candidate_paths[] = {
+			"./qllm.json",
+			"~/.config/qllm/config.json",
+			"~/.qllm.json"
+		};
+		size_t i;
+		for (i = 0; i < sizeof(candidate_paths) / sizeof(candidate_paths[0]); ++i) {
+			char resolved_cfg[BUFSIZ];
+			expand_path(candidate_paths[i], resolved_cfg, sizeof(resolved_cfg));
+			if (access(resolved_cfg, R_OK) == 0) {
+				char *text = read_file_text(resolved_cfg);
+				if (text) {
+					parse_json_config(text);
+					free(text);
+					break;
+				}
+			}
 		}
 	}
 
@@ -375,27 +445,52 @@ qllm_registry_init(const char *legacy_fallback_path)
 		parse_json_config(models_json);
 	}
 
-	int def_ctx = 2048;
-	const char *env_ctx = getenv("QLLM_N_CTX");
+	env_ctx = getenv("QLLM_N_CTX");
 	if (env_ctx) {
 		int parsed = atoi(env_ctx);
 		if (parsed > 0) def_ctx = parsed;
 	}
 
 	/* 3. Handle specific role paths from environment */
-	if (chat_path && chat_path[0]) {
-		struct qllm_config cfg;
-		memset(&cfg, 0, sizeof(cfg));
-		cfg.n_ctx = def_ctx;
-		qllm_registry_add(chat_id && chat_id[0] ? chat_id : "chat-model", chat_path, QLLM_CAP_CHAT, &cfg);
-		qllm_registry_set_default(QLLM_ROLE_CHAT, chat_id && chat_id[0] ? chat_id : "chat-model");
+	if (chat_path && chat_path[0] && judge_path && judge_path[0]) {
+		char exp_chat[BUFSIZ], exp_judge[BUFSIZ];
+		char real_chat[PATH_MAX], real_judge[PATH_MAX];
+		expand_path(chat_path, exp_chat, sizeof(exp_chat));
+		expand_path(judge_path, exp_judge, sizeof(exp_judge));
+
+		if (realpath(exp_chat, real_chat) && realpath(exp_judge, real_judge)) {
+			if (strcmp(real_chat, real_judge) == 0)
+				same_chat_judge = 1;
+		} else {
+			if (strcmp(exp_chat, exp_judge) == 0)
+				same_chat_judge = 1;
+		}
 	}
-	if (judge_path && judge_path[0]) {
+
+	if (same_chat_judge && !(chat_id && chat_id[0]) && !(judge_id && judge_id[0])) {
+		char shared_id[64];
+		derive_shared_id(chat_path, shared_id, sizeof(shared_id));
 		struct qllm_config cfg;
 		memset(&cfg, 0, sizeof(cfg));
 		cfg.n_ctx = def_ctx;
-		qllm_registry_add(judge_id && judge_id[0] ? judge_id : "judge-model", judge_path, QLLM_CAP_JUDGE, &cfg);
-		qllm_registry_set_default(QLLM_ROLE_JUDGE, judge_id && judge_id[0] ? judge_id : "judge-model");
+		qllm_registry_add(shared_id, chat_path, QLLM_CAP_CHAT | QLLM_CAP_JUDGE, &cfg);
+		qllm_registry_set_default(QLLM_ROLE_CHAT, shared_id);
+		qllm_registry_set_default(QLLM_ROLE_JUDGE, shared_id);
+	} else {
+		if (chat_path && chat_path[0]) {
+			struct qllm_config cfg;
+			memset(&cfg, 0, sizeof(cfg));
+			cfg.n_ctx = def_ctx;
+			qllm_registry_add(chat_id && chat_id[0] ? chat_id : "chat-model", chat_path, QLLM_CAP_CHAT, &cfg);
+			qllm_registry_set_default(QLLM_ROLE_CHAT, chat_id && chat_id[0] ? chat_id : "chat-model");
+		}
+		if (judge_path && judge_path[0]) {
+			struct qllm_config cfg;
+			memset(&cfg, 0, sizeof(cfg));
+			cfg.n_ctx = def_ctx;
+			qllm_registry_add(judge_id && judge_id[0] ? judge_id : "judge-model", judge_path, QLLM_CAP_JUDGE, &cfg);
+			qllm_registry_set_default(QLLM_ROLE_JUDGE, judge_id && judge_id[0] ? judge_id : "judge-model");
+		}
 	}
 	if (embed_path && embed_path[0]) {
 		struct qllm_config cfg;
@@ -567,6 +662,30 @@ qllm_registry_release(const char *model_id)
 		}
 	}
 	pthread_mutex_unlock(&g_reg_lock);
+}
+
+struct json_object *
+qllm_registry_models_json(void)
+{
+	struct json_object *root = json_object_new_object();
+	struct json_object *data = json_object_new_array();
+	int i;
+
+	pthread_mutex_lock(&g_reg_lock);
+	for (i = 0; i < g_reg.count; ++i) {
+		struct json_object *m = json_object_new_object();
+		time_t created = g_reg.entries[i].last_used ? g_reg.entries[i].last_used : time(NULL);
+		json_object_object_add(m, "id", json_object_new_string(g_reg.entries[i].id));
+		json_object_object_add(m, "object", json_object_new_string("model"));
+		json_object_object_add(m, "created", json_object_new_int64((int64_t)created));
+		json_object_object_add(m, "owned_by", json_object_new_string("local"));
+		json_object_array_add(data, m);
+	}
+	pthread_mutex_unlock(&g_reg_lock);
+
+	json_object_object_add(root, "object", json_object_new_string("list"));
+	json_object_object_add(root, "data", data);
+	return root;
 }
 
 void

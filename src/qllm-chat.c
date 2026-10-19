@@ -22,19 +22,18 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 	}
 
 	memset(&server_addr, 0, sizeof(server_addr));
+	int port = PORT;
+	const char *port_env = getenv("QLLM_PORT");
+	if (port_env && atoi(port_env) > 0)
+		port = atoi(port_env);
+
 	server_addr.sin_family = AF_INET;
-	server_addr.sin_port   = htons(PORT);
+	server_addr.sin_port   = htons(port);
 	server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
 	if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
 		perror("connect");
 		close(sock);
-		return 1;
-	}
-
-	int mlen = snprintf(msg, sizeof(msg), "chat\n");
-	if (send(sock, msg, mlen, 0) != mlen) {
-		perror("send");
 		return 1;
 	}
 
@@ -61,7 +60,7 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 		if (buf[len - 1] == '\n')
 			buf[len - 1] = '\0';
 
-		int mlen = snprintf(msg, sizeof(msg), "ask %s\n", buf);
+		int mlen = snprintf(msg, sizeof(msg), "ask %s\r\n\r\n", buf);
 
 		if ((size_t) mlen >= sizeof(msg)) {
 			fprintf(stderr, "Prompt too long\n");

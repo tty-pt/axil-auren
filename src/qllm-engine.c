@@ -296,7 +296,6 @@ session_heavy_free(struct qllm_session *s)
 	s->n_msgs = 0;
 
 	if (s->ctx) {
-		qllm_free(s->ctx);
 		s->ctx = NULL;
 		if (s->model_used[0]) {
 			qllm_registry_release(s->model_used);
@@ -662,6 +661,8 @@ worker_chat(struct qllm_engine_job *job, struct qllm_engine_result *out)
 			out->more = 0;
 			return;
 		}
+		if (!s->prev_prompt)
+			qllm_reset(s->ctx);
 	}
 
 	if (session_push_msg(s, "user", job->input) != 0) {
@@ -817,6 +818,8 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		out->err = st.err;
 	}
 
+	if (ctx)
+		qllm_reset(ctx);
 	free(full);
 	qllm_registry_release(model_used);
 
@@ -1121,6 +1124,8 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	json_object_put(resp_obj);
 	out->err = 0;
 
+	if (ctx)
+		qllm_reset(ctx);
 	qllm_registry_release(model_used);
 
 out:

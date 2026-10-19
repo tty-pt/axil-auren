@@ -34,6 +34,24 @@ TEST(model_registry_add_and_find)
 	qllm_registry_shutdown();
 }
 
+TEST(model_registry_capability_merging)
+{
+	struct qllm_config cfg;
+	memset(&cfg, 0, sizeof(cfg));
+
+	qllm_registry_init(NULL);
+
+	qllm_registry_add("qwen", "/models/qwen.gguf", QLLM_CAP_CHAT, &cfg);
+	qllm_registry_add("qwen", "/models/qwen.gguf", QLLM_CAP_JUDGE, &cfg);
+
+	const struct qllm_model_entry *m = qllm_registry_find("qwen");
+	ASSERT_NOT_NULL(m);
+	ASSERT_STR_EQ(m->id, "qwen");
+	ASSERT_EQ((int)m->capabilities, (int)(QLLM_CAP_CHAT | QLLM_CAP_JUDGE));
+
+	qllm_registry_shutdown();
+}
+
 TEST(model_registry_role_defaults)
 {
 	struct qllm_config cfg;

@@ -89,9 +89,13 @@ qllm_registry_add(const char *id, const char *path, uint32_t capabilities, const
 			/* Update existing */
 			e = &g_reg.entries[i];
 			snprintf(e->path, sizeof(e->path), "%s", resolved_path);
-			e->capabilities = capabilities;
-			if (cfg)
-				e->cfg = *cfg;
+			e->capabilities |= capabilities;
+			if (cfg) {
+				if (cfg->n_ctx > 0) e->cfg.n_ctx = cfg->n_ctx;
+				if (cfg->n_gpu_layers > 0) e->cfg.n_gpu_layers = cfg->n_gpu_layers;
+				if (cfg->temperature > 0.0f) e->cfg.temperature = cfg->temperature;
+				if (cfg->enable_embeddings) e->cfg.enable_embeddings = cfg->enable_embeddings;
+			}
 			e->cfg.model_path = e->path;
 			pthread_mutex_unlock(&g_reg_lock);
 			return 0;

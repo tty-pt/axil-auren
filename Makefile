@@ -41,7 +41,7 @@ prefix-Darwin-arm64  := /opt/homebrew
 prefix-Darwin-x86_64 := /usr/local
 prefix-Darwin := ${prefix-Darwin-${arch}}
 omp := ${prefix-Darwin}/Cellar/libomp/
-omp-version := $(shell ls ${omp} | head -n 1)
+omp-version := $(shell ls ${omp} 2>/dev/null | head -n 1)
 omp := ${omp}/${omp-version}
 
 CFLAGS := -g -I${llamacpp}/../include -I${llamacpp}/../ggml/include -I${vulkan}/include

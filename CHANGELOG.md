@@ -1,3 +1,10 @@
+## 1.0.0 (libauren)
+
+- **Rebranded `libqllm` → `libauren`**: The inference library and Axil dynamic module are officially rebranded to `libauren` (`<ttypt/auren.h>`, `libaxil-auren.so`, `auren.pc`). A backwards-compatibility forwarding header `<ttypt/qllm.h>` is retained.
+- **Multi-model registry & configuration discovery**: Model registry supporting up to 16 named models with capability tracking (`chat`, `judge`, `embed`), independent role defaults, on-demand loading, and LRU eviction under `max_resident`. Supports `auren.json` with fallback to `qllm.json`.
+- **SystemOne Calibrated Classifier**: Fast, typed evaluations (`choice`, `noul`, `score`) against conversational state strings with automatic KV-cache reset.
+- **OpenAI-compatible HTTP Endpoints**: `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models`.
+
 ## 1.2.0
 
 - **Multi-model registry & configuration discovery**: new model registry subsystem (`qllm-registry`)

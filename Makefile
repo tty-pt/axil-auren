@@ -1,24 +1,33 @@
-all := libaxil-qllm qllm-chat engine-test
+all := libaxil-auren auren-chat engine-test
 
-INSTALL_BIN := qllm-chat qllm-path qllm-list
+INSTALL_BIN := auren-chat auren-path auren-list qllm-chat qllm-path qllm-list
 
 engine-test-obj-y :=
-LDLIBS-engine-test := -laxil-qllm -ljson-c -lpthread -lm
+LDLIBS-engine-test := -laxil-auren -ljson-c -lpthread -lm
 LDFLAGS-engine-test = -Wl,-rpath,${pwd}/lib
 
-libaxil-qllm-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/systemone.o
-libaxil-qllm-obj-y-Linux := src/vulkan.o
-libaxil-qllm-obj-y-Darwin := src/metal.o
+libaxil-auren-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/systemone.o
+libaxil-auren-obj-y-Linux := src/vulkan.o
+libaxil-auren-obj-y-Darwin := src/metal.o
 
-LDLIBS-libaxil-qllm := -laxil -lxylem -lcorm -lqsys -ljson-c \
+LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lqsys -ljson-c \
 	-lllama -lggml -lggml-cpu -lggml-base -ldl -lpthread -lm -lstdc++
-LDLIBS-libaxil-qllm-Linux := -lgomp -lvulkan -lggml-vulkan
-LDLIBS-libaxil-qllm-Darwin := -lggml-metal -lggml-blas -lomp \
+LDLIBS-libaxil-auren-Linux := -lgomp -lvulkan -lggml-vulkan
+LDLIBS-libaxil-auren-Darwin := -lggml-metal -lggml-blas -lomp \
 	-framework Foundation \
 	-framework CoreFoundation \
 	-framework IOKit \
 	-framework Metal \
 	-framework Accelerate
+
+# Backward compatibility aliases
+libaxil-qllm-obj-y := ${libaxil-auren-obj-y}
+libaxil-qllm-obj-y-Linux := ${libaxil-auren-obj-y-Linux}
+libaxil-qllm-obj-y-Darwin := ${libaxil-auren-obj-y-Darwin}
+LDLIBS-libaxil-qllm := ${LDLIBS-libaxil-auren}
+LDLIBS-libaxil-qllm-Linux := ${LDLIBS-libaxil-auren-Linux}
+LDLIBS-libaxil-qllm-Darwin := ${LDLIBS-libaxil-auren-Darwin}
+LDFLAGS-libaxil-qllm = ${LDFLAGS-libaxil-auren}
 
 llamacpp := submodules/llama.cpp/build
 
@@ -49,7 +58,7 @@ CFLAGS-Darwin := -I${omp}/include
 
 ggmlp := ${llamacpp}/ggml/src
 
-LDFLAGS-libaxil-qllm := -L${llamacpp}/src -L${ggmlp}
+LDFLAGS-libaxil-auren := -L${llamacpp}/src -L${ggmlp}
 LDFLAGS-Linux := -L${ggmlp}/ggml-vulkan -L${vulkan}/lib
 LDFLAGS-Darwin := -L${ggmlp}/ggml-metal -L${ggmlp}/ggml-blas -L${omp}/lib
 
@@ -60,11 +69,19 @@ third_party-Linux := ${vulkan}/include/shaderc/shaderc.h
 
 include ./../mk/include.mk
 
+${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc: auren.pc
+	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
+	install -m 644 auren.pc $@
+
+${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc: axil-auren.pc
+	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
+	install -m 644 axil-auren.pc $@
+
 ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-qllm.pc: axil-qllm.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
 	install -m 644 axil-qllm.pc $@
 
-install: ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-qllm.pc
+install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-qllm.pc
 
 src/libqllm.o: $(llamacpp)/src/libllama.a
 

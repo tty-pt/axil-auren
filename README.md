@@ -1,4 +1,4 @@
-# libqllm
+# libauren (formerly libqllm)
 
 [![C99](https://img.shields.io/badge/C-C99-555?logo=c)](#)
 [![BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue)](#)
@@ -6,11 +6,11 @@
 [![Multi-Model](https://img.shields.io/badge/runtime-multi--model-16A34A)](#)
 [![System One](https://img.shields.io/badge/API-Jev%20System%20One-blueviolet)](#)
 
-> Ultra-portable local LLM inference and vector embeddings engine powered by llama.cpp and Vulkan/Metal, served as an axil module with multi-model routing and Jev-compatible System One decisions.
+> Ultra-portable local LLM inference and vector embeddings engine powered by llama.cpp and Vulkan/Metal, served as an axil module with multi-model routing and Jev-compatible System One decisions. Canonical header is `<ttypt/auren.h>` with backward compatibility via `<ttypt/qllm.h>`.
 
 No CUDA toolchains to manage, no gigabytes of python dependencies. Install it through your package manager or compile it from source, point it at standard GGUF quantized models, and run high-throughput text generation, typed decision evaluations, and dense vector embeddings on Linux (Vulkan) or macOS (Metal).
 
-`axil-qllm` is the recommended local inference engine for [pi-mm](https://github.com/tty-pt/site/tree/main/.pi/extensions/pi-mm) (persistent memory) and [pi-quest](https://github.com/tty-pt/pi-quest) (quest journal and task gating), providing zero-cost, private decision judging and semantic vector search.
+`libauren` (and its axil module `libaxil-auren.so`) is the recommended local inference engine for [pi-mm](https://github.com/tty-pt/site/tree/main/.pi/extensions/pi-mm) (persistent memory) and [pi-quest](https://github.com/tty-pt/pi-quest) (quest journal and task gating), providing zero-cost, private decision judging and semantic vector search.
 
 ---
 

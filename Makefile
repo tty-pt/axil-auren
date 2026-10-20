@@ -1,6 +1,6 @@
 all := libaxil-auren auren-chat engine-test
 
-INSTALL_BIN := auren-chat auren-path auren-list qllm-chat qllm-path qllm-list
+INSTALL_BIN := auren-chat auren-path auren-list
 
 engine-test-obj-y :=
 LDLIBS-engine-test := -laxil-auren -ljson-c -lpthread -lm
@@ -68,6 +68,25 @@ CMAKE_FLAGS-Darwin := -DGGML_METAL=ON
 third_party-Linux := ${vulkan}/include/shaderc/shaderc.h
 
 include ./../mk/include.mk
+
+all: bin/auren-path bin/auren-list
+
+bin/auren-path: scripts/auren-path | bin
+	cp $< $@
+	chmod 755 $@
+
+bin/auren-list: scripts/auren-list | bin
+	cp $< $@
+	chmod 755 $@
+
+bin/qllm-path: bin/auren-path | bin
+	ln -sf auren-path $@
+
+bin/qllm-list: bin/auren-list | bin
+	ln -sf auren-list $@
+
+bin/qllm-chat: bin/auren-chat | bin
+	ln -sf auren-chat $@
 
 ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc: auren.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig

@@ -391,14 +391,14 @@ read_file_text(const char *path)
 int
 qllm_registry_init(const char *legacy_fallback_path)
 {
-	const char *cfg_path = getenv("QLLM_CONFIG_PATH");
-	const char *models_json = getenv("QLLM_MODELS");
-	const char *chat_path = getenv("QLLM_CHAT_PATH");
-	const char *judge_path = getenv("QLLM_JUDGE_PATH");
-	const char *embed_path = getenv("QLLM_EMBED_PATH");
-	const char *chat_id = getenv("QLLM_CHAT_MODEL");
-	const char *judge_id = getenv("QLLM_JUDGE_MODEL");
-	const char *embed_id = getenv("QLLM_EMBED_MODEL");
+	const char *cfg_path = getenv("AUREN_CONFIG_PATH");
+	const char *models_json = getenv("AUREN_MODELS");
+	const char *chat_path = getenv("AUREN_CHAT_PATH");
+	const char *judge_path = getenv("AUREN_JUDGE_PATH");
+	const char *embed_path = getenv("AUREN_EMBED_PATH");
+	const char *chat_id = getenv("AUREN_CHAT_MODEL");
+	const char *judge_id = getenv("AUREN_JUDGE_MODEL");
+	const char *embed_id = getenv("AUREN_EMBED_MODEL");
 	int same_chat_judge = 0;
 	int def_ctx = 2048;
 	const char *env_ctx;
@@ -408,7 +408,7 @@ qllm_registry_init(const char *legacy_fallback_path)
 	g_reg.max_resident = 2; /* Default: up to 2 models resident simultaneously */
 	pthread_mutex_unlock(&g_reg_lock);
 
-	/* 1. Try QLLM_CONFIG_PATH or default candidate search order */
+	/* 1. Try AUREN_CONFIG_PATH or default candidate search order */
 	if (cfg_path && cfg_path[0]) {
 		char resolved_cfg[BUFSIZ];
 		expand_path(cfg_path, resolved_cfg, sizeof(resolved_cfg));
@@ -417,13 +417,13 @@ qllm_registry_init(const char *legacy_fallback_path)
 			parse_json_config(text);
 			free(text);
 		} else {
-			qsyslog(QLOG_ERR, "qllm: failed to open config at '%s'\n", resolved_cfg);
+			qsyslog(QLOG_ERR, "auren: failed to open config at '%s'\n", resolved_cfg);
 		}
 	} else {
 		static const char *candidate_paths[] = {
-			"./qllm.json",
-			"~/.config/qllm/config.json",
-			"~/.qllm.json"
+			"./auren.json",
+			"~/.config/auren/config.json",
+			"~/.auren.json"
 		};
 		size_t i;
 		for (i = 0; i < sizeof(candidate_paths) / sizeof(candidate_paths[0]); ++i) {
@@ -440,12 +440,12 @@ qllm_registry_init(const char *legacy_fallback_path)
 		}
 	}
 
-	/* 2. Try inline QLLM_MODELS JSON string */
+	/* 2. Try inline AUREN_MODELS JSON string */
 	if (models_json && models_json[0]) {
 		parse_json_config(models_json);
 	}
 
-	env_ctx = getenv("QLLM_N_CTX");
+	env_ctx = getenv("AUREN_N_CTX");
 	if (env_ctx) {
 		int parsed = atoi(env_ctx);
 		if (parsed > 0) def_ctx = parsed;
@@ -506,7 +506,7 @@ qllm_registry_init(const char *legacy_fallback_path)
 	if (g_reg.count == 0) {
 		const char *lp = (legacy_fallback_path && legacy_fallback_path[0])
 			? legacy_fallback_path
-			: getenv("QLLM_MODEL_PATH");
+			: getenv("AUREN_MODEL_PATH");
 		if (lp && lp[0]) {
 			char resolved_lp[BUFSIZ];
 			expand_path(lp, resolved_lp, sizeof(resolved_lp));

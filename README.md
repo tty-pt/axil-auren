@@ -48,25 +48,25 @@ curl -L -o ~/.models/bge-small-en-v1.5.gguf \
 
 ## Quickstart: Run the Multi-Model Server
 
-`libqllm` ships as the native axil module `libaxil-qllm.so`. Start the daemon on port `4242` with dedicated models for judging and vector embeddings:
+`libauren` ships as the native axil module `libaxil-auren.so` (with a backward-compatible `libaxil-qllm.so` alias). Start the daemon on port `4242` with dedicated models for judging and vector embeddings:
 
 ```bash
-QLLM_JUDGE_MODEL="qwen" \
-QLLM_JUDGE_PATH=~/.models/qwen2.5-0.5b-instruct.gguf \
-QLLM_CHAT_MODEL="qwen" \
-QLLM_CHAT_PATH=~/.models/qwen2.5-0.5b-instruct.gguf \
-QLLM_EMBED_MODEL="bge-small" \
-QLLM_EMBED_PATH=~/.models/bge-small-en-v1.5.gguf \
-axil -A -d -p 4242 -m libaxil-qllm
+AUREN_JUDGE_MODEL="qwen" \
+AUREN_JUDGE_PATH=~/.models/qwen2.5-0.5b-instruct.gguf \
+AUREN_CHAT_MODEL="qwen" \
+AUREN_CHAT_PATH=~/.models/qwen2.5-0.5b-instruct.gguf \
+AUREN_EMBED_MODEL="bge-small" \
+AUREN_EMBED_PATH=~/.models/bge-small-en-v1.5.gguf \
+axil -A -d -p 4242 -m libaxil-auren
 ```
 
-*(If running outside of an axil site deployment, pass the library path: `-m /home/quirinpa/libqllm/lib/libaxil-qllm`).*
+*(If running outside of an axil site deployment, pass the library path: `-m /home/quirinpa/auren/lib/libaxil-auren`).*
 
-> **Tip — Automatic Model Deduplication**: If `QLLM_CHAT_PATH` and `QLLM_JUDGE_PATH` point to the identical canonical model file and explicit IDs (`QLLM_CHAT_MODEL`, `QLLM_JUDGE_MODEL`) are omitted, `libqllm` automatically merges capabilities into a single shared resident model instance (`<stem>-shared`, e.g. `qwen-shared`), preventing redundant VRAM allocation.
+> **Tip — Automatic Model Deduplication**: If `AUREN_CHAT_PATH` and `AUREN_JUDGE_PATH` point to the identical canonical model file and explicit IDs (`AUREN_CHAT_MODEL`, `AUREN_JUDGE_MODEL`) are omitted, `libauren` automatically merges capabilities into a single shared resident model instance (`<stem>-shared`, e.g. `qwen-shared`), preventing redundant VRAM allocation.
 
-### Configuration via `qllm.json`
+### Configuration via `auren.json`
 
-For multi-model deployments with custom GPU offloading or context sizing, create a `qllm.json` file (paths support `~/` tilde expansion):
+For multi-model deployments with custom GPU offloading or context sizing, create an `auren.json` file (paths support `~/` tilde expansion):
 
 ```json
 {
@@ -96,24 +96,24 @@ For multi-model deployments with custom GPU offloading or context sizing, create
 }
 ```
 
-Point to it with `QLLM_CONFIG_PATH=/path/to/qllm.json axil -A -d -p 4242 -m libaxil-qllm`.
+Point to it with `AUREN_CONFIG_PATH=/path/to/auren.json axil -A -d -p 4242 -m libaxil-auren`.
 
 #### Configuration Discovery & Search Order
 
-When `QLLM_CONFIG_PATH` is specified, `libqllm` attempts to read that exact path (with tilde `~` expansion). If unset, `libqllm` automatically discovers configuration files in the following priority order:
-1. `./qllm.json` (current working directory)
-2. `~/.config/qllm/config.json` (standard user configuration directory)
-3. `~/.qllm.json` (user home directory)
+When `AUREN_CONFIG_PATH` is specified, `libauren` attempts to read that exact path (with tilde `~` expansion). If unset, `libauren` automatically discovers configuration files in the following priority order:
+1. `./auren.json` (current working directory)
+2. `~/.config/auren/config.json` (standard user configuration directory)
+3. `~/.auren.json` (user home directory)
 
-The first readable configuration file is loaded. If `QLLM_CONFIG_PATH` is explicitly set but unreadable, an error is logged via `qsyslog(QLOG_ERR, ...)`.
+The first readable configuration file is loaded. If `AUREN_CONFIG_PATH` is explicitly set but unreadable, an error is logged via `qsyslog(QLOG_ERR, ...)`.
 
-#### Inline `QLLM_MODELS` (Bare Array or Object)
+#### Inline `AUREN_MODELS` (Bare Array or Object)
 
-For containerized environments or one-liner launches, `QLLM_MODELS` accepts either a full configuration object or a bare JSON array of models:
+For containerized environments or one-liner launches, `AUREN_MODELS` accepts either a full configuration object or a bare JSON array of models:
 
 ```bash
-QLLM_MODELS='[{"id":"qwen","path":"~/.models/qwen2.5-0.5b-instruct.gguf","capabilities":["chat","judge"]},{"id":"bge-small","path":"~/.models/bge-small-en-v1.5.gguf","capabilities":["embed"]}]' \
-axil -A -d -p 4242 -m libaxil-qllm
+AUREN_MODELS='[{"id":"qwen","path":"~/.models/qwen2.5-0.5b-instruct.gguf","capabilities":["chat","judge"]},{"id":"bge-small","path":"~/.models/bge-small-en-v1.5.gguf","capabilities":["embed"]}]' \
+axil -A -d -p 4242 -m libaxil-auren
 ```
 
 ---
@@ -227,21 +227,21 @@ curl -s http://localhost:4242/v1/models
 }
 ```
 
-### 5. Interactive Terminal Chat (`qllm-chat`)
+### 5. Interactive Terminal Chat (`auren-chat`)
 
 Talk directly to the running server from the command line:
 
 ```bash
-# Connect to localhost:4242 (or configure port via QLLM_PORT)
-qllm-chat
+# Connect to localhost:4242 (or configure port via AUREN_PORT)
+auren-chat
 
 # Or specify a custom port:
-QLLM_PORT=4242 qllm-chat
+AUREN_PORT=4242 auren-chat
 ```
 
-Additional CLI utilities:
-- `qllm-list [filter]` — List local GGUF models cached in `~/.cache/huggingface/hub/` with sizes and hashes.
-- `qllm-path <pattern>` — Print the resolved filesystem path for a cached GGUF model.
+Additional CLI utilities (with legacy `qllm-*` aliases):
+- `auren-list [filter]` / `qllm-list` — List local GGUF models cached in `~/.cache/huggingface/hub/` with sizes and hashes.
+- `auren-path <pattern>` / `qllm-path` — Print the resolved filesystem path for a cached GGUF model.
 
 ---
 
@@ -261,46 +261,46 @@ The System One API evaluates structured questions against a provided state and r
 
 * **Role Isolation**: Generative chat, memory decision judging, and vector embeddings are independently configurable. An embedding request will never accidentally run against the generative model simply because it is the current default.
 * **Safe Model Lifecycle**: The runtime supports multiple resident models up to `max_resident`. When GPU/RAM capacity is reached, idle models (`in_flight == 0`) are safely evicted using an LRU policy. Models currently processing in-flight requests are **never** evicted.
-* **Single-Model Compatibility**: If only `QLLM_MODEL_PATH` is supplied, `libqllm` automatically registers `"default"` supporting all three roles (`chat`, `judge`, `embed`) with zero breaking changes.
+* **Single-Model Compatibility**: If only `AUREN_MODEL_PATH` is supplied, `libauren` automatically registers `"default"` supporting all three roles (`chat`, `judge`, `embed`) with zero breaking changes.
 * **Worker-Thread Concurrency**: Inference executes on a dedicated background worker thread communicating over a non-blocking self-pipe with axil's main event loop.
 
 ---
 
-## C API Quickstart (`ttypt/qllm.h`)
+## C API Quickstart (`ttypt/auren.h`)
 
 Embed local inference directly into your C application in under 20 lines:
 
 ```c
 #include <stdio.h>
-#include <ttypt/qllm.h>
+#include <ttypt/auren.h>
 
 int main(int argc, char **argv) {
-    struct qllm_config cfg = {
+    struct auren_config cfg = {
         .model_path = argc > 1 ? argv[1] : "model.gguf",
         .temperature = 0.7f,
         .n_ctx = 2048
     };
 
-    struct qllm_context *ctx = qllm_create(&cfg);
+    struct auren_context *ctx = auren_create(&cfg);
     if (!ctx) {
         fprintf(stderr, "Failed to load model\n");
         return 1;
     }
 
     char out[1024];
-    long bytes = qllm_generate(ctx, "Explain in-memory key-value maps briefly.", out, sizeof(out));
+    long bytes = auren_generate(ctx, "Explain in-memory key-value maps briefly.", out, sizeof(out));
     if (bytes > 0) {
         printf("Response:\n%s\n", out);
     }
 
-    qllm_free(ctx);
+    auren_free(ctx);
     return 0;
 }
 ```
 
 Compile and link:
 ```bash
-cc app.c $(pkg-config --cflags --libs axil-qllm)
+cc app.c $(pkg-config --cflags --libs axil-auren)
 ```
 
 ---
@@ -308,8 +308,8 @@ cc app.c $(pkg-config --cflags --libs axil-qllm)
 ## Build & Test
 
 ```bash
-make            # Builds lib/libaxil-qllm.so and bin/engine-test
-make test       # Runs the comprehensive 91-test native C test suite
+make            # Builds lib/libaxil-auren.so, bin/auren-chat, and bin/engine-test
+make test       # Runs the comprehensive native test suite
 sudo make install
 ```
 

@@ -23,7 +23,7 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 
 	memset(&server_addr, 0, sizeof(server_addr));
 	int port = PORT;
-	const char *port_env = getenv("QLLM_PORT");
+	const char *port_env = getenv("AUREN_PORT");
 	if (port_env && atoi(port_env) > 0)
 		port = atoi(port_env);
 

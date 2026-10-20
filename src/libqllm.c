@@ -482,10 +482,11 @@ auto_ngl(const char *path, int gpu, uint32_t n_ctx, uint32_t max_offload_bytes,
 	    (size_t)n_ctx * n_embd_kv * 4ULL * (size_t)n_contexts;
 
 	/* Allow disabling KV-offload accounting via environment. */
-	if (getenv("QLLM_OFFLOAD_KQV") &&
-	    (getenv("QLLM_OFFLOAD_KQV")[0] == '0' ||
-	     getenv("QLLM_OFFLOAD_KQV")[0] == 'n' ||
-	     getenv("QLLM_OFFLOAD_KQV")[0] == 'N'))
+	const char *offload_env = getenv("AUREN_OFFLOAD_KQV");
+	if (offload_env &&
+	    (offload_env[0] == '0' ||
+	     offload_env[0] == 'n' ||
+	     offload_env[0] == 'N'))
 		offload_kqv = 0;
 
 	/* Fixed reserve for driver/OS. */
@@ -541,7 +542,7 @@ auto_ngl(const char *path, int gpu, uint32_t n_ctx, uint32_t max_offload_bytes,
 
 	/* Manual adjustment from env. */
 	{
-		const char *adjust = getenv("QLLM_NGL_ADJUST");
+		const char *adjust = getenv("AUREN_NGL_ADJUST");
 
 		if (adjust) {
 			int adj = atoi(adjust);

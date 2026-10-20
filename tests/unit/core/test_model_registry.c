@@ -216,9 +216,9 @@ TEST(model_registry_bare_array_json)
 		"{\"id\":\"bge-bare\",\"path\":\"/models/bge-bare.gguf\",\"capabilities\":[\"embed\"]}"
 	"]";
 
-	setenv("QLLM_MODELS", bare_array, 1);
+	setenv("AUREN_MODELS", bare_array, 1);
 	int rc = qllm_registry_init(NULL);
-	unsetenv("QLLM_MODELS");
+	unsetenv("AUREN_MODELS");
 
 	ASSERT_EQ(rc, 0);
 
@@ -240,30 +240,30 @@ TEST(model_registry_bare_array_json)
 TEST(model_registry_config_diagnostics)
 {
 	/* Test malformed JSON does not crash */
-	setenv("QLLM_MODELS", "{ malformed json string: [", 1);
+	setenv("AUREN_MODELS", "{ malformed json string: [", 1);
 	int rc = qllm_registry_init(NULL);
-	unsetenv("QLLM_MODELS");
+	unsetenv("AUREN_MODELS");
 	ASSERT_EQ(rc, -1);
 	qllm_registry_shutdown();
 
-	/* Test unreadable / nonexistent QLLM_CONFIG_PATH logs error and does not crash */
-	setenv("QLLM_CONFIG_PATH", "/nonexistent/path/to/nonexistent-config.json", 1);
+	/* Test unreadable / nonexistent AUREN_CONFIG_PATH logs error and does not crash */
+	setenv("AUREN_CONFIG_PATH", "/nonexistent/path/to/nonexistent-config.json", 1);
 	rc = qllm_registry_init(NULL);
-	unsetenv("QLLM_CONFIG_PATH");
+	unsetenv("AUREN_CONFIG_PATH");
 	ASSERT_EQ(rc, -1);
 	qllm_registry_shutdown();
 }
 
 TEST(model_registry_env_path_deduplication)
 {
-	setenv("QLLM_CHAT_PATH", "/models/qwen.gguf", 1);
-	setenv("QLLM_JUDGE_PATH", "/models/qwen.gguf", 1);
-	unsetenv("QLLM_CHAT_MODEL");
-	unsetenv("QLLM_JUDGE_MODEL");
+	setenv("AUREN_CHAT_PATH", "/models/qwen.gguf", 1);
+	setenv("AUREN_JUDGE_PATH", "/models/qwen.gguf", 1);
+	unsetenv("AUREN_CHAT_MODEL");
+	unsetenv("AUREN_JUDGE_MODEL");
 
 	int rc = qllm_registry_init(NULL);
-	unsetenv("QLLM_CHAT_PATH");
-	unsetenv("QLLM_JUDGE_PATH");
+	unsetenv("AUREN_CHAT_PATH");
+	unsetenv("AUREN_JUDGE_PATH");
 
 	ASSERT_EQ(rc, 0);
 

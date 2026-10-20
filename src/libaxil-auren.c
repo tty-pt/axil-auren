@@ -331,13 +331,13 @@ setup_crb(const char *path)
 static int
 qllm_init(void)
 {
-	const char *model_path = getenv("QLLM_MODEL_PATH");
-	const char *crb_path = getenv("QLLM_CRB_PATH");
-	const char *chat_path = getenv("QLLM_CHAT_PATH");
-	const char *judge_path = getenv("QLLM_JUDGE_PATH");
-	const char *embed_path = getenv("QLLM_EMBED_PATH");
-	const char *cfg_path = getenv("QLLM_CONFIG_PATH");
-	const char *models_json = getenv("QLLM_MODELS");
+	const char *model_path = getenv("AUREN_MODEL_PATH");
+	const char *crb_path = getenv("AUREN_CRB_PATH");
+	const char *chat_path = getenv("AUREN_CHAT_PATH");
+	const char *judge_path = getenv("AUREN_JUDGE_PATH");
+	const char *embed_path = getenv("AUREN_EMBED_PATH");
+	const char *cfg_path = getenv("AUREN_CONFIG_PATH");
+	const char *models_json = getenv("AUREN_MODELS");
 
 	int has_models = (model_path && model_path[0]) ||
 	                 (chat_path && chat_path[0]) ||
@@ -345,10 +345,10 @@ qllm_init(void)
 	                 (embed_path && embed_path[0]) ||
 	                 (cfg_path && cfg_path[0]) ||
 	                 (models_json && models_json[0]) ||
-	                 (access("qllm.json", R_OK) == 0);
+	                 (access("auren.json", R_OK) == 0);
 
 	if (!has_models) {
-		qsyslog(QLOG_ERR, "No model configuration set; qllm engine disabled\n");
+		qsyslog(QLOG_ERR, "No model configuration set; auren engine disabled\n");
 		return -1;
 	}
 

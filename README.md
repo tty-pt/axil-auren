@@ -2,19 +2,22 @@
   <img src="logo.png" alt="axil-auren logo" width="220" />
 </p>
 
-# libauren (formerly libqllm)
+# libauren
 
 [![C99](https://img.shields.io/badge/C-C99-555?logo=c)](#)
 [![BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue)](#)
-[![Vulkan/Metal](https://img.shields.io/badge/Vulkan%2FMetal-backends-4B8BBE)](#)
-[![Multi-Model](https://img.shields.io/badge/runtime-multi--model-16A34A)](#)
-[![System One](https://img.shields.io/badge/API-Jev%20System%20One-blueviolet)](#)
+[![Vulkan/Metal/CPU](https://img.shields.io/badge/backends-Vulkan%20%7C%20Metal%20%7C%20CPU-4B8BBE)](#)
+[![Inference & Embeddings](https://img.shields.io/badge/engine-inference%20%2B%20embeddings-16A34A)](#)
+[![System One](https://img.shields.io/badge/decisions-Jev%20System%20One-blueviolet)](#)
 
-> Ultra-portable local LLM inference and vector embeddings engine powered by llama.cpp and Vulkan/Metal, served as an axil module with multi-model routing and Jev-compatible System One decisions. Canonical header is `<ttypt/auren.h>` with backward compatibility via `<ttypt/qllm.h>`.
+> Ultra-portable local LLM inference, streaming chat, and dense vector embeddings engine powered by llama.cpp and Vulkan/Metal, served as an axil module or embedded C library with multi-model routing and Jev-compatible System One decisions. Canonical header is `<ttypt/auren.h>`.
 
-No CUDA toolchains to manage, no gigabytes of python dependencies. Install it through your package manager or compile it from source, point it at standard GGUF quantized models, and run high-throughput text generation, typed decision evaluations, and dense vector embeddings on Linux (Vulkan) or macOS (Metal).
+No CUDA toolchains to manage, no gigabytes of python dependencies. Install it through your package manager or compile it from source, point it at standard GGUF quantized models, and run high-throughput text generation, dense vector embeddings, and typed decision evaluations on Linux (Vulkan/CPU) or macOS (Metal).
 
-`libauren` (and its axil module `libaxil-auren.so`) is the recommended local inference engine for [pi-mm](https://github.com/tty-pt/site/tree/main/.pi/extensions/pi-mm) (persistent memory) and [pi-quest](https://github.com/tty-pt/pi-quest) (quest journal and task gating), providing zero-cost, private decision judging and semantic vector search.
+`libauren` (and its axil module `libaxil-auren.so`) provides the local neural backbone for the tty-pt ecosystem:
+- **High-Throughput Local Inference**: Multi-turn chat, GGUF quantization, OpenAI-compatible `/v1/chat/completions`, streaming tokens, and sampling controls.
+- **Dense Vector Embeddings**: OpenAI-compatible `/v1/embeddings`, batch vector extraction, sub-millisecond latencies, and direct integration with [libsepal](https://github.com/tty-pt/libsepal) for semantic search.
+- **Autonomous System One Decision Engine**: Calibrated classification, choice / noul / score rubrics for autonomous agent loops (`/api/v1/systemone/`), used by [pi-mm](https://github.com/tty-pt/pi-mm) (persistent memory) and [pi-quest](https://github.com/tty-pt/pi-quest) (quest gating).
 
 ---
 
@@ -24,9 +27,9 @@ You don't need a 70B model or expensive cloud GPUs. You can run blazing-fast loc
 
 | Role | Recommended Model | Size | Quantization | Context | Purpose |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Generative & Judge** | `Qwen2.5-0.5B-Instruct` | **398 MB** | Q4_K_M | 4096 | Conversational chat & Jev System One decision evaluations |
-| **Alternative Judge** | `Qwen2.5-1.5B-Instruct` | **986 MB** | Q4_K_M | 4096 | Higher reasoning fidelity for complex decision rubrics |
-| **Embeddings** | `bge-small-en-v1.5` | **133 MB** | Q8_0 | 512 | Dense 384-dimensional vector embeddings for semantic search |
+| **Chat & Generation** | `Qwen2.5-0.5B-Instruct` | **398 MB** | Q4_K_M | 4096 | Conversational chat, instruction following & System One decisions |
+| **High-Fidelity Reasoning** | `Qwen2.5-1.5B-Instruct` | **986 MB** | Q4_K_M | 4096 | Higher reasoning fidelity for multi-step tasks and complex rubrics |
+| **Vector Embeddings** | `bge-small-en-v1.5` | **133 MB** | Q8_0 | 512 | Dense 384-dimensional vector embeddings for semantic vector search |
 
 ### 1-Click Download Recipe
 
@@ -122,8 +125,76 @@ axil -A -d -p 4242 -m libaxil-auren
 
 Once started, verify each capability with instant `curl` commands:
 
-### 1. Jev-Compatible System One Decision (`POST /api/v1/systemone/`)
-Evaluate conversational exchanges or tool events and return typed, calibrated classifications:
+### 1. OpenAI-Compatible Chat Completions (`POST /v1/chat/completions`)
+
+Run standard conversational chat or instruct inference:
+
+```bash
+curl -s http://localhost:4242/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen",
+    "messages": [
+      { "role": "system", "content": "You are a concise engineering assistant." },
+      { "role": "user", "content": "What is the primary benefit of zero-copy in-memory maps?" }
+    ],
+    "temperature": 0.7
+  }'
+```
+
+**Response**:
+```json
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "Zero-copy in-memory maps eliminate serialization and deserialization overhead by referencing data directly in cache-aligned structures, maximizing L1/L2 memory throughput and sub-microsecond retrieval.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "model": "qwen",
+  "object": "chat.completion",
+  "usage": { "completion_tokens": 38, "prompt_tokens": 28, "total_tokens": 66 }
+}
+```
+
+### 2. Semantic Vector Embeddings (`POST /v1/embeddings`)
+
+Generate dense float vectors for semantic search and retrieval with `libsepal`. Supports single strings or batch arrays:
+
+```bash
+# Single string:
+curl -s http://localhost:4242/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-small",
+    "input": "lossless FLAC acoustic recording format"
+  }'
+
+# Or batch array:
+curl -s http://localhost:4242/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "bge-small",
+    "input": ["lossless FLAC acoustic format", "in-memory zero-copy vectors"]
+  }'
+```
+
+**Response**:
+```json
+{
+  "data": [{ "embedding": [0.0381, -0.0412, 0.0894, ...], "index": 0, "object": "embedding" }],
+  "model": "bge-small",
+  "object": "list"
+}
+```
+
+### 3. Jev-Compatible System One Decision (`POST /api/v1/systemone/`)
+
+Evaluate conversational exchanges or tool events and return typed, calibrated classifications without prompt parsing:
 
 ```bash
 curl -s http://localhost:4242/api/v1/systemone/ \
@@ -163,50 +234,6 @@ curl -s http://localhost:4242/api/v1/systemone/ \
   },
   "usage": { "input_tokens": 82, "output_tokens": 25 }
 }
-```
-
-### 2. Semantic Vector Embeddings (`POST /v1/embeddings`)
-Generate dense float vectors for semantic search with `libsepal`. Supports single strings or batch arrays:
-
-```bash
-# Single string:
-curl -s http://localhost:4242/v1/embeddings \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "bge-small",
-    "input": "lossless FLAC acoustic recording format"
-  }'
-
-# Or batch array:
-curl -s http://localhost:4242/v1/embeddings \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "bge-small",
-    "input": ["lossless FLAC acoustic format", "in-memory zero-copy vectors"]
-  }'
-```
-
-**Response**:
-```json
-{
-  "data": [{ "embedding": [0.0381, -0.0412, 0.0894, ...], "index": 0, "object": "embedding" }],
-  "model": "bge-small",
-  "object": "list"
-}
-```
-
-### 3. OpenAI-Compatible Chat Completions (`POST /v1/chat/completions`)
-
-```bash
-curl -s http://localhost:4242/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen",
-    "messages": [
-      { "role": "system", "content": "You are a concise engineering assistant." },
-      { "role": "user", "content": "What is the primary benefit of zero-copy in-memory maps?" }
-    ]
-  }'
 ```
 
 ### 4. Model Discovery (`GET /v1/models`)
@@ -268,15 +295,16 @@ The System One API evaluates structured questions against a provided state and r
 
 ## C API Quickstart (`ttypt/auren.h`)
 
-Embed local inference directly into your C application in under 20 lines:
+Embed local inference and vector embeddings directly into your C application in under 30 lines:
 
+### 1. High-Throughput Text Generation
 ```c
 #include <stdio.h>
 #include <ttypt/auren.h>
 
 int main(int argc, char **argv) {
     struct auren_config cfg = {
-        .model_path = argc > 1 ? argv[1] : "model.gguf",
+        .model_path = argc > 1 ? argv[1] : "qwen2.5-0.5b-instruct.gguf",
         .temperature = 0.7f,
         .n_ctx = 2048
     };
@@ -291,6 +319,32 @@ int main(int argc, char **argv) {
     long bytes = auren_generate(ctx, "Explain in-memory key-value maps briefly.", out, sizeof(out));
     if (bytes > 0) {
         printf("Response:\n%s\n", out);
+    }
+
+    auren_free(ctx);
+    return 0;
+}
+```
+
+### 2. Dense Vector Embeddings
+```c
+#include <stdio.h>
+#include <ttypt/auren.h>
+
+int main(void) {
+    struct auren_config cfg = {
+        .model_path = "bge-small-en-v1.5.gguf",
+        .enable_embeddings = 1,
+        .n_ctx = 512
+    };
+
+    struct auren_context *ctx = auren_create(&cfg);
+    if (!ctx) return 1;
+
+    float vec[384];
+    long dim = auren_embed(ctx, "in-memory zero-copy vectors", vec, 384);
+    if (dim > 0) {
+        printf("Generated %ld-dim embedding vector: [%.4f, %.4f, ...]\n", dim, vec[0], vec[1]);
     }
 
     auren_free(ctx);

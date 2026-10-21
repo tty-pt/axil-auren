@@ -14,10 +14,20 @@
 
 No CUDA toolchains to manage, no gigabytes of python dependencies. Install it through your package manager or compile it from source, point it at standard GGUF quantized models, and run high-throughput text generation, dense vector embeddings, and typed decision evaluations on Linux (Vulkan/CPU) or macOS (Metal).
 
-`libauren` (and its axil module `libaxil-auren.so`) provides the local neural backbone for the tty-pt ecosystem:
-- **High-Throughput Local Inference**: Multi-turn chat, GGUF quantization, OpenAI-compatible `/v1/chat/completions`, streaming tokens, and sampling controls.
-- **Dense Vector Embeddings**: OpenAI-compatible `/v1/embeddings`, batch vector extraction, sub-millisecond latencies, and direct integration with [libsepal](https://github.com/tty-pt/libsepal) for semantic search.
-- **Autonomous System One Decision Engine**: Calibrated classification, choice / noul / score rubrics for autonomous agent loops (`/api/v1/systemone/`), used by [pi-mm](https://github.com/tty-pt/pi-mm) (persistent memory) and [pi-quest](https://github.com/tty-pt/pi-quest) (quest gating).
+---
+
+## Why libauren? (Local AI Without the Python & CUDA Bloat)
+
+Running local AI models shouldn't require a 4 GB Python runtime, fragile Conda environments, or gigabytes of CUDA packages that break on system updates.
+
+`libauren` is a single, compact C library (under 5 MB compiled) powered by `llama.cpp` that runs standard open GGUF models directly on your hardware using Vulkan, Apple Metal, or raw CPU.
+
+### The Three Jobs It Does
+1. **The Conversational Chatbot**: High-throughput text generation and streaming chat via standard OpenAI-compatible endpoints (`POST /v1/chat/completions`) or command-line CLI (`auren-chat`).
+2. **The Semantic Memory Indexer**: Convert any text into dense 384-dimensional vector embeddings (`POST /v1/embeddings`) in under 1 millisecond, feeding directly into [libsepal](https://github.com/tty-pt/libsepal) for instant semantic vector search.
+3. **The Autonomous Decision Guard**: Evaluate yes/no or multiple-choice questions with calibrated mathematical confidence scores (`POST /api/v1/systemone/`), perfect for automated agents, memory filters, and safety checks without prompt parsing fragility.
+
+---
 
 ---
 

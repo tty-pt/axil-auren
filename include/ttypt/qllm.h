@@ -19,15 +19,18 @@ typedef struct auren_config  qllm_config_t;
 #define qllm_context         auren_context
 #define qllm_message         auren_message
 #define qllm_token_cb        auren_token_cb
+#define qllm_token_full_cb   auren_token_full_cb
 
 /* Backward compatibility function aliases */
 #define qllm_create              auren_create
 #define qllm_free                auren_free
 #define qllm_generate            auren_generate
 #define qllm_generate_stream     auren_generate_stream
+#define qllm_generate_stream_full auren_generate_stream_full
 #define qllm_embed               auren_embed
 #define qllm_n_embd              auren_n_embd
 #define qllm_prime               auren_prime
+#define qllm_prime_block         auren_prime_block
 #define qllm_n_ctx               auren_n_ctx
 #define qllm_set_seq             auren_set_seq
 #define qllm_set_grammar         auren_set_grammar

@@ -78,6 +78,14 @@ typedef void (*auren_token_cb)(void *user,
 			       size_t len);
 
 /**
+ * Full streaming callback receiving token ID and UTF-8 chunk.
+ */
+typedef void (*auren_token_full_cb)(void *user,
+				   int32_t token,
+				   const char *chunk,
+				   size_t len);
+
+/**
  * Streaming generation.
  * Calls cb() for each generated text chunk.
  * Returns 0 on success, < 0 on error.
@@ -87,6 +95,17 @@ auren_generate_stream(struct auren_context *ctx,
 		      const char *prompt,
 		      auren_token_cb cb,
 		      void *user);
+
+/**
+ * Streaming generation with full token metadata.
+ * Calls cb() for each generated token ID and text chunk.
+ * Returns 0 on success, < 0 on error.
+ */
+int
+auren_generate_stream_full(struct auren_context *ctx,
+			   const char *prompt,
+			   auren_token_full_cb cb,
+			   void *user);
 
 /**
  * Compute embeddings for the entire input text.
@@ -118,6 +137,20 @@ auren_n_embd(struct auren_context *ctx);
 int
 auren_prime(struct auren_context *ctx,
 	    const char *prompt);
+
+/**
+ * Prime the context with a content-addressed prompt block.
+ * If block_hash matches a pre-evaluated cached block at the current
+ * KV context position, prompt evaluation is bypassed (zero decode cost).
+ *
+ * Returns:
+ *   0  on success
+ *  <0  on error
+ */
+int
+auren_prime_block(struct auren_context *ctx,
+		  uint64_t block_hash,
+		  const char *text);
 
 /**
  * Get the actual context size used (returns 0 if ctx invalid).

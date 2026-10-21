@@ -415,3 +415,55 @@ TEST(qllm_embed_success)
     ASSERT_EQ(ret, 4096);
     qllm_free(ctx);
 }
+
+struct full_stream_data {
+    int calls;
+    int32_t last_tok;
+};
+
+static void test_full_stream_cb(void *user, int32_t tok, const char *chunk, size_t len)
+{
+    (void)chunk;
+    (void)len;
+    struct full_stream_data *d = (struct full_stream_data *)user;
+    d->calls++;
+    d->last_tok = tok;
+}
+
+TEST(auren_prime_block_caching)
+{
+    llama_token toks[] = { 101, 102 };
+    mock_llama_set_tokenizer_result(toks, 2);
+
+    struct auren_context *ctx = create_test_context();
+    ASSERT_NOT_NULL(ctx);
+
+    /* First prime with hash: uncached, evaluates */
+    int ret1 = auren_prime_block(ctx, 0x1234ULL, "block one");
+    ASSERT_EQ(ret1, 0);
+
+    /* Second prime with exact same hash at current index: cached */
+    int ret2 = auren_prime_block(ctx, 0x1234ULL, "block one");
+    ASSERT_EQ(ret2, 0);
+
+    auren_free(ctx);
+}
+
+TEST(auren_generate_stream_full_tokens)
+{
+    llama_token toks[] = { 101, 102 };
+    mock_llama_set_tokenizer_result(toks, 2);
+
+    llama_token gen_toks[] = { 201, 202 };
+    mock_llama_set_next_tokens(gen_toks, 2);
+
+    struct auren_context *ctx = create_test_context();
+    ASSERT_NOT_NULL(ctx);
+
+    struct full_stream_data data = { 0, 0 };
+    int ret = auren_generate_stream_full(ctx, "prompt", test_full_stream_cb, &data);
+    ASSERT_EQ(ret, 0);
+    ASSERT_TRUE(data.calls >= 1);
+
+    auren_free(ctx);
+}

@@ -1,24 +1,33 @@
-all := libaxil-qllm qllm-chat engine-test
+all := libaxil-auren auren-chat engine-test
 
-INSTALL_BIN := qllm-chat qllm-path qllm-list
+INSTALL_BIN := auren-chat auren-path auren-list
 
 engine-test-obj-y :=
-LDLIBS-engine-test := -laxil-qllm -ljson-c -lpthread -lm
+LDLIBS-engine-test := -laxil-auren -ljson-c -lpthread -lm
 LDFLAGS-engine-test = -Wl,-rpath,${pwd}/lib
 
-libaxil-qllm-obj-y := src/libqllm.o src/qllm-engine.o src/openai_embed.o src/openai_chat.o
-libaxil-qllm-obj-y-Linux := src/vulkan.o
-libaxil-qllm-obj-y-Darwin := src/metal.o
+libaxil-auren-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/systemone.o
+libaxil-auren-obj-y-Linux := src/vulkan.o
+libaxil-auren-obj-y-Darwin := src/metal.o
 
-LDLIBS-libaxil-qllm := -laxil -lxylem -lcorm -lqsys -ljson-c \
+LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lqsys -ljson-c \
 	-lllama -lggml -lggml-cpu -lggml-base -ldl -lpthread -lm -lstdc++
-LDLIBS-libaxil-qllm-Linux := -lgomp -lvulkan -lggml-vulkan
-LDLIBS-libaxil-qllm-Darwin := -lggml-metal -lggml-blas -lomp \
+LDLIBS-libaxil-auren-Linux := -lgomp -lvulkan -lggml-vulkan
+LDLIBS-libaxil-auren-Darwin := -lggml-metal -lggml-blas -lomp \
 	-framework Foundation \
 	-framework CoreFoundation \
 	-framework IOKit \
 	-framework Metal \
 	-framework Accelerate
+
+# Backward compatibility aliases
+libaxil-qllm-obj-y := ${libaxil-auren-obj-y}
+libaxil-qllm-obj-y-Linux := ${libaxil-auren-obj-y-Linux}
+libaxil-qllm-obj-y-Darwin := ${libaxil-auren-obj-y-Darwin}
+LDLIBS-libaxil-qllm := ${LDLIBS-libaxil-auren}
+LDLIBS-libaxil-qllm-Linux := ${LDLIBS-libaxil-auren-Linux}
+LDLIBS-libaxil-qllm-Darwin := ${LDLIBS-libaxil-auren-Darwin}
+LDFLAGS-libaxil-qllm = ${LDFLAGS-libaxil-auren}
 
 llamacpp := submodules/llama.cpp/build
 
@@ -31,6 +40,18 @@ arch != uname -m
 COMPILER_C   := $(shell command -v clang  >/dev/null 2>&1 && echo clang  || echo ${CC})
 COMPILER_CXX := $(shell command -v clang++ >/dev/null 2>&1 && echo clang++ || echo ${CXX})
 
+ifeq ($(arch),x86_64)
+  has_vpdpbusd := $(shell echo 'void test(void){ __asm__("vpdpbusd %ymm0, %ymm1, %ymm2"); }' | $(COMPILER_C) -c -x c - -o /dev/null 2>/dev/null && echo 1 || echo 0)
+else
+  has_vpdpbusd := 1
+endif
+
+ifeq ($(has_vpdpbusd),1)
+  GGML_NATIVE ?= ON
+else
+  GGML_NATIVE ?= OFF
+endif
+
 SDK_VERSION := 1.4.328.1
 SDK_URL := https://sdk.lunarg.com/sdk/download/${SDK_VERSION}/linux/vulkansdk-linux-${arch}-${SDK_VERSION}.tar.xz
 vulkan := third_party/${SDK_VERSION}/${arch}
@@ -41,7 +62,7 @@ prefix-Darwin-arm64  := /opt/homebrew
 prefix-Darwin-x86_64 := /usr/local
 prefix-Darwin := ${prefix-Darwin-${arch}}
 omp := ${prefix-Darwin}/Cellar/libomp/
-omp-version := $(shell ls ${omp} | head -n 1)
+omp-version := $(shell ls ${omp} 2>/dev/null | head -n 1)
 omp := ${omp}/${omp-version}
 
 CFLAGS := -g -I${llamacpp}/../include -I${llamacpp}/../ggml/include -I${vulkan}/include
@@ -49,7 +70,7 @@ CFLAGS-Darwin := -I${omp}/include
 
 ggmlp := ${llamacpp}/ggml/src
 
-LDFLAGS-libaxil-qllm := -L${llamacpp}/src -L${ggmlp}
+LDFLAGS-libaxil-auren := -L${llamacpp}/src -L${ggmlp}
 LDFLAGS-Linux := -L${ggmlp}/ggml-vulkan -L${vulkan}/lib
 LDFLAGS-Darwin := -L${ggmlp}/ggml-metal -L${ggmlp}/ggml-blas -L${omp}/lib
 
@@ -60,11 +81,38 @@ third_party-Linux := ${vulkan}/include/shaderc/shaderc.h
 
 include ./../mk/include.mk
 
+all: bin/auren-path bin/auren-list
+
+bin/auren-path: scripts/auren-path | bin
+	cp $< $@
+	chmod 755 $@
+
+bin/auren-list: scripts/auren-list | bin
+	cp $< $@
+	chmod 755 $@
+
+bin/qllm-path: bin/auren-path | bin
+	ln -sf auren-path $@
+
+bin/qllm-list: bin/auren-list | bin
+	ln -sf auren-list $@
+
+bin/qllm-chat: bin/auren-chat | bin
+	ln -sf auren-chat $@
+
+${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc: auren.pc
+	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
+	install -m 644 auren.pc $@
+
+${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc: axil-auren.pc
+	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
+	install -m 644 axil-auren.pc $@
+
 ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-qllm.pc: axil-qllm.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
 	install -m 644 axil-qllm.pc $@
 
-install: ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-qllm.pc
+install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-qllm.pc
 
 src/libqllm.o: $(llamacpp)/src/libllama.a
 
@@ -75,6 +123,7 @@ $(llamacpp)/src/libllama.a: ${llamacpp}/Makefile
 
 $(llamacpp)/Makefile: ${third_party-${uname}}
 	echo "[INFO] Using Vulkan SDK in $(vulkan)"; \
+	echo "[INFO] Using GGML_NATIVE=${GGML_NATIVE} (toolchain vpdpbusd support: ${has_vpdpbusd})"; \
 	mkdir -p ${llamacpp} 2>/dev/null || true
 	export VULKAN_SDK="$(abspath $(vulkan))" && \
 		export PATH="$$VULKAN_SDK/bin:$$PATH" && \
@@ -84,6 +133,8 @@ $(llamacpp)/Makefile: ${third_party-${uname}}
 		cd ${llamacpp} && \
 		cmake .. ${CMAKE_FLAGS-${uname}} \
 			-DCMAKE_INSTALL_PREFIX:PATH=${PREFIX}/share/qllm \
+			-DGGML_NATIVE=${GGML_NATIVE} \
+			$(if $(filter OFF,${GGML_NATIVE}),-DGGML_AVX_VNNI=OFF -DGGML_AVX512_VNNI=OFF) \
 			-DLLAMA_CURL=OFF \
 			-DLLAMA_BUILD_EXAMPLES=OFF \
 			-DLLAMA_BUILD_TESTS=OFF \

@@ -17,6 +17,12 @@
 #include <ttypt/qsys.h>
 #include <ttypt/corm.h>
 
+#define QLLM_MAX_CACHED_BLOCKS 64
+struct qllm_block_entry {
+	uint64_t hash;
+	int32_t  n_tokens;
+};
+
 struct qllm_context {
 	uint32_t		 magic;
 	struct llama_model	*model;
@@ -41,6 +47,10 @@ struct qllm_context {
 	int32_t			 gen_tokens;
 	int32_t			 eos_start;
 	float			 eos_bias_max;
+
+	struct qllm_block_entry  cached_blocks[QLLM_MAX_CACHED_BLOCKS];
+	int32_t			 n_cached_blocks;
+	int32_t			 current_block_idx;
 };
 
 #define QLLM_MAGIC 0x514C4C4D
@@ -482,10 +492,11 @@ auto_ngl(const char *path, int gpu, uint32_t n_ctx, uint32_t max_offload_bytes,
 	    (size_t)n_ctx * n_embd_kv * 4ULL * (size_t)n_contexts;
 
 	/* Allow disabling KV-offload accounting via environment. */
-	if (getenv("QLLM_OFFLOAD_KQV") &&
-	    (getenv("QLLM_OFFLOAD_KQV")[0] == '0' ||
-	     getenv("QLLM_OFFLOAD_KQV")[0] == 'n' ||
-	     getenv("QLLM_OFFLOAD_KQV")[0] == 'N'))
+	const char *offload_env = getenv("AUREN_OFFLOAD_KQV");
+	if (offload_env &&
+	    (offload_env[0] == '0' ||
+	     offload_env[0] == 'n' ||
+	     offload_env[0] == 'N'))
 		offload_kqv = 0;
 
 	/* Fixed reserve for driver/OS. */
@@ -541,7 +552,7 @@ auto_ngl(const char *path, int gpu, uint32_t n_ctx, uint32_t max_offload_bytes,
 
 	/* Manual adjustment from env. */
 	{
-		const char *adjust = getenv("QLLM_NGL_ADJUST");
+		const char *adjust = getenv("AUREN_NGL_ADJUST");
 
 		if (adjust) {
 			int adj = atoi(adjust);
@@ -874,14 +885,14 @@ qllm_create(const struct qllm_config *cfg)
 		int nl = 0, ne = 0, nc = 0, nh = 0, nkh = 0;
 
 		get_model_dims(cfg->model_path, &nl, &ne, &nc, &nh, &nkh);
-		if (nc > 0)
+		if (nc > 0 && nc <= 4096)
 			ctx_params.n_ctx = (uint32_t) nc;
 		else
 			ctx_params.n_ctx = 2048; /* Fallback */
 	}
 
-	ctx_params.n_batch = ctx_params.n_ctx;
-	ctx_params.n_ubatch = 0;
+	ctx_params.n_batch = ctx_params.n_ctx < 2048 ? ctx_params.n_ctx : 2048;
+	ctx_params.n_ubatch = ctx_params.n_batch < 512 ? ctx_params.n_batch : 512;
 	ctx_params.n_seq_max = cfg->n_contexts > 0 ? (uint32_t)cfg->n_contexts : 1;
 
 	/* Enable embeddings and mean pooling only if requested.
@@ -1031,6 +1042,14 @@ qllm_n_ctx(struct qllm_context *qctx)
 	return qctx->max_tokens;
 }
 
+int
+qllm_n_embd(struct qllm_context *qctx)
+{
+	if (!QLLM_VALID(qctx))
+		return 0;
+	return (int)qctx->n_embd;
+}
+
 struct llama_sampler *
 qllm_sampler_create(struct qllm_context *qctx,
 		    const struct qllm_config *cfg)
@@ -1155,22 +1174,23 @@ qllm_set_grammar(struct qllm_context *qctx, const char *grammar_str)
 	return 0;
 }
 
-/* Internal streaming helper: runs generation and calls cb() for each piece. */
-static int
-qllm_generate_stream_internal(struct qllm_context *qctx,
-			      const char *prompt,
-			      qllm_token_cb cb,
-			      void *user)
+int
+qllm_generate_stream_full(struct qllm_context *qctx,
+			  const char *prompt,
+			  qllm_token_full_cb cb,
+			  void *user)
 {
 	int32_t n_prompt;
 	llama_token tok;
 	char piece[256];
 	int n_piece;
 	int32_t step;
-	const int32_t max_gen = qctx->max_tokens;
+	int32_t max_gen;
 
 	if (!QLLM_VALID(qctx) || !prompt || !cb)
 		return -1;
+
+	max_gen = qctx->max_tokens;
 
 	llama_free(qctx->ctx);
 	qctx->ctx = llama_init_from_model(qctx->model, qctx->params);
@@ -1178,6 +1198,8 @@ qllm_generate_stream_internal(struct qllm_context *qctx,
 	qctx->anchor_start = 0;
 	qctx->anchor_end = 0;
 	qctx->gen_tokens = 0;
+	qctx->n_cached_blocks = 0;
+	qctx->current_block_idx = 0;
 
 	n_prompt = llama_tokenize(qctx->vocab,
 				  prompt,
@@ -1217,10 +1239,33 @@ qllm_generate_stream_internal(struct qllm_context *qctx,
 			continue;
 
 		qctx->gen_tokens++;
-		cb(user, piece, (size_t) n_piece);
+		cb(user, (int32_t) tok, piece, (size_t) n_piece);
 	}
 
 	return 0;
+}
+
+struct qllm_token_adapter {
+	qllm_token_cb cb;
+	void *user;
+};
+
+static void
+qllm_token_adapter_cb(void *user, int32_t tok, const char *chunk, size_t len)
+{
+	(void)tok;
+	struct qllm_token_adapter *a = (struct qllm_token_adapter *)user;
+	a->cb(a->user, chunk, len);
+}
+
+static int
+qllm_generate_stream_internal(struct qllm_context *qctx,
+			      const char *prompt,
+			      qllm_token_cb cb,
+			      void *user)
+{
+	struct qllm_token_adapter a = { cb, user };
+	return qllm_generate_stream_full(qctx, prompt, qllm_token_adapter_cb, &a);
 }
 
 int
@@ -1359,6 +1404,8 @@ qllm_prime(struct qllm_context *qctx,
 		return -1;
 
 	qctx->gen_tokens = 0;
+	qctx->n_cached_blocks = 0;
+	qctx->current_block_idx = 0;
 
 	n_prompt = llama_tokenize(qctx->vocab,
 				  prompt,
@@ -1375,6 +1422,54 @@ qllm_prime(struct qllm_context *qctx,
 
 	if (qllm_decode_tokens(qctx, qctx->token_buf, n_prompt, 0) != 0)
 		return -1;
+
+	return 0;
+}
+
+int
+qllm_prime_block(struct qllm_context *qctx,
+		 uint64_t block_hash,
+		 const char *text)
+{
+	int32_t n_prompt;
+
+	if (!QLLM_VALID(qctx) || !qctx->ctx || !text)
+		return -1;
+
+	qctx->gen_tokens = 0;
+
+	/* If block_hash matches the pre-evaluated block at current position, skip decode */
+	if (block_hash != 0 && qctx->current_block_idx < qctx->n_cached_blocks &&
+	    qctx->cached_blocks[qctx->current_block_idx].hash == block_hash) {
+		qctx->current_block_idx++;
+		return 0;
+	}
+
+	/* Cache miss or content divergence: truncate any downstream cached blocks */
+	qctx->n_cached_blocks = qctx->current_block_idx;
+
+	n_prompt = llama_tokenize(qctx->vocab,
+				  text,
+				  (int32_t)strlen(text),
+				  qctx->token_buf,
+				  qctx->max_tokens,
+				  true,
+				  true);
+	if (n_prompt < 0)
+		return -1;
+
+	if (n_prompt > 0) {
+		if (qllm_decode_tokens(qctx, qctx->token_buf, n_prompt, 0) != 0)
+			return -1;
+	}
+
+	/* Record newly evaluated block */
+	if (block_hash != 0 && qctx->n_cached_blocks < QLLM_MAX_CACHED_BLOCKS) {
+		qctx->cached_blocks[qctx->n_cached_blocks].hash = block_hash;
+		qctx->cached_blocks[qctx->n_cached_blocks].n_tokens = n_prompt;
+		qctx->n_cached_blocks++;
+		qctx->current_block_idx++;
+	}
 
 	return 0;
 }
@@ -1518,6 +1613,8 @@ qllm_reset(struct qllm_context *qctx)
 	qctx->anchor_start = 0;
 	qctx->anchor_end = 0;
 	qctx->gen_tokens = 0;
+	qctx->n_cached_blocks = 0;
+	qctx->current_block_idx = 0;
 }
 
 int

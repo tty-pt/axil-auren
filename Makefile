@@ -40,6 +40,18 @@ arch != uname -m
 COMPILER_C   := $(shell command -v clang  >/dev/null 2>&1 && echo clang  || echo ${CC})
 COMPILER_CXX := $(shell command -v clang++ >/dev/null 2>&1 && echo clang++ || echo ${CXX})
 
+ifeq ($(arch),x86_64)
+  has_vpdpbusd := $(shell echo 'void test(void){ __asm__("vpdpbusd %ymm0, %ymm1, %ymm2"); }' | $(COMPILER_C) -c -x c - -o /dev/null 2>/dev/null && echo 1 || echo 0)
+else
+  has_vpdpbusd := 1
+endif
+
+ifeq ($(has_vpdpbusd),1)
+  GGML_NATIVE ?= ON
+else
+  GGML_NATIVE ?= OFF
+endif
+
 SDK_VERSION := 1.4.328.1
 SDK_URL := https://sdk.lunarg.com/sdk/download/${SDK_VERSION}/linux/vulkansdk-linux-${arch}-${SDK_VERSION}.tar.xz
 vulkan := third_party/${SDK_VERSION}/${arch}
@@ -111,6 +123,7 @@ $(llamacpp)/src/libllama.a: ${llamacpp}/Makefile
 
 $(llamacpp)/Makefile: ${third_party-${uname}}
 	echo "[INFO] Using Vulkan SDK in $(vulkan)"; \
+	echo "[INFO] Using GGML_NATIVE=${GGML_NATIVE} (toolchain vpdpbusd support: ${has_vpdpbusd})"; \
 	mkdir -p ${llamacpp} 2>/dev/null || true
 	export VULKAN_SDK="$(abspath $(vulkan))" && \
 		export PATH="$$VULKAN_SDK/bin:$$PATH" && \
@@ -120,6 +133,8 @@ $(llamacpp)/Makefile: ${third_party-${uname}}
 		cd ${llamacpp} && \
 		cmake .. ${CMAKE_FLAGS-${uname}} \
 			-DCMAKE_INSTALL_PREFIX:PATH=${PREFIX}/share/qllm \
+			-DGGML_NATIVE=${GGML_NATIVE} \
+			$(if $(filter OFF,${GGML_NATIVE}),-DGGML_AVX_VNNI=OFF -DGGML_AVX512_VNNI=OFF) \
 			-DLLAMA_CURL=OFF \
 			-DLLAMA_BUILD_EXAMPLES=OFF \
 			-DLLAMA_BUILD_TESTS=OFF \

@@ -954,12 +954,21 @@ qllm_create(const struct qllm_config *cfg)
 	} else {
 		if (ncpu <= 0)
 			n_threads = 1;
-		else
+		else {
 			n_threads = (int32_t)(ncpu > 1 ? ncpu / 2 : 1);
+			/* Clamp default auto-threads to 4 on CPU to avoid OpenMP / spinlock thrashing */
+			if (n_threads > 4)
+				n_threads = 4;
+		}
 	}
 
 	ctx_params.n_threads = n_threads;
-	ctx_params.n_threads_batch = (int32_t)(ncpu > 0 ? ncpu : n_threads);
+	if (cfg->n_threads > 0) {
+		ctx_params.n_threads_batch = cfg->n_threads;
+	} else {
+		/* Clamp batch threads to max 4 to avoid massive context-switching overhead in WSL */
+		ctx_params.n_threads_batch = (int32_t)(ncpu > 4 ? 4 : (ncpu > 0 ? ncpu : n_threads));
+	}
 
 	qctx = calloc(1, sizeof(*qctx));
 	if (!qctx)

@@ -1157,9 +1157,32 @@ build_single_typed_answer(const char *qid, struct json_object *q, const char *st
 		struct json_object *crit = json_object_object_get(q, "criteria");
 		struct json_object *cho = json_object_object_get(q, "choices");
 
+		/* Semantic alias mapping for quest-like questions */
+		if (chosen && crit && json_object_object_get(crit, "quest")) {
+			if (strcasecmp(chosen, "instruction") == 0 || strcasecmp(chosen, "task") == 0 ||
+			    strcasecmp(chosen, "directive") == 0 || strcasecmp(chosen, "code") == 0) {
+				chosen = "quest";
+			} else if (strcasecmp(chosen, "dialogue") == 0 || strcasecmp(chosen, "chat") == 0) {
+				chosen = "conversation";
+			}
+		}
+
 		/* Fallback heuristic if model output is not one of allowed choices */
-		char fallback_buf[64] = "remember";
-		if (state_str) {
+		char fallback_buf[64] = "";
+		if (crit && json_object_is_type(crit, json_type_object)) {
+			struct json_object_iterator cit = json_object_iter_begin(crit);
+			struct json_object_iterator cit_end = json_object_iter_end(crit);
+			if (!json_object_iter_equal(&cit, &cit_end)) {
+				snprintf(fallback_buf, sizeof(fallback_buf), "%s", json_object_iter_peek_name(&cit));
+			}
+		} else if (cho && json_object_is_type(cho, json_type_array) && json_object_array_length(cho) > 0) {
+			const char *first_c = json_object_get_string(json_object_array_get_idx(cho, 0));
+			if (first_c)
+				snprintf(fallback_buf, sizeof(fallback_buf), "%s", first_c);
+		}
+
+		/* Specific memory fallback for pi-mm questions containing 'remember' */
+		if (state_str && crit && json_object_object_get(crit, "remember")) {
 			if (strstr(state_str, "update") || strstr(state_str, "3 shards"))
 				snprintf(fallback_buf, sizeof(fallback_buf), "update");
 			else if (strstr(state_str, "morning") || strstr(state_str, "weather") || strstr(state_str, "Hello"))
@@ -1169,7 +1192,7 @@ build_single_typed_answer(const char *qid, struct json_object *q, const char *st
 		}
 
 		if (!chosen || !chosen[0])
-			chosen = fallback_buf;
+			chosen = fallback_buf[0] ? fallback_buf : "default";
 
 		json_object_object_add(ans, "choice", json_object_new_string(chosen));
 		json_object_object_add(ans, "confidence", json_object_new_double(0.90));
@@ -1305,8 +1328,38 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 			const char *t = to ? json_object_get_string(to) : "choice";
 			const char *instr = io ? json_object_get_string(io) : "";
 
+			struct json_object *crit = json_object_object_get(q, "criteria");
+			struct json_object *cho = json_object_object_get(q, "choices");
+			char choices_desc[512] = "";
+			size_t c_off = 0;
+			if (crit && json_object_is_type(crit, json_type_object)) {
+				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
+				struct json_object_iterator cit = json_object_iter_begin(crit);
+				struct json_object_iterator cit_end = json_object_iter_end(crit);
+				int first = 1;
+				while (!json_object_iter_equal(&cit, &cit_end)) {
+					const char *ck = json_object_iter_peek_name(&cit);
+					struct json_object *cv = json_object_iter_peek_value(&cit);
+					const char *cd = cv ? json_object_get_string(cv) : "";
+					c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off,
+					                  "%s\"%s\" (%s)", first ? "" : ", ", ck, cd);
+					first = 0;
+					json_object_iter_next(&cit);
+				}
+			} else if (cho && json_object_is_type(cho, json_type_array)) {
+				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
+				size_t ci, cn = json_object_array_length(cho);
+				for (ci = 0; ci < cn; ++ci) {
+					const char *ck = json_object_get_string(json_object_array_get_idx(cho, ci));
+					if (ck) {
+						c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off,
+						                  "%s\"%s\"", ci == 0 ? "" : ", ", ck);
+					}
+				}
+			}
+
 			p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
-			                     "- ID: %s | Type: %s | Question: %s\n", qid, t, instr);
+			                     "- ID: %s | Type: %s | Question: %s%s\n", qid, t, instr, choices_desc);
 			json_object_iter_next(&it);
 		}
 	} else if (json_object_is_type(qs_o, json_type_array)) {
@@ -1321,8 +1374,38 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 			const char *t = to ? json_object_get_string(to) : "choice";
 			const char *instr = io ? json_object_get_string(io) : "";
 
+			struct json_object *crit = json_object_object_get(q, "criteria");
+			struct json_object *cho = json_object_object_get(q, "choices");
+			char choices_desc[512] = "";
+			size_t c_off = 0;
+			if (crit && json_object_is_type(crit, json_type_object)) {
+				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
+				struct json_object_iterator cit = json_object_iter_begin(crit);
+				struct json_object_iterator cit_end = json_object_iter_end(crit);
+				int first = 1;
+				while (!json_object_iter_equal(&cit, &cit_end)) {
+					const char *ck = json_object_iter_peek_name(&cit);
+					struct json_object *cv = json_object_iter_peek_value(&cit);
+					const char *cd = cv ? json_object_get_string(cv) : "";
+					c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off,
+					                  "%s\"%s\" (%s)", first ? "" : ", ", ck, cd);
+					first = 0;
+					json_object_iter_next(&cit);
+				}
+			} else if (cho && json_object_is_type(cho, json_type_array)) {
+				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
+				size_t ci, cn = json_object_array_length(cho);
+				for (ci = 0; ci < cn; ++ci) {
+					const char *ck = json_object_get_string(json_object_array_get_idx(cho, ci));
+					if (ck) {
+						c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off,
+						                  "%s\"%s\"", ci == 0 ? "" : ", ", ck);
+					}
+				}
+			}
+
 			p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
-			                     "- ID: %s | Type: %s | Question: %s\n", qid, t, instr);
+			                     "- ID: %s | Type: %s | Question: %s%s\n", qid, t, instr, choices_desc);
 		}
 	}
 

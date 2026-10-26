@@ -1,0 +1,22 @@
+#!/bin/sh
+# auren-server — turnkey launcher for axil-auren local inference server
+set -e
+
+DIR=$(cd "$(dirname "$0")/.." && pwd)
+PORT="${AUREN_PORT:-4242}"
+LIB_DIR="$DIR/lib"
+CONFIG="${AUREN_CONFIG_PATH:-$HOME/auren.json}"
+
+if [ ! -f "$CONFIG" ]; then
+    if [ -f "$HOME/.auren.json" ]; then
+        CONFIG="$HOME/.auren.json"
+    elif [ -f "$DIR/auren.json" ]; then
+        CONFIG="$DIR/auren.json"
+    fi
+fi
+
+export AUREN_CONFIG_PATH="$CONFIG"
+export LD_LIBRARY_PATH="$LIB_DIR:${LD_LIBRARY_PATH:-}"
+
+echo "Starting axil-auren server on port $PORT with config $CONFIG..."
+exec axil -A -d -p "$PORT" -m "$LIB_DIR/libaxil-auren" "$@"

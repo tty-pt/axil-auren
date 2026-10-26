@@ -35,6 +35,24 @@ chat_respond_error(socket_t fd, int code, const char *msg)
 }
 
 static int
+is_valid_message_content(struct json_object *item, struct json_object *content)
+{
+	if (!content || json_object_is_type(content, json_type_null)) {
+		/* Allow null/omitted content if tool_calls or function_call is present */
+		struct json_object *tc = json_object_object_get(item, "tool_calls");
+		struct json_object *fc = json_object_object_get(item, "function_call");
+		return (tc != NULL || fc != NULL);
+	}
+	if (json_object_is_type(content, json_type_string))
+		return 1;
+	if (json_object_is_type(content, json_type_array)) {
+		/* Modern OpenAI / Pi clients send array of content parts */
+		return 1;
+	}
+	return 0;
+}
+
+static int
 handler_chat_completions(socket_t cfd, char *body)
 {
 	struct json_object *req = NULL, *messages, *item, *role, *content, *sm;
@@ -63,10 +81,6 @@ handler_chat_completions(socket_t cfd, char *body)
 	}
 
 	n = json_object_array_length(messages);
-	if (n > 64) {
-		chat_respond_error(cfd, 400, "too many messages (max 64)");
-		goto out;
-	}
 
 	for (i = 0; i < (int)n; ++i) {
 		item = json_object_array_get_idx(messages, i);
@@ -74,9 +88,9 @@ handler_chat_completions(socket_t cfd, char *body)
 		content = item ? json_object_object_get(item, "content") : NULL;
 		if (!item || !json_object_is_type(item, json_type_object) ||
 		    !role || !json_object_is_type(role, json_type_string) ||
-		    !content || !json_object_is_type(content, json_type_string)) {
+		    !is_valid_message_content(item, content)) {
 			chat_respond_error(cfd, 400,
-			    "each message needs string \"role\" and \"content\"");
+			    "each message needs string \"role\" and valid string/array \"content\"");
 			goto out;
 		}
 	}
@@ -99,6 +113,18 @@ handler_chat_completions(socket_t cfd, char *body)
 		}
 	}
 
+	char sess_id[128] = {0};
+	if (axil_header_get(cfd, "x-session-id", sess_id, sizeof(sess_id)) != 0 || !sess_id[0]) {
+		struct json_object *so = json_object_object_get(req, "session_id");
+		if (so && json_object_is_type(so, json_type_string)) {
+			snprintf(sess_id, sizeof(sess_id), "%s", json_object_get_string(so));
+		}
+	}
+	qsyslog(QLOG_INFO, "chat_completions: sess_id='%s'\n", sess_id);
+	if (sess_id[0]) {
+		axil_header_set(cfd, "x-session-id", sess_id);
+	}
+
 	/* Send status + headers now, stream/complete the body later from the
 	 * loop thread when the engine's worker finishes (`drain` in qllmd.c). */
 	if (stream) {
@@ -113,7 +139,7 @@ handler_chat_completions(socket_t cfd, char *body)
 		goto out;
 	}
 
-	if (qllm_engine_chat_oneshot_model(model_id, body, make_pending(handle, stream, 0), NULL) != 0) {
+	if (qllm_engine_chat_oneshot_model_session(model_id, sess_id[0] ? sess_id : NULL, body, make_pending(handle, stream, 0), NULL) != 0) {
 		axil_respond_defer_abort(handle);
 		chat_respond_error(cfd, 503, "engine busy");
 		goto out;

@@ -90,6 +90,7 @@ int qllm_engine_chat(int sid, const char *input, void *ud, int *job_id_out);
  */
 int qllm_engine_chat_oneshot(const char *request_json, void *ud, int *job_id_out);
 int qllm_engine_chat_oneshot_model(const char *model, const char *request_json, void *ud, int *job_id_out);
+int qllm_engine_chat_oneshot_model_session(const char *model, const char *session_key, const char *request_json, void *ud, int *job_id_out);
 
 /*
  * Submit a Jev-compatible System One decision request.

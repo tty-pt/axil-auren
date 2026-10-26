@@ -62,12 +62,17 @@ vk_get_gpu(VkInstance inst, int index)
 static void
 device_mem_check(VkPhysicalDevice dev, size_t *free_b, size_t *total_b)
 {
+	VkPhysicalDeviceProperties props;
 	VkPhysicalDeviceMemoryProperties mem;
 	uint32_t heap_index = UINT32_MAX;
 	uint32_t i;
 
 	*free_b = 0;
 	*total_b = 0;
+
+	vkGetPhysicalDeviceProperties(dev, &props);
+	if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)
+		return;
 
 	vkGetPhysicalDeviceMemoryProperties(dev, &mem);
 

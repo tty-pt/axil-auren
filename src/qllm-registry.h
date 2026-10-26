@@ -66,6 +66,10 @@ const char *qllm_registry_default_id(uint32_t cap);
  * Increments in_flight. */
 int qllm_registry_acquire(const char *model_id, uint32_t required_cap, struct qllm_context **ctx_out, char *id_out, size_t id_out_sz);
 
+/* Create a dedicated session context for a model. Shares loaded model weights,
+ * but maintains an independent KV cache and context. Caller must qllm_free(). */
+int qllm_registry_create_session_context(const char *model_id, uint32_t required_cap, struct qllm_context **ctx_out, char *id_out, size_t id_out_sz);
+
 /* Release a previously acquired model. Decrements in_flight and updates last_used. */
 void qllm_registry_release(const char *model_id);
 

@@ -257,7 +257,13 @@ drain(void *cbud __attribute__((unused)),
 		}
 
 		if (p->mode) {
-			if (r->payload) {
+			if (r->err) {
+				char err_buf[256];
+				snprintf(err_buf, sizeof(err_buf),
+					"data: {\"error\":{\"message\":\"Engine error %d: generation or context failed\",\"type\":\"server_error\"}}\n\n",
+					r->err);
+				axil_write(fd, err_buf, strlen(err_buf));
+			} else if (r->payload) {
 				axil_write(fd, "data: ", 6);
 				axil_write(fd, r->payload, strlen(r->payload));
 				axil_write(fd, "\n\n", 2);

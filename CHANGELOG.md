@@ -1,3 +1,17 @@
+## 1.3.1
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
+</p>
+
+- **Session Continuation & Multi-Turn Context Fixes**:
+  - Activated compact $Q4\_0$ KV cache quantization for large context windows (`ctx_params.n_ctx >= 32768`), reducing KV cache RAM footprint by 75% and enabling stable 131,072 context execution.
+  - Aligned default Qwen context length (`n_ctx`) in `auren.json` to 131,072 tokens to match Pi coding agent specifications, preventing `Engine error -4` context exhaustion on multi-turn dialogue.
+  - Dynamic sliding-window dialogue trimming: when incoming conversation turns exceed the context window, `qllm_chat()` automatically drops the oldest non-system dialogue turns while preserving system instructions rather than aborting with an unhandled tokenization error.
+  - Prefix cache consistency: synchronized token cache state on sliding-window KV sequence eviction (`qllm_compress()`) to prevent stale offset re-evaluations.
+- **Engine Test Suite Enhancements**:
+  - Updated multi-turn session persistence tests in `engine-test` with dynamic assistant turn propagation and case-insensitive keyword verification.
+
 ## 1.3.0
 
 <p align="center">

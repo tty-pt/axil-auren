@@ -400,13 +400,41 @@ qllm_registry_init(const char *legacy_fallback_path)
 	const char *judge_id = getenv("AUREN_JUDGE_MODEL");
 	const char *embed_id = getenv("AUREN_EMBED_MODEL");
 	int same_chat_judge = 0;
-	int def_ctx = 2048;
+	int def_ctx = 0;
+	int def_ngl = -1;
 	const char *env_ctx;
+	const char *env_gpu;
+
+	env_gpu = getenv("AUREN_GPU_LAYERS");
+	if (!env_gpu) env_gpu = getenv("AUREN_N_GPU_LAYERS");
+	if (env_gpu) def_ngl = atoi(env_gpu);
 
 	pthread_mutex_lock(&g_reg_lock);
 	memset(&g_reg, 0, sizeof(g_reg));
 	g_reg.max_resident = 2; /* Default: up to 2 models resident simultaneously */
 	pthread_mutex_unlock(&g_reg_lock);
+
+	/* If caller explicitly passed a model path (e.g. engine-test), map that single model */
+	if (legacy_fallback_path && legacy_fallback_path[0]) {
+		pthread_mutex_lock(&g_reg_lock);
+		char resolved_lp[BUFSIZ];
+		expand_path(legacy_fallback_path, resolved_lp, sizeof(resolved_lp));
+		struct qllm_model_entry *e = &g_reg.entries[g_reg.count++];
+		memset(e, 0, sizeof(*e));
+		snprintf(e->id, sizeof(e->id), "default");
+		snprintf(e->path, sizeof(e->path), "%s", resolved_lp);
+		e->capabilities = QLLM_CAP_CHAT | QLLM_CAP_JUDGE | QLLM_CAP_EMBED;
+		e->cfg.model_path = e->path;
+		e->cfg.n_ctx = def_ctx;
+		e->cfg.enable_embeddings = 1;
+		e->last_used = time(NULL);
+
+		snprintf(g_reg.default_chat, sizeof(g_reg.default_chat), "default");
+		snprintf(g_reg.default_judge, sizeof(g_reg.default_judge), "default");
+		snprintf(g_reg.default_embed, sizeof(g_reg.default_embed), "default");
+		pthread_mutex_unlock(&g_reg_lock);
+		return 0;
+	}
 
 	/* 1. Try AUREN_CONFIG_PATH or default candidate search order */
 	if (cfg_path && cfg_path[0]) {
@@ -473,6 +501,7 @@ qllm_registry_init(const char *legacy_fallback_path)
 		struct qllm_config cfg;
 		memset(&cfg, 0, sizeof(cfg));
 		cfg.n_ctx = def_ctx;
+		if (def_ngl >= 0) cfg.n_gpu_layers = def_ngl;
 		qllm_registry_add(shared_id, chat_path, QLLM_CAP_CHAT | QLLM_CAP_JUDGE, &cfg);
 		qllm_registry_set_default(QLLM_ROLE_CHAT, shared_id);
 		qllm_registry_set_default(QLLM_ROLE_JUDGE, shared_id);
@@ -481,6 +510,7 @@ qllm_registry_init(const char *legacy_fallback_path)
 			struct qllm_config cfg;
 			memset(&cfg, 0, sizeof(cfg));
 			cfg.n_ctx = def_ctx;
+			if (def_ngl >= 0) cfg.n_gpu_layers = def_ngl;
 			qllm_registry_add(chat_id && chat_id[0] ? chat_id : "chat-model", chat_path, QLLM_CAP_CHAT, &cfg);
 			qllm_registry_set_default(QLLM_ROLE_CHAT, chat_id && chat_id[0] ? chat_id : "chat-model");
 		}
@@ -488,6 +518,7 @@ qllm_registry_init(const char *legacy_fallback_path)
 			struct qllm_config cfg;
 			memset(&cfg, 0, sizeof(cfg));
 			cfg.n_ctx = def_ctx;
+			if (def_ngl >= 0) cfg.n_gpu_layers = def_ngl;
 			qllm_registry_add(judge_id && judge_id[0] ? judge_id : "judge-model", judge_path, QLLM_CAP_JUDGE, &cfg);
 			qllm_registry_set_default(QLLM_ROLE_JUDGE, judge_id && judge_id[0] ? judge_id : "judge-model");
 		}
@@ -642,6 +673,70 @@ qllm_registry_acquire(const char *model_id, uint32_t required_cap, struct qllm_c
 		snprintf(id_out, id_out_sz, "%s", target->id);
 
 	pthread_mutex_unlock(&g_reg_lock);
+	return QLLM_REG_OK;
+}
+
+int
+qllm_registry_create_session_context(const char *model_id, uint32_t required_cap, struct qllm_context **ctx_out, char *id_out, size_t id_out_sz)
+{
+	int i;
+	struct qllm_model_entry *target = NULL;
+	const char *resolved_id = model_id;
+	struct qllm_config cfg_copy;
+	struct qllm_context *ctx = NULL;
+
+	pthread_mutex_lock(&g_reg_lock);
+
+	/* If no model_id specified, resolve role default */
+	if (!resolved_id || !resolved_id[0]) {
+		if (required_cap & QLLM_CAP_CHAT)
+			resolved_id = g_reg.default_chat;
+		else if (required_cap & QLLM_CAP_JUDGE)
+			resolved_id = g_reg.default_judge;
+		else if (required_cap & QLLM_CAP_EMBED)
+			resolved_id = g_reg.default_embed;
+	}
+
+	/* Find target */
+	for (i = 0; i < g_reg.count; ++i) {
+		if (resolved_id && strcmp(g_reg.entries[i].id, resolved_id) == 0) {
+			target = &g_reg.entries[i];
+			break;
+		}
+	}
+
+	/* Fallback */
+	if (!target && (!resolved_id || !resolved_id[0] || strcmp(resolved_id, "default") == 0)) {
+		for (i = 0; i < g_reg.count; ++i) {
+			if (g_reg.entries[i].capabilities & required_cap) {
+				target = &g_reg.entries[i];
+				break;
+			}
+		}
+	}
+
+	if (!target) {
+		pthread_mutex_unlock(&g_reg_lock);
+		return QLLM_REG_ERR_UNKNOWN;
+	}
+
+	if (!(target->capabilities & required_cap)) {
+		pthread_mutex_unlock(&g_reg_lock);
+		return QLLM_REG_ERR_CAP;
+	}
+
+	if (id_out && id_out_sz > 0)
+		snprintf(id_out, id_out_sz, "%s", target->id);
+
+	cfg_copy = target->cfg;
+	target->last_used = time(NULL);
+	pthread_mutex_unlock(&g_reg_lock);
+
+	ctx = qllm_create(&cfg_copy);
+	if (!ctx)
+		return QLLM_REG_ERR_LOAD;
+
+	*ctx_out = ctx;
 	return QLLM_REG_OK;
 }
 

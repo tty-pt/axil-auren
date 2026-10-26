@@ -171,6 +171,85 @@ curl -s http://localhost:4242/v1/chat/completions \
 }
 ```
 
+### 1.1 First-Class Session Continuity & Prefix KV Cache Persistence
+
+Unlike naive LLM servers that treat every chat request as a stateless "oneshot" (wiping the KV cache and re-evaluating 10,000+ system prompt tokens on every turn), `axil-auren` provides **native session continuity**:
+
+1. Pass an `x-session-id: <session_id>` HTTP header or a `"session_id": "..."` field in the JSON body.
+2. `axil-auren` binds the request to a persistent session slot with dedicated context and retains the KV cache across conversational turns.
+3. On subsequent turns (Turn 2+), `axil-auren` compares the rendered conversation token stream against its cached tokens, evicting only divergent downstream cells via `llama_memory_seq_rm()` and evaluating **only the new turn delta**.
+4. Large system prompts and tool schemas (~15,000 tokens) are ingested once on Turn 1; subsequent turns respond in milliseconds with up to **15x+ speedup**.
+
+```bash
+# Turn 1: Starts session and ingests system context
+curl -s http://localhost:4242/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-session-id: my-session-42" \
+  -d '{
+    "model": "qwen",
+    "messages": [
+      { "role": "system", "content": "You are a coding assistant. Project rule: C99 standard." },
+      { "role": "user", "content": "What is the project standard?" }
+    ]
+  }'
+
+# Turn 2: Reuses KV cache for system prompt and previous turn — evaluates ONLY the new question!
+curl -s http://localhost:4242/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-session-id: my-session-42" \
+  -d '{
+    "model": "qwen",
+    "messages": [
+      { "role": "system", "content": "You are a coding assistant. Project rule: C99 standard." },
+      { "role": "user", "content": "What is the project standard?" },
+      { "role": "assistant", "content": "The project standard is C99." },
+      { "role": "user", "content": "Confirm standard in two words." }
+    ]
+  }'
+```
+
+### 1.2 Pi Coding Agent Integration
+
+`axil-auren` is fully compatible with modern autonomous agent loops such as the [Pi coding agent](https://github.com/earendil-works/pi):
+- Supports OpenAI content block arrays (`[{"type":"text","text":"..."}]`) alongside strings.
+- Supports assistant messages with `tool_calls` and null/empty content.
+- Full SSE delta streaming spec compliance (`id`, `object: "chat.completion.chunk"`, `created`, `model`, `finish_reason`).
+- Scaled CPU matrix-multiplication batch threading utilizing all online cores.
+
+Configure `~/.pi/agent/models.json`:
+```json
+{
+  "providers": {
+    "auren": {
+      "name": "axil-auren",
+      "baseUrl": "http://localhost:4242/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "models": [
+        {
+          "id": "qwen",
+          "name": "Qwen 2.5 0.5B Instruct",
+          "contextWindow": 131072,
+          "maxTokens": 32768
+        }
+      ]
+    }
+  }
+}
+```
+
+Install the session continuity extension at `~/.pi/agent/extensions/auren-prefix-cache.ts` to automatically inject the workspace session ID on every request:
+```ts
+export default function aurenPrefixCache(pi: any) {
+  pi.on("before_provider_headers", (event: any, ctx: any) => {
+    if (ctx?.model?.provider === "auren") {
+      event.headers["x-session-id"] = ctx?.sessionManager?.getSessionId?.() || "default";
+    }
+  });
+}
+```
+Run `pi --model auren/qwen` to start coding with instant multi-turn turnaround.
+
 ### 2. Semantic Vector Embeddings (`POST /v1/embeddings`)
 
 Generate dense float vectors for semantic search and retrieval with `libsepal`. Supports single strings or batch arrays:
@@ -303,6 +382,29 @@ The System One API evaluates structured questions against a provided state and r
 
 ---
 
+## Core API (The Essential 20%)
+
+The canonical C interface is exposed in `<ttypt/auren.h>` (with legacy forwarding in `<ttypt/qllm.h>`):
+
+| Function | Signature | Description |
+| :--- | :--- | :--- |
+| `auren_create` | `struct auren_context *auren_create(const struct auren_config *cfg)` | Create model context with auto GPU offload and Q4_0 KV |
+| `auren_free` | `void auren_free(struct auren_context *ctx)` | Free model context and session memory |
+| `auren_generate` | `long auren_generate(ctx, prompt, out, out_sz)` | Synchronous text generation into user-allocated buffer |
+| `auren_generate_stream` | `long auren_generate_stream(ctx, prompt, cb, ud)` | Streaming generation delivering UTF-8 text pieces |
+| `auren_generate_stream_full` | `long auren_generate_stream_full(ctx, prompt, cb, ud)` | Streaming generation emitting token IDs and text pieces |
+| `auren_embed` | `long auren_embed(ctx, text, out, out_dim)` | Generate dense vector embeddings for semantic search |
+| `auren_n_embd` | `int auren_n_embd(struct auren_context *ctx)` | Query model embedding dimension (e.g. 384 for BGE) |
+| `auren_chat` | `int auren_chat(ctx, msgs, n, prev_prompt, cb, ud)` | Multi-turn chat with token-level prefix KV cache reuse |
+| `auren_prime` | `int auren_prime(struct auren_context *ctx, prompt)` | Pre-decode a prompt into the KV cache |
+| `auren_prime_block` | `int auren_prime_block(ctx, hash, text)` | Content-addressed 0 ms bypass of cached prompt blocks |
+| `auren_reset` | `void auren_reset(struct auren_context *ctx)` | Clear KV cache and reset generation sequence |
+| `auren_set_seq` | `void auren_set_seq(ctx, uint32_t seq_id)` | Switch active sequence index for multi-session KV |
+
+👉 *For complete deployment recipes, session continuity, and Pi agent integration, see [docs/USAGE.md](docs/USAGE.md). For the complete C function reference, see [docs/API.md](docs/API.md).*
+
+---
+
 ## C API Quickstart (`ttypt/auren.h`)
 
 Embed local inference and vector embeddings directly into your C application in under 30 lines:
@@ -369,14 +471,18 @@ cc app.c $(pkg-config --cflags --libs axil-auren)
 
 ---
 
-## Build & Test
+## Installation & Build
 
-```bash
-make            # Builds lib/libaxil-auren.so, bin/auren-chat, and bin/engine-test
-make test       # Runs the comprehensive native test suite
-sudo make install
+### Prebuilt Packages
+Prebuilt packages are distributed from tty.pt for Linux (APT / Alpine / Arch / Fedora-RHEL), macOS (Homebrew), Windows (winget / MSYS2), and OpenBSD. Follow the [installation instructions](https://github.com/tty-pt/ci/blob/main/docs/install.md) and use **libauren** (or **axil-auren**) as the package name.
+
+### Build from Source
+```sh
+make                  # builds lib/libaxil-auren.so, bin/auren-chat, and bin/engine-test
+make test             # run unit, engine, and session continuity tests
+sudo make install     # install headers, binaries, and module to system
 ```
 
 ## License
 
-BSD 2-Clause License. Copyright (c) 2025, tty-pt. See `LICENSE`.
+BSD 2-Clause License. Copyright (c) 2026, tty-pt. See `LICENSE`.

@@ -18,9 +18,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define DIM_EXPECTED 896
 #define RECS_MAX     2048
+
+static double now_ms(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
 
 struct result_rec {
 	int   job_id;
@@ -397,6 +404,107 @@ main(int argc, char **argv)
 	if (chunks < 1)
 		return fail("no streamed oneshot chunks");
 	printf("oneshot(stream): %d delta chunks + stop\n", chunks);
+
+	/* --- oneshot chat with array-of-blocks content (Pi / modern client format) --- */
+	if (qllm_engine_chat_oneshot(
+	    "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}],\"stream\":false}",
+	    NULL, &job_id) != 0)
+		return fail("oneshot-array submit");
+	target++;
+	if (drain_until(target) != 0)
+		return fail("oneshot-array wait");
+	r = rec_last(job_id);
+	if (!r || r->more || r->err != 0 || !r->payload)
+		return fail("oneshot-array result");
+	printf("oneshot(array-content): success (%zu bytes)\n", strlen(r->payload));
+
+	/* --- session continuity with prefix KV reuse (500+ token system context) --- */
+	{
+		const char *sess_id = "test-session-prefix-123";
+		double t1_start, t1_end, t2_start, t2_end;
+		double dur1, dur2;
+		char *reply1 = NULL;
+		char sys_pad[4096];
+		int written = snprintf(sys_pad, sizeof(sys_pad),
+		    "You are a helpful assistant. System instructions: ");
+		for (int p = 0; p < 20; ++p) {
+			written += snprintf(sys_pad + written, sizeof(sys_pad) - written,
+			    "The quick brown fox jumps over the lazy dog. "
+			    "A journey of a thousand miles begins with a single step. "
+			    "Practice makes perfect. ");
+		}
+		snprintf(sys_pad + written, sizeof(sys_pad) - written,
+		    "Important rule: The secret magic word is CHERRY99.");
+
+		/* Turn 1: 500+ token System prompt + User 1 */
+		char body1[8192];
+		snprintf(body1, sizeof(body1),
+		    "{\"messages\":["
+		    "{\"role\":\"system\",\"content\":\"%s\"},"
+		    "{\"role\":\"user\",\"content\":\"Say: hello\"}"
+		    "],\"stream\":false}", sys_pad);
+
+		t1_start = now_ms();
+		if (qllm_engine_chat_oneshot_model_session(NULL, sess_id, body1, NULL, &job_id) != 0)
+			return fail("session turn1 submit");
+		target++;
+		if (drain_until(target) != 0)
+			return fail("session turn1 wait");
+		t1_end = now_ms();
+		dur1 = t1_end - t1_start;
+
+		r = rec_last(job_id);
+		if (!r || r->more || r->err != 0 || !r->payload)
+			return fail("session turn1 result");
+
+		/* Extract assistant reply from completion */
+		{
+			struct json_object *o = json_tokener_parse(r->payload);
+			if (o) {
+				struct json_object *c0 = json_object_array_get_idx(
+					json_object_object_get(o, "choices"), 0);
+				struct json_object *msg = json_object_object_get(c0, "message");
+				struct json_object *content = json_object_object_get(msg, "content");
+				if (content)
+					reply1 = strdup(json_object_get_string(content));
+				json_object_put(o);
+			}
+		}
+		if (!reply1)
+			return fail("session turn1 parse reply");
+
+		/* Turn 2: Continued conversation with accumulated history */
+		char body2[8192];
+		snprintf(body2, sizeof(body2),
+		    "{\"messages\":["
+		    "{\"role\":\"system\",\"content\":\"%s\"},"
+		    "{\"role\":\"user\",\"content\":\"Say: hello\"},"
+		    "{\"role\":\"assistant\",\"content\":\"hello\"},"
+		    "{\"role\":\"user\",\"content\":\"What is the secret magic word?\"}"
+		    "],\"stream\":false}", sys_pad);
+		free(reply1);
+
+		t2_start = now_ms();
+		if (qllm_engine_chat_oneshot_model_session(NULL, sess_id, body2, NULL, &job_id) != 0)
+			return fail("session turn2 submit");
+		target++;
+		if (drain_until(target) != 0)
+			return fail("session turn2 wait");
+		t2_end = now_ms();
+		dur2 = t2_end - t2_start;
+
+		r = rec_last(job_id);
+		if (!r || r->more || r->err != 0 || !r->payload)
+			return fail("session turn2 result");
+
+		if (!strstr(r->payload, "CHERRY99")) {
+			fprintf(stderr, "Turn 2 response: %s\n", r->payload ? r->payload : "(null)");
+			return fail("session turn2 failed to recall secret token");
+		}
+
+		printf("session-continuity: 500+ token context verified, turn1=%.1fms, turn2=%.1fms, recalled secret token ok\n",
+			dur1, dur2);
+	}
 
 	qllm_engine_shutdown();
 

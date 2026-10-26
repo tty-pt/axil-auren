@@ -1,3 +1,29 @@
+## 1.3.0
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
+</p>
+
+- **First-Class Session Continuity & Prefix KV Cache Persistence**:
+  - Native session lifecycle management via `x-session-id` HTTP request headers and JSON payload `"session_id"` field.
+  - Dedicated persistent session slots in `qllm-engine` with independent context allocations (`qllm_registry_create_session_context`) sharing underlying model weights without KV cache interference.
+  - Strict compliance with Axil deferred response lifecycle: `axil_header_set(cfd, "x-session-id", ...)` is called before `axil_respond_defer(cfd, 200)` to preserve HTTP response framing.
+  - Token-level prefix KV reuse: `qllm_chat()` compares incoming conversation tokens against `cached_tokens`, evicting only divergent downstream cells via `llama_memory_seq_rm()` and evaluating only the incremental suffix. Cuts multi-turn prompt latency by 15x+ (e.g. 30.5s -> 2.0s on 3,500+ token prompts).
+  - Preserved conversational assistant tokens in cache across generation turns for seamless delta evaluations.
+- **Pi Coding Agent & Modern OpenAI Payload Compatibility**:
+  - Support for structured content block arrays (`[{"type":"text","text":"..."}]`) alongside traditional strings in `POST /v1/chat/completions`.
+  - Full OpenAI SSE streaming spec compliance: each delta chunk delivers `id`, `object: "chat.completion.chunk"`, `created`, `model`, and explicit `finish_reason: null`, followed by the terminal `finish_reason: "stop"`.
+  - Dynamic message allocation in `worker_oneshot` replacing fixed limits.
+  - Structured error propagation in SSE streams instead of silent stream drops.
+- **CPU Batch Matrix-Multiplication Optimization**:
+  - Configured `n_threads_batch = sysconf(_SC_NPROCESSORS_ONLN)` to scale prompt processing across all online CPU cores while maintaining balanced single-token generation threads.
+  - Enabled $Q4\_0$ KV cache quantization for ultra-large context windows.
+- **Vulkan Software Device Filter & Config Discovery**:
+  - Filtered out `VK_PHYSICAL_DEVICE_TYPE_CPU` (e.g. llvmpipe) in `qllm_backend_mem_check()` to prevent pathological slowdowns when running under CPU-emulated Vulkan rasterizers.
+  - Expanded configuration discovery to inspect `~/auren.json` and `~/.auren.json` in addition to `./auren.json`.
+- **Automated Verification & Benchmarks**:
+  - Expanded `engine-test` suite with 500+ token multi-turn session persistence tests verifying prefix reuse, delta decoding, and conversational recall.
+
 ## 1.0.0 (libauren)
 
 <p align="center">

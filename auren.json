@@ -4,8 +4,8 @@
       "id": "qwen",
       "path": "~/.models/qwen2.5-0.5b-instruct.gguf",
       "capabilities": ["chat", "judge"],
-      "n_ctx": 4096,
-      "n_gpu_layers": 32,
+      "n_ctx": 131072,
+      "n_gpu_layers": 0,
       "temperature": 0.7
     },
     {

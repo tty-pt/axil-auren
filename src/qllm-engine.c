@@ -37,11 +37,12 @@
 #define QE_JOB_MAX  64
 #define QE_VEC_MAX  4096
 #define QE_SESSIONS 16
-#define QE_MAX_MSGS 64
+#define QE_MAX_MSGS 256
 
 struct qllm_engine_job {
 	int   kind;
 	int   sid;      /* QE_JOB_CHAT / session meta kinds */
+	char *session_key; /* string session identifier */
 	char *model;    /* explicit model ID or NULL for default */
 	char *input;    /* owned by engine; freed after processing (may be NULL) */
 	void *ud;
@@ -51,6 +52,7 @@ struct qllm_engine_job {
 struct qllm_session {
 	int      used;           /* slot occupied */
 	int      sid;
+	char     session_key[128];
 	char    *system_prompt;  /* strdup'd, session-owned; may be NULL */
 	uint64_t last_used_seq;  /* LRU */
 	char     model_used[64];
@@ -109,6 +111,7 @@ struct stream_st {
 	int    seq;
 	int    err;
 	int    streaming;  /* oneshot: push per-chunk results only when true */
+	const char *model;
 	char **acc;
 	size_t *acc_len;
 };
@@ -360,6 +363,92 @@ queue_has_sid(int sid)
 	return 0;
 }
 
+static int
+queue_has_key(const char *key)
+{
+	int i, n;
+
+	if (!key || !key[0])
+		return 0;
+
+	pthread_mutex_lock(&g_engine.job_mutex);
+	n = g_engine.job_count;
+	for (i = 0; i < n; ++i) {
+		int idx = (g_engine.job_head + i) % QE_JOB_MAX;
+		if (g_engine.jobs[idx].session_key &&
+		    strcmp(g_engine.jobs[idx].session_key, key) == 0) {
+			pthread_mutex_unlock(&g_engine.job_mutex);
+			return 1;
+		}
+	}
+	pthread_mutex_unlock(&g_engine.job_mutex);
+	return 0;
+}
+
+static int
+session_find_by_key_locked(const char *key)
+{
+	int i;
+
+	if (!key || !key[0])
+		return -1;
+	for (i = 0; i < QE_SESSIONS; ++i) {
+		if (g_engine.sessions[i].used &&
+		    strncmp(g_engine.sessions[i].session_key, key, sizeof(g_engine.sessions[i].session_key)) == 0)
+			return i;
+	}
+	return -1;
+}
+
+static void session_release_locked(int i);
+static void session_init_locked(int i, int sid, const char *sys);
+
+static int
+session_alloc_by_key_locked(const char *key, const char *sys)
+{
+	int i, free_slot = -1, victim = -1;
+	uint64_t oldest = UINT64_MAX;
+
+	if (!key || !key[0])
+		return -1;
+
+	for (i = 0; i < QE_SESSIONS; ++i) {
+		if (g_engine.sessions[i].used) {
+			if (strncmp(g_engine.sessions[i].session_key, key, sizeof(g_engine.sessions[i].session_key)) == 0)
+				return i;
+		} else if (free_slot < 0) {
+			free_slot = i;
+		}
+	}
+
+	if (free_slot >= 0) {
+		i = free_slot;
+	} else {
+		for (i = 0; i < QE_SESSIONS; ++i) {
+			struct qllm_session *s = &g_engine.sessions[i];
+
+			if (!s->used)
+				continue;
+			if (s->sid > 0 && queue_has_sid(s->sid))
+				continue;
+			if (s->session_key[0] && queue_has_key(s->session_key))
+				continue;
+			if (s->last_used_seq < oldest) {
+				oldest = s->last_used_seq;
+				victim = i;
+			}
+		}
+		if (victim < 0)
+			return -1;
+		session_release_locked(victim);
+		i = victim;
+	}
+
+	session_init_locked(i, 0, sys);
+	snprintf(g_engine.sessions[i].session_key, sizeof(g_engine.sessions[i].session_key), "%s", key);
+	return i;
+}
+
 /* Free the worker-owned LLM state of a session (ctx, msgs except the system
  * message, prompts). Caller holds no log; worker-only. */
 static void
@@ -373,11 +462,9 @@ session_heavy_free(struct qllm_session *s)
 	s->n_msgs = 0;
 
 	if (s->ctx) {
+		qllm_free(s->ctx);
 		s->ctx = NULL;
-		if (s->model_used[0]) {
-			qllm_registry_release(s->model_used);
-			s->model_used[0] = '\0';
-		}
+		s->model_used[0] = '\0';
 	}
 	free(s->prev_prompt);
 	s->prev_prompt = NULL;
@@ -578,13 +665,23 @@ session_chat_cb(void *user, const char *chunk, size_t len)
 }
 
 static char *
-chat_build_delta(const char *chunk, size_t len)
+chat_build_delta(const char *chunk, size_t len, const char *model, int job_id)
 {
 	struct json_object *obj, *choices, *choice, *delta;
+	char id[64];
 	const char *s;
 	char *out = NULL;
 
 	obj = json_object_new_object();
+	snprintf(id, sizeof(id), "chatcmpl-%d", job_id);
+	json_object_object_add(obj, "id", json_object_new_string(id));
+	json_object_object_add(obj, "object",
+		json_object_new_string("chat.completion.chunk"));
+	json_object_object_add(obj, "created",
+		json_object_new_int64((int64_t)time(NULL)));
+	json_object_object_add(obj, "model",
+		json_object_new_string(model && model[0] ? model : "qwen"));
+
 	choices = json_object_new_array();
 	choice = json_object_new_object();
 	delta = json_object_new_object();
@@ -592,6 +689,7 @@ chat_build_delta(const char *chunk, size_t len)
 		json_object_new_string_len(chunk, (size_t)len));
 	json_object_object_add(choice, "delta", delta);
 	json_object_object_add(choice, "index", json_object_new_int(0));
+	json_object_object_add(choice, "finish_reason", NULL);
 	json_object_array_add(choices, choice);
 	json_object_object_add(obj, "choices", choices);
 
@@ -603,13 +701,23 @@ chat_build_delta(const char *chunk, size_t len)
 }
 
 static char *
-chat_build_final_delta(void)
+chat_build_final_delta(const char *model, int job_id)
 {
 	struct json_object *obj, *choices, *choice, *delta;
+	char id[64];
 	const char *s;
 	char *out = NULL;
 
 	obj = json_object_new_object();
+	snprintf(id, sizeof(id), "chatcmpl-%d", job_id);
+	json_object_object_add(obj, "id", json_object_new_string(id));
+	json_object_object_add(obj, "object",
+		json_object_new_string("chat.completion.chunk"));
+	json_object_object_add(obj, "created",
+		json_object_new_int64((int64_t)time(NULL)));
+	json_object_object_add(obj, "model",
+		json_object_new_string(model && model[0] ? model : "qwen"));
+
 	choices = json_object_new_array();
 	choice = json_object_new_object();
 	delta = json_object_new_object();
@@ -687,7 +795,7 @@ oneshot_chat_cb(void *user, const char *chunk, size_t len)
 	if (!st->streaming)
 		return;   /* non-stream: the worker builds one JSON result */
 
-	json = chat_build_delta(chunk, len);
+	json = chat_build_delta(chunk, len, st->model, st->job_id);
 	if (!json) {
 		st->err = -1;
 		return;
@@ -732,14 +840,12 @@ worker_chat(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	s = &g_engine.sessions[slot];
 
 	if (!s->ctx) {
-		int rc = qllm_registry_acquire(NULL, QLLM_CAP_CHAT, &s->ctx, s->model_used, sizeof(s->model_used));
+		int rc = qllm_registry_create_session_context(NULL, QLLM_CAP_CHAT, &s->ctx, s->model_used, sizeof(s->model_used));
 		if (rc != QLLM_REG_OK || !s->ctx) {
 			out->err = -2;
 			out->more = 0;
 			return;
 		}
-		if (!s->prev_prompt)
-			qllm_reset(s->ctx);
 	}
 
 	if (session_push_msg(s, "user", job->input) != 0) {
@@ -788,18 +894,72 @@ worker_chat(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	s->assist_len = 0;
 }
 
+static char *
+extract_content_text(struct json_object *item, struct json_object *content)
+{
+	if (!content || json_object_is_type(content, json_type_null)) {
+		return strdup("");
+	}
+	if (json_object_is_type(content, json_type_string)) {
+		return strdup(json_object_get_string(content));
+	}
+	if (json_object_is_type(content, json_type_array)) {
+		size_t len = (size_t)json_object_array_length(content);
+		size_t total_alloc = 256;
+		size_t used = 0;
+		char *buf = malloc(total_alloc);
+		size_t j;
+		if (!buf)
+			return strdup("");
+		buf[0] = '\0';
+
+		for (j = 0; j < len; ++j) {
+			struct json_object *part = json_object_array_get_idx(content, j);
+			const char *text = NULL;
+			if (!part)
+				continue;
+			if (json_object_is_type(part, json_type_string)) {
+				text = json_object_get_string(part);
+			} else if (json_object_is_type(part, json_type_object)) {
+				struct json_object *to = json_object_object_get(part, "text");
+				if (to && json_object_is_type(to, json_type_string))
+					text = json_object_get_string(to);
+			}
+			if (text && text[0]) {
+				size_t tlen = strlen(text);
+				if (used + tlen + 2 >= total_alloc) {
+					total_alloc = (used + tlen + 2) * 2;
+					char *new_buf = realloc(buf, total_alloc);
+					if (!new_buf)
+						break;
+					buf = new_buf;
+				}
+				memcpy(buf + used, text, tlen);
+				used += tlen;
+				buf[used] = '\0';
+			}
+		}
+		return buf;
+	}
+	(void)item;
+	return strdup("");
+}
+
 static void
 worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 {
 	struct json_object *o = NULL, *arr, *item, *role, *content, *sm;
-	struct qllm_message msgs[QE_MAX_MSGS];
+	struct qllm_message *msgs = NULL;
+	char **allocated_content = NULL;
 	struct stream_st st;
 	const char *sys;
 	char *full = NULL;
 	size_t flen = 0;
+	size_t arr_len = 0, alloc_max = 0;
 	size_t n = 0, i;
 	int have_system = 0, stream = 0, rc;
 
+	memset(&st, 0, sizeof(st));
 	memset(out, 0, sizeof(*out));
 	out->job_id = job->job_id;
 	out->kind = job->kind;
@@ -818,25 +978,32 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		goto out;
 	}
 
+	arr_len = (size_t)json_object_array_length(arr);
+	alloc_max = arr_len + 2; /* +1 for possible prepended system prompt */
+
+	msgs = calloc(alloc_max, sizeof(*msgs));
+	allocated_content = calloc(alloc_max, sizeof(*allocated_content));
+	if (!msgs || !allocated_content) {
+		out->err = -5;
+		goto out;
+	}
+
 	pthread_mutex_lock(&g_engine.sess_mutex);
 	sys = g_engine.system_prompt;   /* stable after startup */
 	pthread_mutex_unlock(&g_engine.sess_mutex);
 
-	for (i = 0; i < (size_t)json_object_array_length(arr); ++i) {
+	for (i = 0; i < arr_len; ++i) {
 		item = json_object_array_get_idx(arr, i);
 		role = item ? json_object_object_get(item, "role") : NULL;
 		content = item ? json_object_object_get(item, "content") : NULL;
-		if (!role || !json_object_is_type(role, json_type_string) ||
-		    !content || !json_object_is_type(content, json_type_string)) {
-			out->err = -6;
-			goto out;
-		}
-		if (n >= QE_MAX_MSGS) {
+		if (!role || !json_object_is_type(role, json_type_string)) {
 			out->err = -6;
 			goto out;
 		}
 		msgs[n].role = json_object_get_string(role);
-		msgs[n].content = json_object_get_string(content);
+		char *ctext = extract_content_text(item, content);
+		allocated_content[n] = ctext;
+		msgs[n].content = ctext ? ctext : "";
 		if (strcmp(msgs[n].role, "system") == 0)
 			have_system = 1;
 		++n;
@@ -844,11 +1011,9 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 
 	/* Prepend the engine-global system prompt unless the request has one. */
 	if (!have_system && sys && sys[0]) {
-		if (n >= QE_MAX_MSGS) {
-			out->err = -6;
-			goto out;
-		}
 		memmove(&msgs[1], &msgs[0], n * sizeof(msgs[0]));
+		memmove(&allocated_content[1], &allocated_content[0], n * sizeof(allocated_content[0]));
+		allocated_content[0] = NULL;
 		msgs[0].role = "system";
 		msgs[0].content = sys;
 		++n;
@@ -858,22 +1023,53 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	if (sm)
 		stream = json_object_get_boolean(sm) != 0;
 
+	struct qllm_session *s = NULL;
 	struct qllm_context *ctx = NULL;
 	char model_used[64] = {0};
+	const char *sess_key = job->session_key;
+	struct json_object *sj = NULL;
+	int slot = -1;
 
-	rc = qllm_registry_acquire(job->model, QLLM_CAP_CHAT, &ctx, model_used, sizeof(model_used));
-	if (rc != QLLM_REG_OK || !ctx) {
-		out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -2);
-		goto out;
+	if ((!sess_key || !sess_key[0]) && o) {
+		sj = json_object_object_get(o, "session_id");
+		if (sj)
+			sess_key = json_object_get_string(sj);
 	}
 
-	/* Stateless: drop the previous oneshot's KV. */
-	qllm_reset(ctx);
+	if (sess_key && sess_key[0]) {
+		pthread_mutex_lock(&g_engine.sess_mutex);
+		slot = session_find_by_key_locked(sess_key);
+		if (slot < 0)
+			slot = session_alloc_by_key_locked(sess_key, g_engine.system_prompt);
+		if (slot >= 0) {
+			s = &g_engine.sessions[slot];
+			s->last_used_seq = ++g_engine.sess_seq;
+		}
+		pthread_mutex_unlock(&g_engine.sess_mutex);
+	}
+	if (s) {
+		if (!s->ctx) {
+			rc = qllm_registry_create_session_context(job->model, QLLM_CAP_CHAT, &s->ctx, s->model_used, sizeof(s->model_used));
+			if (rc != QLLM_REG_OK || !s->ctx) {
+				out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -2);
+				goto out;
+			}
+		}
+		ctx = s->ctx;
+		snprintf(model_used, sizeof(model_used), "%s", s->model_used);
+	} else {
+		rc = qllm_registry_acquire(job->model, QLLM_CAP_CHAT, &ctx, model_used, sizeof(model_used));
+		if (rc != QLLM_REG_OK || !ctx) {
+			out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -2);
+			goto out;
+		}
+	}
 
 	memset(&st, 0, sizeof(st));
 	st.job_id = job->job_id;
 	st.ud = job->ud;
 	st.streaming = stream;
+	st.model = model_used[0] ? model_used : g_engine.model_path;
 	st.acc = &full;
 	st.acc_len = &flen;
 
@@ -885,7 +1081,8 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	out->seq = st.seq;
 	if (st.err == 0) {
 		if (stream)
-			out->payload = chat_build_final_delta();
+			out->payload = chat_build_final_delta(
+			    model_used[0] ? model_used : g_engine.model_path, job->job_id);
 		else
 			out->payload = chat_build_completion(full ? full : "",
 			    model_used[0] ? model_used : g_engine.model_path, job->job_id);
@@ -895,12 +1092,19 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		out->err = st.err;
 	}
 
-	if (ctx)
-		qllm_reset(ctx);
 	free(full);
-	qllm_registry_release(model_used);
+	if (!s) {
+		qllm_registry_release(model_used);
+	}
 
 out:
+	if (allocated_content) {
+		for (i = 0; i < alloc_max; ++i) {
+			free(allocated_content[i]);
+		}
+		free(allocated_content);
+	}
+	free(msgs);
 	if (o)
 		json_object_put(o);
 }
@@ -1077,8 +1281,7 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		goto out;
 	}
 
-	/* Reset KV for stateless evaluation */
-	qllm_reset(ctx);
+	/* Stateless evaluation using prefix reuse */
 
 	/* Build prompt */
 	struct qllm_message msgs[2];
@@ -1317,6 +1520,7 @@ worker_main(void *arg)
 
 		free(job.input);
 		free(job.model);
+		free(job.session_key);
 
 		if (completion_push(&res) < 0)
 			free(res.payload);
@@ -1460,7 +1664,7 @@ qllm_engine_shutdown(void)
 
 /* Internal submit with sid + optional NULL input (meta jobs). */
 static int
-job_submit(int kind, const char *model, int sid, const char *input, void *ud, int *job_id_out)
+job_submit_session(int kind, const char *model, const char *session_key, int sid, const char *input, void *ud, int *job_id_out)
 {
 	struct qllm_engine_job *job;
 	int i, id;
@@ -1479,10 +1683,13 @@ job_submit(int kind, const char *model, int sid, const char *input, void *ud, in
 	job = &g_engine.jobs[i];
 	job->kind = kind;
 	job->sid = sid;
+	job->session_key = (session_key && session_key[0]) ? strdup(session_key) : NULL;
 	job->model = (model && model[0]) ? strdup(model) : NULL;
 	if (input) {
 		job->input = strdup(input);
 		if (!job->input) {
+			free(job->session_key);
+			job->session_key = NULL;
 			free(job->model);
 			job->model = NULL;
 			pthread_mutex_unlock(&g_engine.job_mutex);
@@ -1500,6 +1707,12 @@ job_submit(int kind, const char *model, int sid, const char *input, void *ud, in
 	if (job_id_out)
 		*job_id_out = id;
 	return 0;
+}
+
+static int
+job_submit(int kind, const char *model, int sid, const char *input, void *ud, int *job_id_out)
+{
+	return job_submit_session(kind, model, NULL, sid, input, ud, job_id_out);
 }
 
 int
@@ -1535,7 +1748,15 @@ qllm_engine_chat_oneshot_model(const char *model, const char *request_json, void
 {
 	if (!request_json)
 		return -1;
-	return job_submit(QE_JOB_CHAT_ONESHOT, model, 0, request_json, ud, job_id_out);
+	return job_submit_session(QE_JOB_CHAT_ONESHOT, model, NULL, 0, request_json, ud, job_id_out);
+}
+
+int
+qllm_engine_chat_oneshot_model_session(const char *model, const char *session_key, const char *request_json, void *ud, int *job_id_out)
+{
+	if (!request_json)
+		return -1;
+	return job_submit_session(QE_JOB_CHAT_ONESHOT, model, session_key, 0, request_json, ud, job_id_out);
 }
 
 int

@@ -42,6 +42,8 @@ struct qllm_context {
 	llama_seq_id		 current_seq;
 
 	llama_token		*token_buf;
+	llama_token		*cached_tokens;
+	int32_t			 n_cached_tokens;
 	llama_seq_id		*seq_ids;
 
 	int32_t			 gen_tokens;
@@ -153,13 +155,14 @@ qllm_init(void)
  * sliding-window shift done by qllm_compress() stays coherent with later
  * decodes. */
 static int
-qllm_decode_tokens(struct qllm_context *qctx,
-		   const llama_token *tokens,
-		   int32_t n_tokens,
-		   int all_logits)
+qllm_decode_tokens_pos(struct qllm_context *qctx,
+		       const llama_token *tokens,
+		       int32_t n_tokens,
+		       int all_logits,
+		       int32_t start_pos)
 {
-	struct llama_batch batch;
-	int32_t i;
+	int32_t offset = 0;
+	int32_t batch_size;
 
 	if (!qctx || !qctx->ctx || !tokens || n_tokens <= 0)
 		return -1;
@@ -167,21 +170,56 @@ qllm_decode_tokens(struct qllm_context *qctx,
 	if (n_tokens > qctx->max_tokens)
 		return -1;
 
-	batch = llama_batch_init(n_tokens, 0, 1);
-	batch.n_tokens = n_tokens;
-	batch.pos = NULL;
+	batch_size = (int32_t)qctx->params.n_batch;
+	if (batch_size <= 0)
+		batch_size = 512;
 
-	for (i = 0; i < n_tokens; ++i) {
-		batch.token[i] = tokens[i];
-		batch.n_seq_id[i] = 1;
-		batch.seq_id[i] = &qctx->current_seq;
-		batch.logits[i] = all_logits || (i == n_tokens - 1);
+	while (offset < n_tokens) {
+		int32_t chunk_n = n_tokens - offset;
+		struct llama_batch batch;
+		int32_t i;
+		int rc;
+
+		if (chunk_n > batch_size)
+			chunk_n = batch_size;
+
+		batch = llama_batch_init(chunk_n, 0, 1);
+		batch.n_tokens = chunk_n;
+		if (start_pos >= 0) {
+			for (i = 0; i < chunk_n; ++i)
+				batch.pos[i] = (llama_pos)(start_pos + offset + i);
+		} else {
+			free(batch.pos);
+			batch.pos = NULL;
+		}
+
+		for (i = 0; i < chunk_n; ++i) {
+			int32_t global_idx = offset + i;
+			batch.token[i] = tokens[global_idx];
+			batch.n_seq_id[i] = 1;
+			batch.seq_id[i][0] = qctx->current_seq;
+			batch.logits[i] = all_logits || (global_idx == n_tokens - 1);
+		}
+
+		rc = llama_decode(qctx->ctx, batch);
+		llama_batch_free(batch);
+
+		if (rc != 0)
+			return -1;
+
+		offset += chunk_n;
 	}
 
-	if (llama_decode(qctx->ctx, batch) != 0)
-		return -1;
-
 	return 0;
+}
+
+static int
+qllm_decode_tokens(struct qllm_context *qctx,
+		   const llama_token *tokens,
+		   int32_t n_tokens,
+		   int all_logits)
+{
+	return qllm_decode_tokens_pos(qctx, tokens, n_tokens, all_logits, -1);
 }
 
 extern void
@@ -801,6 +839,7 @@ qllm_compress(struct qllm_context *ctx, uint32_t limit)
 		llama_memory_seq_rm(mem, seq, 0, -1);
 		ctx->anchor_start = 0;
 		ctx->anchor_end = 0;
+		ctx->n_cached_tokens = 0;
 		return;
 	}
 
@@ -885,7 +924,7 @@ qllm_create(const struct qllm_config *cfg)
 		int nl = 0, ne = 0, nc = 0, nh = 0, nkh = 0;
 
 		get_model_dims(cfg->model_path, &nl, &ne, &nc, &nh, &nkh);
-		if (nc > 0 && nc <= 4096)
+		if (nc > 0)
 			ctx_params.n_ctx = (uint32_t) nc;
 		else
 			ctx_params.n_ctx = 2048; /* Fallback */
@@ -894,6 +933,11 @@ qllm_create(const struct qllm_config *cfg)
 	ctx_params.n_batch = ctx_params.n_ctx < 2048 ? ctx_params.n_ctx : 2048;
 	ctx_params.n_ubatch = ctx_params.n_batch < 512 ? ctx_params.n_batch : 512;
 	ctx_params.n_seq_max = cfg->n_contexts > 0 ? (uint32_t)cfg->n_contexts : 1;
+
+	if (ctx_params.n_ctx > 131072) {
+		ctx_params.type_k = GGML_TYPE_Q4_0;
+		ctx_params.type_v = GGML_TYPE_Q4_0;
+	}
 
 	/* Enable embeddings and mean pooling only if requested.
 	 * This is required for qllm_embed() but not for text generation.
@@ -904,12 +948,10 @@ qllm_create(const struct qllm_config *cfg)
 		ctx_params.pooling_type = LLAMA_POOLING_TYPE_MEAN;
 	}
 
+	long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
 	if (cfg->n_threads > 0) {
 		n_threads = cfg->n_threads;
 	} else {
-		long ncpu;
-
-		ncpu = sysconf(_SC_NPROCESSORS_ONLN);
 		if (ncpu <= 0)
 			n_threads = 1;
 		else
@@ -917,7 +959,7 @@ qllm_create(const struct qllm_config *cfg)
 	}
 
 	ctx_params.n_threads = n_threads;
-	ctx_params.n_threads_batch = n_threads;
+	ctx_params.n_threads_batch = (int32_t)(ncpu > 0 ? ncpu : n_threads);
 
 	qctx = calloc(1, sizeof(*qctx));
 	if (!qctx)
@@ -954,9 +996,11 @@ qllm_create(const struct qllm_config *cfg)
 
 	qctx->token_buf = calloc((size_t)qctx->max_tokens,
 	    sizeof(*qctx->token_buf));
+	qctx->cached_tokens = calloc((size_t)qctx->max_tokens,
+	    sizeof(*qctx->cached_tokens));
 	qctx->seq_ids = calloc((size_t)qctx->max_tokens,
 	    sizeof(*qctx->seq_ids));
-	if (!qctx->token_buf || !qctx->seq_ids)
+	if (!qctx->token_buf || !qctx->cached_tokens || !qctx->seq_ids)
 		goto fail;
 
 	qctx->anchor_start = 0;
@@ -1026,6 +1070,7 @@ qllm_free(struct qllm_context *qctx)
 
 	free(qctx->model_path);
 	free(qctx->token_buf);
+	free(qctx->cached_tokens);
 	free(qctx->seq_ids);
 
 #if defined(MOCK_BUILD)
@@ -1500,12 +1545,16 @@ retry:
 	if (tok == llama_vocab_eot(qctx->vocab)) {
 		qctx->token_buf[0] = tok;
 		qllm_decode_tokens(qctx, qctx->token_buf, 1, 0);
+		if (qctx->cached_tokens && qctx->n_cached_tokens < qctx->max_tokens)
+			qctx->cached_tokens[qctx->n_cached_tokens++] = tok;
 		return 0;
 	}
 
 	if (tok == llama_vocab_eos(qctx->vocab)) {
 		qctx->token_buf[0] = tok;
 		qllm_decode_tokens(qctx, qctx->token_buf, 1, 0);
+		if (qctx->cached_tokens && qctx->n_cached_tokens < qctx->max_tokens)
+			qctx->cached_tokens[qctx->n_cached_tokens++] = tok;
 		return 0;
 	}
 
@@ -1513,6 +1562,8 @@ retry:
 	if (llama_vocab_is_control(qctx->vocab, tok)) {
 		qctx->token_buf[0] = tok;
 		qllm_decode_tokens(qctx, qctx->token_buf, 1, 0);
+		if (qctx->cached_tokens && qctx->n_cached_tokens < qctx->max_tokens)
+			qctx->cached_tokens[qctx->n_cached_tokens++] = tok;
 		goto retry;
 	}
 
@@ -1524,6 +1575,9 @@ retry:
 	qctx->token_buf[0] = tok;
 	if (qllm_decode_tokens(qctx, qctx->token_buf, 1, 0) != 0)
 		return -1;
+
+	if (qctx->cached_tokens && qctx->n_cached_tokens < qctx->max_tokens)
+		qctx->cached_tokens[qctx->n_cached_tokens++] = tok;
 
 	/* Convert token to text piece */
 	memset(piece, 0, sizeof(piece));
@@ -1615,6 +1669,7 @@ qllm_reset(struct qllm_context *qctx)
 	qctx->gen_tokens = 0;
 	qctx->n_cached_blocks = 0;
 	qctx->current_block_idx = 0;
+	qctx->n_cached_tokens = 0;
 }
 
 int
@@ -1625,9 +1680,12 @@ qllm_chat(struct qllm_context *qctx,
 {
 	char *full = NULL;
 	size_t full_len = 0;
-	const char *incr;
 	int32_t step;
+	int32_t n_tokens;
+	int32_t pfx = 0;
 	int ret;
+
+	(void)prev_prompt;
 
 	if (!QLLM_VALID(qctx) || !qctx->model || !msgs ||
 	    n_msgs == 0 || !cb)
@@ -1637,23 +1695,57 @@ qllm_chat(struct qllm_context *qctx,
 	if (qllm_render(qctx, msgs, n_msgs, true, &full, &full_len) != 0)
 		return -1;
 
-	/* Compute the incremental prompt */
-	if (prev_prompt && full_len >= strlen(prev_prompt) &&
-	    memcmp(full, prev_prompt, strlen(prev_prompt)) == 0) {
-		incr = full + strlen(prev_prompt);
-	} else {
-		incr = full;
+	/* Tokenize full rendered conversation */
+	n_tokens = llama_tokenize(qctx->vocab,
+				  full,
+				  (int32_t)full_len,
+				  qctx->token_buf,
+				  qctx->max_tokens,
+				  true,
+				  true);
+	if (n_tokens < 0 || n_tokens > qctx->max_tokens) {
+		free(full);
+		return -1;
+	}
+
+	/* Find longest common prefix with cached_tokens */
+	if (qctx->cached_tokens && qctx->n_cached_tokens > 0) {
+		while (pfx < qctx->n_cached_tokens && pfx < n_tokens &&
+		       qctx->cached_tokens[pfx] == qctx->token_buf[pfx]) {
+			pfx++;
+		}
+	}
+
+	qsyslog(QLOG_INFO, "qllm_chat: prefix reuse %d/%d tokens (delta=%d, cached=%d)\n",
+		pfx, n_tokens, n_tokens - pfx, qctx->n_cached_tokens);
+
+	/* Truncate downstream KV cells from pfx onwards */
+	llama_memory_seq_rm(llama_get_memory(qctx->ctx),
+			    qctx->current_seq,
+			    (llama_pos)pfx,
+			    -1);
+
+	/* Decode only the incremental suffix [pfx .. n_tokens - 1] */
+	if (n_tokens > pfx) {
+		ret = qllm_decode_tokens_pos(qctx,
+					    &qctx->token_buf[pfx],
+					    n_tokens - pfx,
+					    0,
+					    pfx);
+		if (ret != 0) {
+			free(full);
+			return -1;
+		}
+	}
+
+	/* Store evaluated prompt tokens in cache */
+	if (qctx->cached_tokens) {
+		memcpy(qctx->cached_tokens, qctx->token_buf, (size_t)n_tokens * sizeof(llama_token));
+		qctx->n_cached_tokens = n_tokens;
 	}
 
 	/* Protect this turn's prompt+response from sliding-window eviction. */
 	qllm_anchor_start(qctx);
-
-	/* Prime with only the new content */
-	ret = qllm_prime(qctx, incr);
-	if (ret != 0) {
-		free(full);
-		return -1;
-	}
 
 	/* Stream tokens until EOG */
 	for (step = 0; step < qctx->max_tokens; ++step) {

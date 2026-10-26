@@ -278,6 +278,8 @@ curl -s http://localhost:4242/v1/embeddings \
 
 Evaluates structured questions against conversational state, returning calibrated mathematical probabilities rather than free-form text. Ideal for memory classifiers, autonomous agents, and safety filters.
 
+Question `criteria` definitions and `choices` arrays are automatically formatted into the evaluation prompt with allowed option constraints. Semantic aliases (e.g. `"instruction"`, `"task"`, `"directive"` mapping to `"quest"`) are supported out of the box. Automatic CPU batch threads are clamped to 4 cores to ensure sub-second latency and prevent spinlock thrashing on multi-core host systems.
+
 ```bash
 curl -s http://localhost:4242/api/v1/systemone/ \
   -H "Content-Type: application/json" \

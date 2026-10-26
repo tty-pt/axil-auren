@@ -367,7 +367,7 @@ The System One API evaluates structured questions against a provided state and r
 
 | Type | Wire Schema | Output Values | Purpose |
 | :--- | :--- | :--- | :--- |
-| **`choice`** | `{"type": "choice", "instructions": "...", "criteria": {"optA": "...", "optB": "..."}}` | `{choice, probabilities, confidence}` | Categorical routing & memory action selection (`remember` / `update` / `skip`). |
+| **`choice`** | `{"type": "choice", "instructions": "...", "criteria": {"optA": "...", "optB": "..."}}` | `{choice, probabilities, confidence}` | Categorical routing & decision selection. Criteria descriptions and allowed choices are injected into the evaluation prompt, with semantic alias mapping for quest and conversational directives. |
 | **`noul`** | `{"type": "noul", "instructions": "Is condition X true?"}` | `{noul: float [0.0 - 1.0]}` | Boolean probability verification (e.g. destructive action detection, leak checks). |
 | **`score`** | `{"type": "score", "instructions": "...", "criteria": ["low", "med", "high"]}` | `{score: float, confidence}` | Ordered rubric evaluation (e.g. relevance or impact scoring). |
 
@@ -378,7 +378,7 @@ The System One API evaluates structured questions against a provided state and r
 * **Role Isolation**: Generative chat, memory decision judging, and vector embeddings are independently configurable. An embedding request will never accidentally run against the generative model simply because it is the current default.
 * **Safe Model Lifecycle**: The runtime supports multiple resident models up to `max_resident`. When GPU/RAM capacity is reached, idle models (`in_flight == 0`) are safely evicted using an LRU policy. Models currently processing in-flight requests are **never** evicted.
 * **Single-Model Compatibility**: If only `AUREN_MODEL_PATH` is supplied, `libauren` automatically registers `"default"` supporting all three roles (`chat`, `judge`, `embed`) with zero breaking changes.
-* **Worker-Thread Concurrency**: Inference executes on a dedicated background worker thread communicating over a non-blocking self-pipe with axil's main event loop.
+* **Worker-Thread Concurrency & CPU Clamping**: Inference executes on a dedicated background worker thread communicating over a non-blocking self-pipe with axil's main event loop. Automatic CPU thread pools are clamped to 4 cores to prevent OpenMP spinlock thrashing on multi-core host systems and WSL.
 
 ---
 

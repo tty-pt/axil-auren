@@ -892,6 +892,10 @@ qllm_compress(struct qllm_context *ctx, uint32_t limit)
 			}
 		}
 	}
+
+	/* Sequence positions were modified; invalidate prefix token cache so
+	 * future turns don't reuse shifted KV slots at mismatched offsets. */
+	ctx->n_cached_tokens = 0;
 }
 
 void
@@ -934,7 +938,7 @@ qllm_create(const struct qllm_config *cfg)
 	ctx_params.n_ubatch = ctx_params.n_batch < 512 ? ctx_params.n_batch : 512;
 	ctx_params.n_seq_max = cfg->n_contexts > 0 ? (uint32_t)cfg->n_contexts : 1;
 
-	if (ctx_params.n_ctx > 131072) {
+	if (ctx_params.n_ctx >= 32768) {
 		ctx_params.type_k = GGML_TYPE_Q4_0;
 		ctx_params.type_v = GGML_TYPE_Q4_0;
 	}
@@ -1712,6 +1716,47 @@ qllm_chat(struct qllm_context *qctx,
 				  qctx->max_tokens,
 				  true,
 				  true);
+
+	/* If conversation exceeds context window, slide window by dropping oldest dialogue turns */
+	if ((n_tokens < 0 || n_tokens > qctx->max_tokens) && n_msgs > 2) {
+		size_t start_msg = (strcmp(msgs[0].role, "system") == 0) ? 1 : 0;
+		size_t cur_start = start_msg;
+		struct qllm_message *trimmed = calloc(n_msgs, sizeof(*trimmed));
+
+		while (trimmed && (n_tokens < 0 || n_tokens > qctx->max_tokens) && cur_start < n_msgs - 1) {
+			free(full);
+			full = NULL;
+			full_len = 0;
+
+			/* Advance past at least one message, preferring user+assistant pair */
+			if (cur_start + 1 < n_msgs - 1 &&
+			    strcmp(msgs[cur_start].role, "user") == 0 &&
+			    strcmp(msgs[cur_start + 1].role, "assistant") == 0) {
+				cur_start += 2;
+			} else {
+				cur_start += 1;
+			}
+
+			size_t tn = 0;
+			if (start_msg == 1)
+				trimmed[tn++] = msgs[0];
+			for (size_t mi = cur_start; mi < n_msgs; ++mi)
+				trimmed[tn++] = msgs[mi];
+
+			if (qllm_render(qctx, trimmed, tn, true, &full, &full_len) != 0)
+				break;
+
+			n_tokens = llama_tokenize(qctx->vocab,
+						  full,
+						  (int32_t)full_len,
+						  qctx->token_buf,
+						  qctx->max_tokens,
+						  true,
+						  true);
+		}
+		free(trimmed);
+	}
+
 	if (n_tokens < 0 || n_tokens > qctx->max_tokens) {
 		free(full);
 		return -1;

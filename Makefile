@@ -41,7 +41,7 @@ COMPILER_C   := $(shell command -v clang  >/dev/null 2>&1 && echo clang  || echo
 COMPILER_CXX := $(shell command -v clang++ >/dev/null 2>&1 && echo clang++ || echo ${CXX})
 
 ifeq ($(arch),x86_64)
-  has_vpdpbusd := $(shell echo 'void test(void){ __asm__("vpdpbusd %ymm0, %ymm1, %ymm2"); }' | $(COMPILER_C) -c -x c - -o /dev/null 2>/dev/null && echo 1 || echo 0)
+  has_vpdpbusd := $(shell echo 'void test(void){ __asm__("{vex} vpdpbusd %ymm0, %ymm1, %ymm2"); }' | $(COMPILER_C) -c -x c - -o /dev/null 2>/dev/null && echo 1 || echo 0)
 else
   has_vpdpbusd := 1
 endif

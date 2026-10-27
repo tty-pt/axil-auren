@@ -1,4 +1,4 @@
-## 1.3.1
+## [1.3.1]
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
@@ -12,7 +12,7 @@
 - **Engine Test Suite Enhancements**:
   - Updated multi-turn session persistence tests in `engine-test` with dynamic assistant turn propagation and case-insensitive keyword verification.
 
-## 1.3.0
+## [1.3.0]
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
@@ -46,7 +46,7 @@
 - **Automated Verification & Benchmarks**:
   - Expanded `engine-test` suite with 500+ token multi-turn session persistence tests verifying prefix reuse, delta decoding, and conversational recall.
 
-## 1.0.0 (libauren)
+## [1.2.0]
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
@@ -56,11 +56,6 @@
 - **Block-Aware KV Cache Reuse**: Added `auren_prime_block(ctx, block_hash, text)` (`qllm_prime_block`) allowing 0 ms bypass of prompt tokenization and decoding when a content-addressed block hash matches pre-evaluated KV slots at the active sequence pointer. Downstream cached block entries are cleanly truncated on cache divergence or reset via `auren_reset()`.
 - **Full Token Streaming API**: Added `auren_generate_stream_full(ctx, prompt, cb, user)` and `auren_token_full_cb` (`qllm_generate_stream_full`) emitting both integer token IDs and decoded UTF-8 chunks during generation.
 - **Packaging & CPU portability**: Auto-detect toolchain assembler support for `vpdpbusd` on x86_64, defaulting `GGML_NATIVE=ON` but gracefully falling back to `GGML_NATIVE=OFF` with `-DGGML_AVX_VNNI=OFF -DGGML_AVX512_VNNI=OFF` on systems with older binutils (such as Rocky Linux 9 / RHEL 9 binutils 2.35) where `vpdpbusd` would otherwise fail the build. Overrideable via `make GGML_NATIVE=ON/OFF`.
-- **Multi-model registry & configuration discovery**: Model registry supporting up to 16 named models with capability tracking (`chat`, `judge`, `embed`), independent role defaults, on-demand loading, and LRU eviction under `max_resident`. Supports `auren.json` with fallback to `qllm.json`.
-- **SystemOne Calibrated Classifier**: Fast, typed evaluations (`choice`, `noul`, `score`) against conversational state strings with automatic KV-cache reset.
-- **OpenAI-compatible HTTP Endpoints**: `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models`.
-
-## 1.2.0
 
 - **Multi-model registry & configuration discovery**: new model registry subsystem (`qllm-registry`)
   supporting up to 16 named models with explicit capability tracking
@@ -106,7 +101,7 @@
   1-click curl recipes, `qllm.json` schema documentation, and verified curl
   examples for all endpoints.
 
-## 1.1.0
+## [1.1.0]
 
 - **axil module**: `libaxil-qllm` is now an axil module rather than a
   standalone daemon; `xy_install()` registers the `ask`/`chat` telnet commands

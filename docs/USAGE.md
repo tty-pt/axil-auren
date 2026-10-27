@@ -63,12 +63,27 @@ pkill -f "axil.*4242"
 {
   "models": [
     {
+      "id": "olmoe",
+      "path": "~/.models/olmoe-1b-7b-instruct-q3_k_m.gguf",
+      "capabilities": ["chat", "judge"],
+      "n_ctx": 4096,
+      "n_gpu_layers": 0,
+      "temperature": 0.7
+    },
+    {
       "id": "qwen",
       "path": "~/.models/qwen2.5-0.5b-instruct.gguf",
       "capabilities": ["chat", "judge"],
       "n_ctx": 131072,
       "n_gpu_layers": 0,
       "temperature": 0.7
+    },
+    {
+      "id": "bge-base",
+      "path": "~/.models/bge-base-en-v1.5.gguf",
+      "capabilities": ["embed"],
+      "n_ctx": 512,
+      "n_gpu_layers": 0
     },
     {
       "id": "bge-small",
@@ -79,13 +94,64 @@ pkill -f "axil.*4242"
     }
   ],
   "defaults": {
-    "chat": "qwen",
-    "judge": "qwen",
-    "embed": "bge-small"
+    "chat": "olmoe",
+    "judge": "olmoe",
+    "embed": "bge-base"
   },
-  "max_resident": 2
+  "max_resident": 3
 }
 ```
+
+### Mixture of Experts (MoE) Support
+`axil-auren` natively supports sparse MoE models like `OLMoE-1B-7B-Instruct`. With 64 experts and 8 active experts per token, `OLMoE` evaluates only **~1.3B parameters of compute per token**, delivering generation latency close to a 1B model while maintaining the knowledge, context handling, and reasoning depth of a 7B model. Thanks to `mmap`, weights are dynamically paged without requiring all expert layers to be actively resident in compute registers.
+
+### Aiming Higher: Hardware Sizing & Scaling Guide
+Different environments require different trade-offs between memory footprint, latency, and reasoning capability. `axil-auren` supports 3 clear hardware tiers:
+
+#### Tier 1: Ultra-Lightweight (<4 GB RAM or Low-Spec VPS)
+- **Generative Model**: `Qwen2.5-0.5B-Instruct` (398 MB Q4_K_M, 4096 to 131K context).
+- **Embedding Model**: `bge-small-en-v1.5` (37 MB Q8_0, 384-dimensional).
+- **RAM Footprint**: Under 500 MB total resident memory.
+- **Use Case**: Embedded boards, shared VPS, sub-second single-core CPU execution.
+
+#### Tier 2: Balanced MoE (8–16 GB RAM — Recommended Default)
+- **Generative Model**: `OLMoE-1B-7B-Instruct` (3.34 GB Q3_K_M, 64 experts, 8 active per token).
+- **Embedding Model**: `bge-base-en-v1.5` (118 MB Q8_0, 768-dimensional).
+- **RAM Footprint**: ~3.8 GB total resident memory.
+- **Use Case**: Standard developer laptops and workstations without discrete GPUs. Delivers full 7B-class reasoning and instruction adherence while sustaining ~15–25 tokens/sec CPU throughput due to only ~1.3B active parameters per token.
+
+#### Tier 3: Aiming Higher (16–32 GB+ RAM or Dedicated GPU Offload)
+For users on high-spec workstations or systems with Vulkan/CUDA GPUs who want maximum reasoning depth:
+- **Generative Model**: `Qwen2.5-7B-Instruct` (~4.7 GB Q4_K_M) or `Qwen2.5-14B-Instruct` (~9.0 GB Q4_K_M).
+- **Embedding Model**: `bge-large-en-v1.5` (330 MB Q8_0, 1024-dimensional).
+- **RAM / VRAM Footprint**: ~6 GB to 12 GB.
+- **Configuration**:
+  ```json
+  {
+    "models": [
+      {
+        "id": "qwen-7b",
+        "path": "~/.models/qwen2.5-7b-instruct-q4_k_m.gguf",
+        "capabilities": ["chat", "judge"],
+        "n_ctx": 8192,
+        "n_gpu_layers": 33
+      },
+      {
+        "id": "bge-large",
+        "path": "~/.models/bge-large-en-v1.5.gguf",
+        "capabilities": ["embed"],
+        "enable_embeddings": 1,
+        "n_ctx": 512
+      }
+    ],
+    "defaults": {
+      "chat": "qwen-7b",
+      "judge": "qwen-7b",
+      "embed": "bge-large"
+    }
+  }
+  ```
+- **Note on CPU vs. GPU**: Dense 7B models compute all 7B parameters for every token. On CPU-only systems without GPUs, dense 7B models will generate at ~3–6 tokens/second, whereas Tier 2's `OLMoE` MoE generates at ~15–25 tokens/second with comparable reasoning capabilities.
 
 ### Key Configuration Parameters
 - **`id`**: Unique string identifier referenced in API calls (e.g. `"model": "qwen"`).
@@ -248,19 +314,19 @@ curl -N -s http://localhost:4242/v1/chat/completions \
 
 ### B. Vector Embeddings (`POST /v1/embeddings`)
 
-Generates dense 384-dimensional float embeddings using `bge-small-en-v1.5` in under 1 millisecond.
+Generates dense float embeddings using `bge-small-en-v1.5` (384-dimensional, 37 MB, ultra-lightweight and fast) or `bge-base-en-v1.5` (768-dimensional, 118 MB, higher retrieval accuracy) in under a few milliseconds.
 
-#### Single Text Embedding:
+#### Single Text Embedding (bge-base, 768 dimensions):
 ```bash
 curl -s http://localhost:4242/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "bge-small",
+    "model": "bge-base",
     "input": "in-memory zero-copy vectors"
   }'
 ```
 
-#### Batch Array Embeddings:
+#### Batch Array Embeddings (bge-small, 384 dimensions):
 ```bash
 curl -s http://localhost:4242/v1/embeddings \
   -H "Content-Type: application/json" \

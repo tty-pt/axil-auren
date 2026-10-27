@@ -1,12 +1,27 @@
 {
   "models": [
     {
+      "id": "olmoe",
+      "path": "~/.models/olmoe-1b-7b-instruct-q3_k_m.gguf",
+      "capabilities": ["chat", "judge"],
+      "n_ctx": 4096,
+      "n_gpu_layers": 0,
+      "temperature": 0.7
+    },
+    {
       "id": "qwen",
       "path": "~/.models/qwen2.5-0.5b-instruct.gguf",
       "capabilities": ["chat", "judge"],
       "n_ctx": 131072,
       "n_gpu_layers": 0,
       "temperature": 0.7
+    },
+    {
+      "id": "bge-base",
+      "path": "~/.models/bge-base-en-v1.5.gguf",
+      "capabilities": ["embed"],
+      "enable_embeddings": 1,
+      "n_ctx": 512
     },
     {
       "id": "bge-small",
@@ -17,9 +32,9 @@
     }
   ],
   "defaults": {
-    "chat": "qwen",
-    "judge": "qwen",
-    "embed": "bge-small"
+    "chat": "olmoe",
+    "judge": "olmoe",
+    "embed": "bge-base"
   },
-  "max_resident": 2
+  "max_resident": 3
 }

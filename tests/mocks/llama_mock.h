@@ -54,6 +54,10 @@ typedef struct llama_model_params {
 
 size_t llama_max_devices(void);
 
+#ifndef GGML_TYPE_Q4_0
+#define GGML_TYPE_Q4_0 2
+#endif
+
 typedef struct llama_context_params {
 	uint32_t n_ctx;
 	uint32_t n_batch;
@@ -64,6 +68,8 @@ typedef struct llama_context_params {
 	bool embeddings;
     bool offload_kqv;
 	int pooling_type;
+	int type_k;
+	int type_v;
 } llama_context_params;
 
 typedef struct llama_sampler_chain_params {
@@ -229,6 +235,8 @@ struct llama_sampler *llama_sampler_init_temp(float temp);
 struct llama_sampler *llama_sampler_init_grammar(const struct llama_vocab *vocab,
 						 const char *grammar_str,
 						 const char *grammar_root);
+const float *llama_get_logits_ith(struct llama_context *ctx, int32_t i);
+int32_t llama_vocab_n_tokens(const struct llama_vocab *vocab);
 
 llama_token llama_sampler_sample(struct llama_sampler *smpl,
 				 struct llama_context *ctx,

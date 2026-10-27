@@ -142,7 +142,7 @@ Computes dense vector embeddings for `text` using mean pooling. Writes float vec
 ```c
 int auren_n_embd(struct auren_context *ctx);
 ```
-Returns the embedding vector dimension of the loaded model (e.g. 384 for `bge-small`, 896 for `qwen2.5-0.5b`).
+Returns the embedding vector dimension of the loaded model (e.g. 384 for `bge-small`, 768 for `bge-base`, 896 for `qwen2.5-0.5b`).
 
 ---
 

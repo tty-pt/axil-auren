@@ -10,6 +10,8 @@ CONFIG="${AUREN_CONFIG_PATH:-$HOME/auren.json}"
 if [ ! -f "$CONFIG" ]; then
     if [ -f "$HOME/.auren.json" ]; then
         CONFIG="$HOME/.auren.json"
+    elif [ -f "$HOME/.config/auren/config.json" ]; then
+        CONFIG="$HOME/.config/auren/config.json"
     elif [ -f "$DIR/auren.json" ]; then
         CONFIG="$DIR/auren.json"
     fi

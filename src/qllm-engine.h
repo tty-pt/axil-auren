@@ -27,6 +27,7 @@ enum {
 	QE_JOB_CHAT,      /* telnet: incremental session chat (sid) */
 	QE_JOB_CHAT_ONESHOT, /* HTTP: stateless chat, input = full request JSON */
 	QE_JOB_SYSTEMONE, /* HTTP: Jev-compatible System One decision */
+	QE_JOB_SYSTEMZERO, /* HTTP: High-efficiency binary logit decision */
 	QE_JOB_OPEN,      /* meta: open/ensure a session slot for sid */
 	QE_JOB_RESET,     /* meta: reset session history + KV */
 	QE_JOB_CLOSE,     /* meta: close/free a session slot */
@@ -97,6 +98,12 @@ int qllm_engine_chat_oneshot_model_session(const char *model, const char *sessio
  */
 int qllm_engine_systemone(const char *request_json, void *ud, int *job_id_out);
 int qllm_engine_systemone_model(const char *model, const char *request_json, void *ud, int *job_id_out);
+
+/*
+ * Submit a high-efficiency binary logit decision request (System Zero).
+ */
+int qllm_engine_systemzero(const char *request_json, void *ud, int *job_id_out);
+int qllm_engine_systemzero_model(const char *model, const char *request_json, void *ud, int *job_id_out);
 
 /*
  * Session bookkeeping. These are all queued to the worker (like any job) so the

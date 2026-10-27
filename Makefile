@@ -6,7 +6,7 @@ engine-test-obj-y :=
 LDLIBS-engine-test := -laxil-auren -ljson-c -lpthread -lm
 LDFLAGS-engine-test = -Wl,-rpath,${pwd}/lib
 
-libaxil-auren-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/systemone.o
+libaxil-auren-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/systemone.o src/systemzero.o
 libaxil-auren-obj-y-Linux := src/vulkan.o
 libaxil-auren-obj-y-Darwin := src/metal.o
 
@@ -41,7 +41,7 @@ COMPILER_C   := $(shell command -v clang  >/dev/null 2>&1 && echo clang  || echo
 COMPILER_CXX := $(shell command -v clang++ >/dev/null 2>&1 && echo clang++ || echo ${CXX})
 
 ifeq ($(arch),x86_64)
-  has_vpdpbusd := $(shell echo 'void test(void){ __asm__("vpdpbusd %ymm0, %ymm1, %ymm2"); }' | $(COMPILER_C) -c -x c - -o /dev/null 2>/dev/null && echo 1 || echo 0)
+  has_vpdpbusd := $(shell echo 'void test(void){ __asm__("{vex} vpdpbusd %ymm0, %ymm1, %ymm2"); }' | $(COMPILER_C) -c -x c - -o /dev/null 2>/dev/null && echo 1 || echo 0)
 else
   has_vpdpbusd := 1
 endif

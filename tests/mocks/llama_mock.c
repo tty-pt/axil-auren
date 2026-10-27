@@ -535,7 +535,10 @@ llama_batch_init(int32_t n_tokens, int32_t embd, int32_t n_seq_max)
         batch.token = calloc((size_t)n_tokens, sizeof(llama_token));
         batch.n_seq_id = calloc((size_t)n_tokens, sizeof(int32_t));
         batch.seq_id = calloc((size_t)n_tokens, sizeof(llama_seq_id *));
-        batch.pos = NULL;
+        for (int32_t i = 0; i < n_tokens; ++i) {
+            batch.seq_id[i] = calloc((size_t)(n_seq_max > 0 ? n_seq_max : 1), sizeof(llama_seq_id));
+        }
+        batch.pos = calloc((size_t)n_tokens, sizeof(llama_pos));
         batch.logits = calloc((size_t)n_tokens, sizeof(int32_t));
     }
     return batch;
@@ -547,7 +550,13 @@ llama_batch_free(struct llama_batch batch)
     if (batch.n_tokens > 0) {
         free(batch.token);
         free(batch.n_seq_id);
-        free(batch.seq_id);
+        if (batch.seq_id) {
+            for (int32_t i = 0; i < batch.n_tokens; ++i) {
+                free(batch.seq_id[i]);
+            }
+            free(batch.seq_id);
+        }
+        free(batch.pos);
         free(batch.logits);
     }
 }
@@ -769,4 +778,21 @@ struct llama_sampler * llama_sampler_init_grammar(
     (void)grammar_root;
     _grammar_init_count++;
     return calloc(1, sizeof(struct llama_sampler));
+}
+
+static float _dummy_mock_logits[1024];
+
+const float *
+llama_get_logits_ith(struct llama_context *ctx, int32_t i)
+{
+    (void)ctx;
+    (void)i;
+    return _dummy_mock_logits;
+}
+
+int32_t
+llama_vocab_n_tokens(const struct llama_vocab *vocab)
+{
+    (void)vocab;
+    return 1024;
 }

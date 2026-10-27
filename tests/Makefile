@@ -32,7 +32,7 @@ qllm-registry.o: ../src/qllm-registry.c
 	$(CC) $(CFLAGS) -I./mocks -c -o $@ $<
 
 run: $(TARGET)
-	./$(TARGET)
+	@T=$$(mktemp -d); HOME=$$T ./$(TARGET); R=$$?; rm -rf $$T; exit $$R
 
 valgrind: $(TARGET)
 	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./$(TARGET)

@@ -1,8 +1,24 @@
-## 1.3.0
+## [1.3.1]
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
-</p>
+- **System Zero High-Efficiency Binary Decision Endpoint (`POST /api/v1/systemzero/`)**:
+  - Implemented 0-decode-pass next-token logit probing: evaluates prompt forward pass once and retrieves raw output logits from `llama_get_logits_ith(ctx, -1)` without autoregressive generation or string JSON decoding.
+  - Computes exact calibrated sigmoid probability ($P = \sigma(L_{pos} - L_{neg})$) between affirmative (`y`, `yes`, `proceed`, `remember`) and negative (`n`, `no`, `abort`, `skip`) token families.
+  - Added support for custom binary candidate choices via `"choices": ["remember", "skip"]` or `"choice_pos"` / `"choice_neg"`.
+  - Added automatic chat template wrapping (`qllm_render`) for raw user prompts.
+  - Added `auren_systemzero_eval()` to `<ttypt/auren.h>` with backward-compatibility alias `qllm_systemzero_eval()` in `<ttypt/qllm.h>`.
+- **Sparse Mixture of Experts (MoE) & High-Accuracy Embeddings Support**:
+  - Configured `OLMoE-1B-7B-Instruct` (sparse MoE, 64 experts with 8 active, ~1.3B active compute) as default chat/judge model.
+  - Configured `BGE-Base-en-v1.5` (768-d) as default vector embeddings model.
+  - Added Hardware Sizing & Scaling Tiers guide across documentation (Tier 1 Ultra-Light, Tier 2 Balanced MoE Default, Tier 3 High-Fidelity).
+- **Session Continuation & Multi-Turn Context Fixes**:
+  - Activated compact $Q4\_0$ KV cache quantization for large context windows (`ctx_params.n_ctx >= 32768`), reducing KV cache RAM footprint by 75% and enabling stable 131,072 context execution.
+  - Aligned default Qwen context length (`n_ctx`) in `auren.json` to 131,072 tokens to match Pi coding agent specifications, preventing `Engine error -4` context exhaustion on multi-turn dialogue.
+  - Dynamic sliding-window dialogue trimming: when incoming conversation turns exceed the context window, `qllm_chat()` automatically drops the oldest non-system dialogue turns while preserving system instructions rather than aborting with an unhandled tokenization error.
+  - Prefix cache consistency: synchronized token cache state on sliding-window KV sequence eviction (`qllm_compress()`) to prevent stale offset re-evaluations.
+- **Engine Test Suite Enhancements**:
+  - Updated multi-turn session persistence tests in `engine-test` with dynamic assistant turn propagation and case-insensitive keyword verification.
+
+## [1.3.0]
 
 - **First-Class Session Continuity & Prefix KV Cache Persistence**:
   - Native session lifecycle management via `x-session-id` HTTP request headers and JSON payload `"session_id"` field.
@@ -32,21 +48,12 @@
 - **Automated Verification & Benchmarks**:
   - Expanded `engine-test` suite with 500+ token multi-turn session persistence tests verifying prefix reuse, delta decoding, and conversational recall.
 
-## 1.0.0 (libauren)
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
-</p>
+## [1.2.0]
 
 - **Rebranded `libqllm` → `libauren`**: The inference library and Axil dynamic module are officially rebranded to `libauren` (`<ttypt/auren.h>`, `libaxil-auren.so`, `auren.pc`). A backwards-compatibility forwarding header `<ttypt/qllm.h>` is retained.
 - **Block-Aware KV Cache Reuse**: Added `auren_prime_block(ctx, block_hash, text)` (`qllm_prime_block`) allowing 0 ms bypass of prompt tokenization and decoding when a content-addressed block hash matches pre-evaluated KV slots at the active sequence pointer. Downstream cached block entries are cleanly truncated on cache divergence or reset via `auren_reset()`.
 - **Full Token Streaming API**: Added `auren_generate_stream_full(ctx, prompt, cb, user)` and `auren_token_full_cb` (`qllm_generate_stream_full`) emitting both integer token IDs and decoded UTF-8 chunks during generation.
 - **Packaging & CPU portability**: Auto-detect toolchain assembler support for `vpdpbusd` on x86_64, defaulting `GGML_NATIVE=ON` but gracefully falling back to `GGML_NATIVE=OFF` with `-DGGML_AVX_VNNI=OFF -DGGML_AVX512_VNNI=OFF` on systems with older binutils (such as Rocky Linux 9 / RHEL 9 binutils 2.35) where `vpdpbusd` would otherwise fail the build. Overrideable via `make GGML_NATIVE=ON/OFF`.
-- **Multi-model registry & configuration discovery**: Model registry supporting up to 16 named models with capability tracking (`chat`, `judge`, `embed`), independent role defaults, on-demand loading, and LRU eviction under `max_resident`. Supports `auren.json` with fallback to `qllm.json`.
-- **SystemOne Calibrated Classifier**: Fast, typed evaluations (`choice`, `noul`, `score`) against conversational state strings with automatic KV-cache reset.
-- **OpenAI-compatible HTTP Endpoints**: `POST /v1/chat/completions`, `POST /v1/embeddings`, `GET /v1/models`.
-
-## 1.2.0
 
 - **Multi-model registry & configuration discovery**: new model registry subsystem (`qllm-registry`)
   supporting up to 16 named models with explicit capability tracking
@@ -92,7 +99,7 @@
   1-click curl recipes, `qllm.json` schema documentation, and verified curl
   examples for all endpoints.
 
-## 1.1.0
+## [1.1.0]
 
 - **axil module**: `libaxil-qllm` is now an axil module rather than a
   standalone daemon; `xy_install()` registers the `ask`/`chat` telnet commands

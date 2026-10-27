@@ -5,6 +5,7 @@
 #include "openai_chat.h"
 #include "openai_embed.h"
 #include "systemone.h"
+#include "systemzero.h"
 #include "qllm-engine.h"
 #include "qllm-pending.h"
 
@@ -279,7 +280,7 @@ drain(void *cbud __attribute__((unused)),
 		return;
 	}
 
-	if (r->kind == QE_JOB_SYSTEMONE) {
+	if (r->kind == QE_JOB_SYSTEMONE || r->kind == QE_JOB_SYSTEMZERO) {
 		if (r->err)
 			axil_respond_defer_abort(p->handle);
 		else
@@ -346,10 +347,12 @@ qllm_init(void)
 	const char *models_json = getenv("AUREN_MODELS");
 	char home_auren[512] = {0};
 	char home_dot_auren[512] = {0};
+	char home_config_auren[512] = {0};
 	const char *home = getenv("HOME");
 	if (home && home[0]) {
 		snprintf(home_auren, sizeof(home_auren), "%s/auren.json", home);
 		snprintf(home_dot_auren, sizeof(home_dot_auren), "%s/.auren.json", home);
+		snprintf(home_config_auren, sizeof(home_config_auren), "%s/.config/auren/config.json", home);
 	}
 
 	int has_models = (model_path && model_path[0]) ||
@@ -360,7 +363,8 @@ qllm_init(void)
 	                 (models_json && models_json[0]) ||
 	                 (access("auren.json", R_OK) == 0) ||
 	                 (home_auren[0] && access(home_auren, R_OK) == 0) ||
-	                 (home_dot_auren[0] && access(home_dot_auren, R_OK) == 0);
+	                 (home_dot_auren[0] && access(home_dot_auren, R_OK) == 0) ||
+	                 (home_config_auren[0] && access(home_config_auren, R_OK) == 0);
 
 	if (!has_models) {
 		qsyslog(QLOG_ERR, "No model configuration set; auren engine disabled\n");
@@ -389,6 +393,7 @@ qllm_init(void)
 	openai_embed_init(qllm_model_path);
 	openai_chat_init(qllm_model_path);
 	systemone_init();
+	systemzero_init();
 
 	return 0;
 }
@@ -407,6 +412,7 @@ xy_shutdown(void)
 	openai_embed_shutdown();
 	openai_chat_shutdown();
 	systemone_shutdown();
+	systemzero_shutdown();
 	free(crb_system);
 	crb_system = NULL;
 }

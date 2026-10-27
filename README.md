@@ -31,30 +31,51 @@ Running local AI models shouldn't require a 4 GB Python runtime, fragile Conda e
 
 ---
 
-## Get Cheap & Fast Models in 60 Seconds
+## Hardware Sizing & Scaling Tiers
 
-You don't need a 70B model or expensive cloud GPUs. You can run blazing-fast local generation, structured memory judgement, and semantic embeddings with less than 600 MB of total disk footprint:
+Choose the tier that matches your hardware and workload requirements. `axil-auren` runs seamlessly across all tiers:
 
-| Role | Recommended Model | Size | Quantization | Context | Purpose |
+| Tier | Target Hardware | Recommended Chat Model | Recommended Embed Model | RAM Footprint | Compute Characteristics |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Chat & Generation** | `Qwen2.5-0.5B-Instruct` | **398 MB** | Q4_K_M | 4096 | Conversational chat, instruction following & System One decisions |
-| **High-Fidelity Reasoning** | `Qwen2.5-1.5B-Instruct` | **986 MB** | Q4_K_M | 4096 | Higher reasoning fidelity for multi-step tasks and complex rubrics |
-| **Vector Embeddings** | `bge-small-en-v1.5` | **133 MB** | Q8_0 | 512 | Dense 384-dimensional vector embeddings for semantic vector search |
+| **Tier 1: Ultra-Lightweight** | <4 GB RAM / Low-spec VPS | `Qwen2.5-0.5B-Instruct` (398 MB) | `bge-small-en-v1.5` (37 MB, 384-d) | ~500 MB total | Sub-second pure CPU latency on single-core / low-power chips. |
+| **Tier 2: Balanced MoE (Default)** | 8–16 GB RAM / Standard Dev Laptop | `OLMoE-1B-7B-Instruct` (3.34 GB) | `bge-base-en-v1.5` (118 MB, 768-d) | ~3.8 GB total | **Recommended Default**: 7B-class reasoning with ~1.3B active compute speed. |
+| **Tier 3: Aiming Higher / High-Fidelity** | 16–32 GB+ RAM or Discrete GPU | `Qwen2.5-7B-Instruct` (~4.7 GB) or `Qwen2.5-14B` (~9 GB) | `bge-large-en-v1.5` (330 MB, 1024-d) | ~6–12 GB total | Maximum instruction adherence, complex coding, deep semantic indexing. |
 
-### 1-Click Download Recipe
+### 1-Click Download Recipes
 
-Download both models directly to `~/.models/` using `curl`:
-
+#### Tier 2: Default Recommended Setup (OLMoE MoE + BGE-Base)
 ```bash
 mkdir -p ~/.models
 
-# 1. Download Qwen 2.5 0.5B Instruct (Generative Chat + System One Judge)
+# 1. Download OLMoE 1B-7B Instruct (Sparse MoE: 1.3B active compute, 7B intelligence)
+curl -L -o ~/.models/olmoe-1b-7b-instruct-q3_k_m.gguf \
+  https://huggingface.co/allenai/OLMoE-1B-7B-0924-Instruct-GGUF/resolve/main/olmoe-1b-7b-0924-instruct-q3_k_m.gguf
+
+# 2. Download BGE-Base-en-v1.5 (High-Accuracy 768-d Vector Embeddings)
+curl -L -o ~/.models/bge-base-en-v1.5.gguf \
+  https://huggingface.co/CompendiumLabs/bge-base-en-v1.5-gguf/resolve/main/bge-base-en-v1.5-q8_0.gguf
+```
+
+#### Tier 1: Ultra-Lightweight Alternative (<500 MB RAM)
+```bash
+# 1. Download Qwen 2.5 0.5B Instruct (Dense Ultra-Lightweight Chat & Judge)
 curl -L -o ~/.models/qwen2.5-0.5b-instruct.gguf \
   https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 
-# 2. Download BGE-Small-en-v1.5 (Semantic Vector Embeddings)
+# 2. Download BGE-Small-en-v1.5 (Fast & Lightweight 384-d Embeddings)
 curl -L -o ~/.models/bge-small-en-v1.5.gguf \
   https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-q8_0.gguf
+```
+
+#### Tier 3: Aiming Higher (High-Fidelity for 16-32 GB+ Systems or GPUs)
+```bash
+# 1. Download Qwen 2.5 7B Instruct (Dense 7B Reasoning, ~4.7 GB)
+curl -L -o ~/.models/qwen2.5-7b-instruct-q4_k_m.gguf \
+  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf
+
+# 2. Download BGE-Large-en-v1.5 (Dense 1024-d Vector Embeddings, ~330 MB)
+curl -L -o ~/.models/bge-large-en-v1.5.gguf \
+  https://huggingface.co/CompendiumLabs/bge-large-en-v1.5-gguf/resolve/main/bge-large-en-v1.5-q8_0.gguf
 ```
 
 ---
@@ -85,12 +106,27 @@ For multi-model deployments with custom GPU offloading or context sizing, create
 {
   "models": [
     {
+      "id": "olmoe",
+      "path": "~/.models/olmoe-1b-7b-instruct-q3_k_m.gguf",
+      "capabilities": ["chat", "judge"],
+      "n_ctx": 4096,
+      "n_gpu_layers": 0,
+      "temperature": 0.7
+    },
+    {
       "id": "qwen",
       "path": "~/.models/qwen2.5-0.5b-instruct.gguf",
       "capabilities": ["chat", "judge"],
       "n_ctx": 4096,
-      "n_gpu_layers": 32,
+      "n_gpu_layers": 0,
       "temperature": 0.7
+    },
+    {
+      "id": "bge-base",
+      "path": "~/.models/bge-base-en-v1.5.gguf",
+      "capabilities": ["embed"],
+      "enable_embeddings": 1,
+      "n_ctx": 512
     },
     {
       "id": "bge-small",
@@ -101,11 +137,11 @@ For multi-model deployments with custom GPU offloading or context sizing, create
     }
   ],
   "defaults": {
-    "chat": "qwen",
-    "judge": "qwen",
-    "embed": "bge-small"
+    "chat": "olmoe",
+    "judge": "olmoe",
+    "embed": "bge-base"
   },
-  "max_resident": 2
+  "max_resident": 3
 }
 ```
 
@@ -252,18 +288,18 @@ Run `pi --model auren/qwen` to start coding with instant multi-turn turnaround.
 
 ### 2. Semantic Vector Embeddings (`POST /v1/embeddings`)
 
-Generate dense float vectors for semantic search and retrieval with `libsepal`. Supports single strings or batch arrays:
+Generate dense float vectors for semantic search and retrieval with `libsepal`. Choose `bge-small` (384-dimensional, fastest) or `bge-base` (768-dimensional, higher accuracy). Supports single strings or batch arrays:
 
 ```bash
-# Single string:
+# Single string (bge-base, 768 dimensions):
 curl -s http://localhost:4242/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "bge-small",
+    "model": "bge-base",
     "input": "lossless FLAC acoustic recording format"
   }'
 
-# Or batch array:
+# Or bge-small (384 dimensions) with batch array:
 curl -s http://localhost:4242/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{
@@ -276,12 +312,55 @@ curl -s http://localhost:4242/v1/embeddings \
 ```json
 {
   "data": [{ "embedding": [0.0381, -0.0412, 0.0894, ...], "index": 0, "object": "embedding" }],
-  "model": "bge-small",
+  "model": "bge-base",
   "object": "list"
 }
 ```
 
-### 3. Jev-Compatible System One Decision (`POST /api/v1/systemone/`)
+### 3. High-Efficiency Binary Decision (`POST /api/v1/systemzero/`)
+
+Fast binary decision judging with **0 autoregressive decode passes**. Directly inspects raw next-token logits from the forward pass of the prompt, computing exact sigmoid probabilities ($P = \sigma(L_{pos} - L_{neg})$) between affirmative (`y`, `yes`, `proceed`, `remember`) and negative (`n`, `no`, `abort`, `skip`) tokens:
+
+```bash
+curl -s http://localhost:4242/api/v1/systemzero/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "olmoe",
+    "prompt": "Evaluate whether this user message is an instruction to start a coding task or quest.\nMessage: Add a new unit test for login.\nAnswer [y/n]:",
+    "threshold": 0.5
+  }'
+```
+
+Or with custom binary candidate choices:
+```bash
+curl -s http://localhost:4242/api/v1/systemzero/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "olmoe",
+    "prompt": "Decide if this statement describes a personal preference worth remembering.\nStatement: I prefer using tabs over spaces.\nAnswer:",
+    "choices": ["remember", "skip"],
+    "threshold": 0.5
+  }'
+```
+
+**Response**:
+```json
+{
+  "ok": true,
+  "decision": true,
+  "choice": "y",
+  "probability": 0.9982,
+  "margin": 6.354,
+  "threshold": 0.5,
+  "model": "olmoe"
+}
+```
+
+- **Latency**: Runs in milliseconds on CPU (0 decode passes, single prompt evaluation).
+- **Reliability**: Eliminates JSON hallucination and syntax errors.
+- **Client Support**: Supported out of the box in `pi-quest` and `pi-mm` via `"judgeProtocol": "auto"`.
+
+### 4. Jev-Compatible System One Decision (`POST /api/v1/systemone/`)
 
 Evaluate conversational exchanges or tool events and return typed, calibrated classifications without prompt parsing:
 
@@ -325,7 +404,7 @@ curl -s http://localhost:4242/api/v1/systemone/ \
 }
 ```
 
-### 4. Model Discovery (`GET /v1/models`)
+### 5. Model Discovery (`GET /v1/models`)
 OpenAI-compatible model listing for automated client and SDK discovery:
 
 ```bash
@@ -338,7 +417,8 @@ curl -s http://localhost:4242/v1/models
   "object": "list",
   "data": [
     { "id": "qwen", "object": "model", "owned_by": "local" },
-    { "id": "bge-small", "object": "model", "owned_by": "local" }
+    { "id": "bge-small", "object": "model", "owned_by": "local" },
+    { "id": "bge-base", "object": "model", "owned_by": "local" }
   ]
 }
 ```
@@ -394,7 +474,7 @@ The canonical C interface is exposed in `<ttypt/auren.h>` (with legacy forwardin
 | `auren_generate_stream` | `long auren_generate_stream(ctx, prompt, cb, ud)` | Streaming generation delivering UTF-8 text pieces |
 | `auren_generate_stream_full` | `long auren_generate_stream_full(ctx, prompt, cb, ud)` | Streaming generation emitting token IDs and text pieces |
 | `auren_embed` | `long auren_embed(ctx, text, out, out_dim)` | Generate dense vector embeddings for semantic search |
-| `auren_n_embd` | `int auren_n_embd(struct auren_context *ctx)` | Query model embedding dimension (e.g. 384 for BGE) |
+| `auren_n_embd` | `int auren_n_embd(struct auren_context *ctx)` | Query model embedding dimension (e.g. 384 for bge-small, 768 for bge-base) |
 | `auren_chat` | `int auren_chat(ctx, msgs, n, prev_prompt, cb, ud)` | Multi-turn chat with token-level prefix KV cache reuse |
 | `auren_prime` | `int auren_prime(struct auren_context *ctx, prompt)` | Pre-decode a prompt into the KV cache |
 | `auren_prime_block` | `int auren_prime_block(ctx, hash, text)` | Content-addressed 0 ms bypass of cached prompt blocks |

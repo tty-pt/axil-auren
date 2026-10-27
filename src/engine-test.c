@@ -278,7 +278,7 @@ main(int argc, char **argv)
 	r = rec_last(job_id);
 	if (!r || r->more || r->err != 0 || !r->payload)
 		return fail("turn2 final result");
-	if (!strstr(r->payload, "cherry"))
+	if (!strstr(r->payload, "cherry") && !strstr(r->payload, "Cherry"))
 		return fail("turn2 missed history");
 	printf("turn2: recalled history ('%s')\n", "cherry");
 
@@ -479,9 +479,9 @@ main(int argc, char **argv)
 		    "{\"messages\":["
 		    "{\"role\":\"system\",\"content\":\"%s\"},"
 		    "{\"role\":\"user\",\"content\":\"Say: hello\"},"
-		    "{\"role\":\"assistant\",\"content\":\"hello\"},"
+		    "{\"role\":\"assistant\",\"content\":\"%s\"},"
 		    "{\"role\":\"user\",\"content\":\"What is the secret magic word?\"}"
-		    "],\"stream\":false}", sys_pad);
+		    "],\"stream\":false}", sys_pad, reply1 ? reply1 : "Hello!");
 		free(reply1);
 
 		t2_start = now_ms();

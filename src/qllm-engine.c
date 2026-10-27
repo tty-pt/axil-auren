@@ -1261,6 +1261,120 @@ build_single_typed_answer(const char *qid, struct json_object *q, const char *st
 }
 
 static void
+worker_systemzero(struct qllm_engine_job *job, struct qllm_engine_result *out)
+{
+	struct json_object *o = NULL, *po, *to, *mo, *cho, *cpo, *cno;
+	const char *req_model = job->model;
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
+	const char *prompt_str = NULL;
+	const char *choice_pos = NULL;
+	const char *choice_neg = NULL;
+	double threshold = 0.5;
+	double prob = 0.5, margin = 0.0;
+	bool decision = false;
+	int rc;
+
+	memset(out, 0, sizeof(*out));
+	out->job_id = job->job_id;
+	out->kind = job->kind;
+	out->ud = job->ud;
+
+	o = json_tokener_parse(job->input);
+	if (!o || !json_object_is_type(o, json_type_object)) {
+		out->err = -400;
+		out->payload = strdup("{\"error\":\"invalid JSON body\"}");
+		goto out;
+	}
+
+	po = json_object_object_get(o, "prompt");
+	if (!po)
+		po = json_object_object_get(o, "state");
+	if (!po) {
+		out->err = -400;
+		out->payload = strdup("{\"error\":\"missing prompt or state field\"}");
+		goto out;
+	}
+	prompt_str = json_object_is_type(po, json_type_string) ?
+	             json_object_get_string(po) : json_object_to_json_string(po);
+
+	to = json_object_object_get(o, "threshold");
+	if (to && (json_object_is_type(to, json_type_double) || json_object_is_type(to, json_type_int)))
+		threshold = json_object_get_double(to);
+
+	cho = json_object_object_get(o, "choices");
+	if (cho && json_object_is_type(cho, json_type_array) && json_object_array_length(cho) >= 2) {
+		struct json_object *c0 = json_object_array_get_idx(cho, 0);
+		struct json_object *c1 = json_object_array_get_idx(cho, 1);
+		if (c0) choice_pos = json_object_get_string(c0);
+		if (c1) choice_neg = json_object_get_string(c1);
+	}
+	cpo = json_object_object_get(o, "choice_pos");
+	if (cpo && json_object_is_type(cpo, json_type_string))
+		choice_pos = json_object_get_string(cpo);
+	cno = json_object_object_get(o, "choice_neg");
+	if (cno && json_object_is_type(cno, json_type_string))
+		choice_neg = json_object_get_string(cno);
+
+	if (!req_model) {
+		mo = json_object_object_get(o, "model");
+		if (mo && json_object_is_type(mo, json_type_string))
+			req_model = json_object_get_string(mo);
+	}
+
+	rc = qllm_registry_acquire(req_model, QLLM_CAP_JUDGE, &ctx, model_used, sizeof(model_used));
+	if (rc != QLLM_REG_OK || !ctx) {
+		out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -503);
+		out->payload = strdup(rc == QLLM_REG_ERR_UNKNOWN ? "{\"error\":\"unknown model\"}" :
+		                      (rc == QLLM_REG_ERR_CAP ? "{\"error\":\"model does not support judge capability\"}" :
+		                                                "{\"error\":\"failed to load judge model\"}"));
+		goto out;
+	}
+
+	char *rendered_prompt = NULL;
+	size_t rendered_len = 0;
+	const char *eval_prompt = prompt_str;
+
+	if (prompt_str && !strstr(prompt_str, "<|im_start|>") && !strstr(prompt_str, "<|user|>")) {
+		struct qllm_message m;
+		m.role = "user";
+		m.content = prompt_str;
+		if (qllm_render(ctx, &m, 1, true, &rendered_prompt, &rendered_len) == 0 && rendered_prompt) {
+			eval_prompt = rendered_prompt;
+		}
+	}
+
+	rc = auren_systemzero_eval(ctx, eval_prompt, choice_pos, choice_neg,
+	                          &prob, &margin, &decision, threshold);
+	free(rendered_prompt);
+	qllm_registry_release(model_used);
+
+	if (rc != 0) {
+		out->err = -500;
+		out->payload = strdup("{\"error\":\"systemzero evaluation failed\"}");
+		goto out;
+	}
+
+	const char *chosen = decision ? (choice_pos ? choice_pos : "y") : (choice_neg ? choice_neg : "n");
+
+	struct json_object *resp_obj = json_object_new_object();
+	json_object_object_add(resp_obj, "ok", json_object_new_boolean(true));
+	json_object_object_add(resp_obj, "decision", json_object_new_boolean(decision));
+	json_object_object_add(resp_obj, "choice", json_object_new_string(chosen));
+	json_object_object_add(resp_obj, "probability", json_object_new_double(prob));
+	json_object_object_add(resp_obj, "margin", json_object_new_double(margin));
+	json_object_object_add(resp_obj, "threshold", json_object_new_double(threshold));
+	json_object_object_add(resp_obj, "model", json_object_new_string(model_used[0] ? model_used : "default"));
+
+	out->payload = strdup(json_object_to_json_string(resp_obj));
+	json_object_put(resp_obj);
+
+out:
+	if (o)
+		json_object_put(o);
+}
+
+static void
 worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 {
 	struct json_object *o = NULL, *state_o, *qs_o, *mo;
@@ -1587,6 +1701,9 @@ worker_main(void *arg)
 		case QE_JOB_SYSTEMONE:
 			worker_systemone(&job, &res);
 			break;
+		case QE_JOB_SYSTEMZERO:
+			worker_systemzero(&job, &res);
+			break;
 		case QE_JOB_OPEN:
 		case QE_JOB_RESET:
 		case QE_JOB_CLOSE:
@@ -1854,6 +1971,20 @@ qllm_engine_systemone_model(const char *model, const char *request_json, void *u
 	if (!request_json)
 		return -1;
 	return job_submit(QE_JOB_SYSTEMONE, model, 0, request_json, ud, job_id_out);
+}
+
+int
+qllm_engine_systemzero(const char *request_json, void *ud, int *job_id_out)
+{
+	return qllm_engine_systemzero_model(NULL, request_json, ud, job_id_out);
+}
+
+int
+qllm_engine_systemzero_model(const char *model, const char *request_json, void *ud, int *job_id_out)
+{
+	if (!request_json)
+		return -1;
+	return job_submit(QE_JOB_SYSTEMZERO, model, 0, request_json, ud, job_id_out);
 }
 
 int

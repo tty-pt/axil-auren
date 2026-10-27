@@ -340,7 +340,34 @@ curl -s http://localhost:4242/v1/embeddings \
   }'
 ```
 
-### C. System One Decisions (`POST /api/v1/systemone/`)
+### C. System Zero Binary Decisions (`POST /api/v1/systemzero/`)
+
+Ultra-fast binary decision judging with **zero decode steps**. It evaluates the prompt once, reads the raw next-token logits from `llama_get_logits_ith(ctx, -1)`, and computes calibrated sigmoid probabilities ($P = \sigma(L_{pos} - L_{neg})$) between candidate options (e.g. `[y/n]`, `[proceed/abort]`, `[remember/skip]`):
+
+```bash
+curl -s http://localhost:4242/api/v1/systemzero/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "olmoe",
+    "prompt": "Evaluate whether this query asks for software code changes.\nQuery: Please fix the null pointer exception in parse_header.\nAnswer [y/n]:",
+    "threshold": 0.5
+  }'
+```
+
+**Response**:
+```json
+{
+  "ok": true,
+  "decision": true,
+  "choice": "y",
+  "probability": 0.9982,
+  "margin": 6.354,
+  "threshold": 0.5,
+  "model": "olmoe"
+}
+```
+
+### D. System One Decisions (`POST /api/v1/systemone/`)
 
 Evaluates structured questions against conversational state, returning calibrated mathematical probabilities rather than free-form text. Ideal for memory classifiers, autonomous agents, and safety filters.
 
@@ -386,7 +413,7 @@ curl -s http://localhost:4242/api/v1/systemone/ \
 }
 ```
 
-### D. Model Discovery (`GET /v1/models`)
+### E. Model Discovery (`GET /v1/models`)
 
 ```bash
 curl -s http://localhost:4242/v1/models

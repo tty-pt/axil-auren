@@ -5,6 +5,7 @@
 #include "openai_chat.h"
 #include "openai_embed.h"
 #include "systemone.h"
+#include "systemzero.h"
 #include "qllm-engine.h"
 #include "qllm-pending.h"
 
@@ -279,7 +280,7 @@ drain(void *cbud __attribute__((unused)),
 		return;
 	}
 
-	if (r->kind == QE_JOB_SYSTEMONE) {
+	if (r->kind == QE_JOB_SYSTEMONE || r->kind == QE_JOB_SYSTEMZERO) {
 		if (r->err)
 			axil_respond_defer_abort(p->handle);
 		else
@@ -389,6 +390,7 @@ qllm_init(void)
 	openai_embed_init(qllm_model_path);
 	openai_chat_init(qllm_model_path);
 	systemone_init();
+	systemzero_init();
 
 	return 0;
 }
@@ -407,6 +409,7 @@ xy_shutdown(void)
 	openai_embed_shutdown();
 	openai_chat_shutdown();
 	systemone_shutdown();
+	systemzero_shutdown();
 	free(crb_system);
 	crb_system = NULL;
 }

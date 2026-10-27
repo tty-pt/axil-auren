@@ -45,6 +45,7 @@ typedef struct auren_config  qllm_config_t;
 #define qllm_anchor_end          auren_anchor_end
 #define qllm_compress            auren_compress
 #define qllm_set_eos_bias        auren_set_eos_bias
+#define qllm_systemzero_eval     auren_systemzero_eval
 
 #ifdef __cplusplus
 }

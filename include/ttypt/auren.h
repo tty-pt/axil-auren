@@ -285,6 +285,25 @@ auren_set_eos_bias(struct auren_context *ctx,
 		   int32_t start_tokens,
 		   float max_bias);
 
+/**
+ * Binary decision evaluation using raw next-token logits (zero decode passes).
+ * Evaluates the prompt forward pass, extracts logits of the last token,
+ * compares affirmative tokens (choice_pos or default "y"/"yes") vs
+ * negative tokens (choice_neg or default "n"/"no"), and computes
+ * probability = sigmoid(L_pos - L_neg).
+ *
+ * Returns 0 on success, < 0 on error.
+ */
+int
+auren_systemzero_eval(struct auren_context *ctx,
+		      const char *prompt,
+		      const char *choice_pos,
+		      const char *choice_neg,
+		      double *probability_out,
+		      double *margin_out,
+		      bool *decision_out,
+		      double threshold);
+
 #ifdef __cplusplus
 }
 #endif

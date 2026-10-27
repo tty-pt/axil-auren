@@ -1,5 +1,15 @@
 ## [1.3.1]
 
+- **System Zero High-Efficiency Binary Decision Endpoint (`POST /api/v1/systemzero/`)**:
+  - Implemented 0-decode-pass next-token logit probing: evaluates prompt forward pass once and retrieves raw output logits from `llama_get_logits_ith(ctx, -1)` without autoregressive generation or string JSON decoding.
+  - Computes exact calibrated sigmoid probability ($P = \sigma(L_{pos} - L_{neg})$) between affirmative (`y`, `yes`, `proceed`, `remember`) and negative (`n`, `no`, `abort`, `skip`) token families.
+  - Added support for custom binary candidate choices via `"choices": ["remember", "skip"]` or `"choice_pos"` / `"choice_neg"`.
+  - Added automatic chat template wrapping (`qllm_render`) for raw user prompts.
+  - Added `auren_systemzero_eval()` to `<ttypt/auren.h>` with backward-compatibility alias `qllm_systemzero_eval()` in `<ttypt/qllm.h>`.
+- **Sparse Mixture of Experts (MoE) & High-Accuracy Embeddings Support**:
+  - Configured `OLMoE-1B-7B-Instruct` (sparse MoE, 64 experts with 8 active, ~1.3B active compute) as default chat/judge model.
+  - Configured `BGE-Base-en-v1.5` (768-d) as default vector embeddings model.
+  - Added Hardware Sizing & Scaling Tiers guide across documentation (Tier 1 Ultra-Light, Tier 2 Balanced MoE Default, Tier 3 High-Fidelity).
 - **Session Continuation & Multi-Turn Context Fixes**:
   - Activated compact $Q4\_0$ KV cache quantization for large context windows (`ctx_params.n_ctx >= 32768`), reducing KV cache RAM footprint by 75% and enabling stable 131,072 context execution.
   - Aligned default Qwen context length (`n_ctx`) in `auren.json` to 131,072 tokens to match Pi coding agent specifications, preventing `Engine error -4` context exhaustion on multi-turn dialogue.

@@ -317,7 +317,50 @@ curl -s http://localhost:4242/v1/embeddings \
 }
 ```
 
-### 3. Jev-Compatible System One Decision (`POST /api/v1/systemone/`)
+### 3. High-Efficiency Binary Decision (`POST /api/v1/systemzero/`)
+
+Fast binary decision judging with **0 autoregressive decode passes**. Directly inspects raw next-token logits from the forward pass of the prompt, computing exact sigmoid probabilities ($P = \sigma(L_{pos} - L_{neg})$) between affirmative (`y`, `yes`, `proceed`, `remember`) and negative (`n`, `no`, `abort`, `skip`) tokens:
+
+```bash
+curl -s http://localhost:4242/api/v1/systemzero/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "olmoe",
+    "prompt": "Evaluate whether this user message is an instruction to start a coding task or quest.\nMessage: Add a new unit test for login.\nAnswer [y/n]:",
+    "threshold": 0.5
+  }'
+```
+
+Or with custom binary candidate choices:
+```bash
+curl -s http://localhost:4242/api/v1/systemzero/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "olmoe",
+    "prompt": "Decide if this statement describes a personal preference worth remembering.\nStatement: I prefer using tabs over spaces.\nAnswer:",
+    "choices": ["remember", "skip"],
+    "threshold": 0.5
+  }'
+```
+
+**Response**:
+```json
+{
+  "ok": true,
+  "decision": true,
+  "choice": "y",
+  "probability": 0.9982,
+  "margin": 6.354,
+  "threshold": 0.5,
+  "model": "olmoe"
+}
+```
+
+- **Latency**: Runs in milliseconds on CPU (0 decode passes, single prompt evaluation).
+- **Reliability**: Eliminates JSON hallucination and syntax errors.
+- **Client Support**: Supported out of the box in `pi-quest` and `pi-mm` via `"judgeProtocol": "auto"`.
+
+### 4. Jev-Compatible System One Decision (`POST /api/v1/systemone/`)
 
 Evaluate conversational exchanges or tool events and return typed, calibrated classifications without prompt parsing:
 
@@ -361,7 +404,7 @@ curl -s http://localhost:4242/api/v1/systemone/ \
 }
 ```
 
-### 4. Model Discovery (`GET /v1/models`)
+### 5. Model Discovery (`GET /v1/models`)
 OpenAI-compatible model listing for automated client and SDK discovery:
 
 ```bash

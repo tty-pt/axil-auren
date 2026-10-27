@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <unistd.h>
 #include <pthread.h>
 
@@ -1821,5 +1822,145 @@ qllm_chat(struct qllm_context *qctx,
 	qllm_compress(qctx, (uint32_t)(qctx->max_tokens * 4 / 5));
 
 	free(full);
+	return 0;
+}
+
+static float
+systemzero_word_max_logit(const struct llama_vocab *vocab, const float *logits, int32_t n_vocab, const char *word)
+{
+	float max_l = -1e9f;
+	char spaced[128];
+	const char *cands[2];
+	int n_cands = 1;
+
+	if (!word || !word[0])
+		return max_l;
+
+	cands[0] = word;
+	if (word[0] != ' ' && strlen(word) < 120) {
+		snprintf(spaced, sizeof(spaced), " %s", word);
+		cands[1] = spaced;
+		n_cands = 2;
+	}
+
+	for (int c = 0; c < n_cands; ++c) {
+		llama_token tok[8];
+		int32_t n_tok = llama_tokenize(vocab, cands[c], (int32_t)strlen(cands[c]), tok, 8, false, false);
+		if (n_tok > 0 && tok[0] >= 0 && tok[0] < n_vocab) {
+			if (logits[tok[0]] > max_l)
+				max_l = logits[tok[0]];
+		}
+	}
+	return max_l;
+}
+
+int
+auren_systemzero_eval(struct auren_context *qctx,
+		      const char *prompt,
+		      const char *choice_pos,
+		      const char *choice_neg,
+		      double *probability_out,
+		      double *margin_out,
+		      bool *decision_out,
+		      double threshold)
+{
+	int32_t n_prompt;
+	int32_t n_vocab;
+	const float *logits;
+	float pos_l = -1e9f;
+	float neg_l = -1e9f;
+	double margin, prob;
+	bool decision;
+
+	if (!QLLM_VALID(qctx) || !qctx->ctx || !prompt || !prompt[0])
+		return -1;
+
+	/* Clear previous KV contents */
+	llama_memory_clear(llama_get_memory(qctx->ctx), true);
+	qctx->gen_tokens = 0;
+	qctx->n_cached_blocks = 0;
+	qctx->current_block_idx = 0;
+	qctx->anchor_start = 0;
+	qctx->anchor_end = 0;
+
+	n_prompt = llama_tokenize(qctx->vocab,
+				  prompt,
+				  (int32_t)strlen(prompt),
+				  qctx->token_buf,
+				  qctx->max_tokens,
+				  true,
+				  true);
+	if (n_prompt <= 0)
+		return -1;
+
+	/* Decode prompt. qllm_decode_tokens sets batch.logits[last] = 1 */
+	if (qllm_decode_tokens(qctx, qctx->token_buf, n_prompt, 0) != 0)
+		return -1;
+
+	/* If the model immediately emits leading whitespace/newlines, advance 1 token */
+	llama_token peek_tok = llama_sampler_sample(qctx->sampler, qctx->ctx, -1);
+	char piece[64] = {0};
+	int n_piece = llama_token_to_piece(qctx->vocab, peek_tok, piece, sizeof(piece) - 1, false, true);
+	if (n_piece > 0) {
+		bool is_all_ws = true;
+		for (int i = 0; i < n_piece; ++i) {
+			if (!isspace((unsigned char)piece[i])) {
+				is_all_ws = false;
+				break;
+			}
+		}
+		if (is_all_ws) {
+			qctx->token_buf[0] = peek_tok;
+			qllm_decode_tokens(qctx, qctx->token_buf, 1, 0);
+		}
+	}
+
+	logits = llama_get_logits_ith(qctx->ctx, -1);
+	if (!logits)
+		return -1;
+
+	n_vocab = llama_vocab_n_tokens(qctx->vocab);
+
+	if (choice_pos && choice_pos[0]) {
+		pos_l = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, choice_pos);
+	} else {
+		static const char *default_pos[] = {
+			"y", "Y", "yes", "Yes", "YES", "1", "true", "True", "proceed", "remember"
+		};
+		for (size_t i = 0; i < sizeof(default_pos)/sizeof(default_pos[0]); ++i) {
+			float l = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, default_pos[i]);
+			if (l > pos_l) pos_l = l;
+		}
+	}
+
+	if (choice_neg && choice_neg[0]) {
+		neg_l = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, choice_neg);
+	} else {
+		static const char *default_neg[] = {
+			"n", "N", "no", "No", "NO", "0", "false", "False", "abort", "skip"
+		};
+		for (size_t i = 0; i < sizeof(default_neg)/sizeof(default_neg[0]); ++i) {
+			float l = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, default_neg[i]);
+			if (l > neg_l) neg_l = l;
+		}
+	}
+
+	if (pos_l <= -1e8f && neg_l <= -1e8f) {
+		margin = 0.0;
+		prob = 0.5;
+	} else {
+		margin = (double)(pos_l - neg_l);
+		prob = 1.0 / (1.0 + exp(-margin));
+	}
+
+	decision = (prob >= (threshold > 0.0 ? threshold : 0.5));
+
+	if (probability_out)
+		*probability_out = prob;
+	if (margin_out)
+		*margin_out = margin;
+	if (decision_out)
+		*decision_out = decision;
+
 	return 0;
 }

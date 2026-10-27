@@ -1,9 +1,5 @@
 ## [1.3.1]
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
-</p>
-
 - **Session Continuation & Multi-Turn Context Fixes**:
   - Activated compact $Q4\_0$ KV cache quantization for large context windows (`ctx_params.n_ctx >= 32768`), reducing KV cache RAM footprint by 75% and enabling stable 131,072 context execution.
   - Aligned default Qwen context length (`n_ctx`) in `auren.json` to 131,072 tokens to match Pi coding agent specifications, preventing `Engine error -4` context exhaustion on multi-turn dialogue.
@@ -13,10 +9,6 @@
   - Updated multi-turn session persistence tests in `engine-test` with dynamic assistant turn propagation and case-insensitive keyword verification.
 
 ## [1.3.0]
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
-</p>
 
 - **First-Class Session Continuity & Prefix KV Cache Persistence**:
   - Native session lifecycle management via `x-session-id` HTTP request headers and JSON payload `"session_id"` field.
@@ -47,10 +39,6 @@
   - Expanded `engine-test` suite with 500+ token multi-turn session persistence tests verifying prefix reuse, delta decoding, and conversational recall.
 
 ## [1.2.0]
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/tty-pt/axil-auren/main/logo.png" alt="axil-auren logo" width="220" />
-</p>
 
 - **Rebranded `libqllm` → `libauren`**: The inference library and Axil dynamic module are officially rebranded to `libauren` (`<ttypt/auren.h>`, `libaxil-auren.so`, `auren.pc`). A backwards-compatibility forwarding header `<ttypt/qllm.h>` is retained.
 - **Block-Aware KV Cache Reuse**: Added `auren_prime_block(ctx, block_hash, text)` (`qllm_prime_block`) allowing 0 ms bypass of prompt tokenization and decoding when a content-addressed block hash matches pre-evaluated KV slots at the active sequence pointer. Downstream cached block entries are cleanly truncated on cache divergence or reset via `auren_reset()`.

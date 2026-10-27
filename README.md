@@ -16,16 +16,17 @@ No CUDA toolchains to manage, no gigabytes of Python dependencies. `axil-auren` 
 
 ---
 
-## 1. Quickstart: Multi-Model Daemon
+## 1. Quickstart: Run as an Axil Module
 
-Start the local inference server on port 4242:
+`axil-auren` is designed first and foremost as a native [axil](https://github.com/tty-pt/axil) server module. It automatically discovers GGUF models in `~/.models/` and loads configuration from `~/.config/auren/config.json` (or `~/auren.json`):
 
 ```bash
-# Start server in foreground using auto-discovered ~/.config/auren/config.json or ~/auren.json:
+# Primary execution: start axil daemon loading the auren module on port 4242
+axil -A -d -p 4242 -m libaxil-auren
+
+# Or via the turnkey helper launcher:
 scripts/auren-server
 ```
-
-*(Alternatively, run as an axil module: `axil -A -d -p 4242 -m libaxil-auren`).*
 
 ### Verified `curl` Queries
 

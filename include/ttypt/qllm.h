@@ -34,6 +34,7 @@ typedef struct auren_config  qllm_config_t;
 #define qllm_n_ctx               auren_n_ctx
 #define qllm_set_seq             auren_set_seq
 #define qllm_set_grammar         auren_set_grammar
+#define qllm_set_max_gen         auren_set_max_gen
 #define qllm_sampler_create      auren_sampler_create
 #define qllm_sampler_add_grammar auren_sampler_add_grammar
 #define qllm_sampler_free        auren_sampler_free
@@ -46,6 +47,8 @@ typedef struct auren_config  qllm_config_t;
 #define qllm_compress            auren_compress
 #define qllm_set_eos_bias        auren_set_eos_bias
 #define qllm_systemzero_eval     auren_systemzero_eval
+#define qllm_choice_eval         auren_choice_eval
+#define QLLM_CHOICE_MAX          AUREN_CHOICE_MAX
 
 #ifdef __cplusplus
 }

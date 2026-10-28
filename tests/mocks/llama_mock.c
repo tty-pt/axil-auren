@@ -398,25 +398,34 @@ llama_chat_apply_template(const char *tmpl, const struct llama_chat_message *cha
 			  size_t n_msg, bool add_ass,
 			  char *buf, int32_t length)
 {
+	/* Like the real API: with buf == NULL (or too small) only the required
+	 * length is reported, nothing is written. */
 	size_t i, used = 0;
+	size_t cap = (buf && length > 0) ? (size_t)length - 1 : 0;
 
 	(void)tmpl;
 	for (i = 0; i < n_msg; i++) {
 		const char *src = chat[i].content;
 
-		if (src) {
-			while (*src && used < (size_t)length - 1)
-				buf[used++] = *src++;
+		while (src && *src) {
+			if (used < cap)
+				buf[used] = *src;
+			used++;
+			src++;
 		}
 	}
 	if (add_ass) {
-		static const char *role = "<|assistant|>";
-		const char *src = role;
+		const char *src = "<|assistant|>";
 
-		while (*src && used < (size_t)length - 1)
-			buf[used++] = *src++;
+		while (*src) {
+			if (used < cap)
+				buf[used] = *src;
+			used++;
+			src++;
+		}
 	}
-	buf[used] = '\0';
+	if (buf && length > 0)
+		buf[used < cap ? used : cap] = '\0';
 	return (int32_t)used;
 }
 

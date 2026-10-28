@@ -172,6 +172,15 @@ int
 auren_set_grammar(struct auren_context *ctx, const char *grammar_str);
 
 /**
+ * Cap how many tokens a single generate/chat call may produce.
+ * 0 removes the cap (generation is then bounded only by the context window).
+ * Callers that need a short answer (classification, judge) must set this so a
+ * runaway generation cannot occupy the engine worker for the whole window.
+ */
+void
+auren_set_max_gen(struct auren_context *ctx, int32_t n);
+
+/**
  * Create a new sampler chain (eos_bias + penalties + top_k/top_p + temp + dist)
  * based on config. Returns NULL on failure.
  */
@@ -303,6 +312,21 @@ auren_systemzero_eval(struct auren_context *ctx,
 		      double *margin_out,
 		      bool *decision_out,
 		      double threshold);
+
+/** Most options a closed choice question may declare (letters A..Z). */
+#define AUREN_CHOICE_MAX 26
+
+/**
+ * Closed multiple-choice evaluation by next-token logits. The caller letters
+ * its options A, B, C ... in the prompt messages; this reads the model's first
+ * answer token (one forward pass, no sampling) and returns the index of the
+ * most likely option letter, with softmax probabilities over the options in
+ * probs_out[0..n_options-1]. Returns the best index (>= 0) or < 0 on error.
+ */
+int
+auren_choice_eval(struct auren_context *ctx,
+		  const struct auren_message *msgs, size_t n_msgs,
+		  int n_options, double *probs_out);
 
 #ifdef __cplusplus
 }

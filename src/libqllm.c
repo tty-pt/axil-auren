@@ -54,6 +54,8 @@ struct qllm_context {
 	struct qllm_block_entry  cached_blocks[QLLM_MAX_CACHED_BLOCKS];
 	int32_t			 n_cached_blocks;
 	int32_t			 current_block_idx;
+	/* Per-call generation cap; 0 = bounded only by max_tokens (n_ctx). */
+	int32_t			 gen_limit;
 };
 
 #define QLLM_MAGIC 0x514C4C4D
@@ -1233,6 +1235,24 @@ qllm_set_grammar(struct qllm_context *qctx, const char *grammar_str)
 	return 0;
 }
 
+/* Effective per-call generation bound: the context window, tightened by the
+ * caller-provided cap when one is set. */
+static int32_t
+qllm_gen_bound(const struct qllm_context *qctx)
+{
+	if (qctx->gen_limit > 0 && qctx->gen_limit < qctx->max_tokens)
+		return qctx->gen_limit;
+	return qctx->max_tokens;
+}
+
+void
+qllm_set_max_gen(struct qllm_context *qctx, int32_t n)
+{
+	if (!QLLM_VALID(qctx))
+		return;
+	qctx->gen_limit = n > 0 ? n : 0;
+}
+
 int
 qllm_generate_stream_full(struct qllm_context *qctx,
 			  const char *prompt,
@@ -1249,7 +1269,7 @@ qllm_generate_stream_full(struct qllm_context *qctx,
 	if (!QLLM_VALID(qctx) || !prompt || !cb)
 		return -1;
 
-	max_gen = qctx->max_tokens;
+	max_gen = qllm_gen_bound(qctx);
 
 	llama_free(qctx->ctx);
 	qctx->ctx = llama_init_from_model(qctx->model, qctx->params);
@@ -1803,7 +1823,7 @@ qllm_chat(struct qllm_context *qctx,
 	qllm_anchor_start(qctx);
 
 	/* Stream tokens until EOG */
-	for (step = 0; step < qctx->max_tokens; ++step) {
+	for (step = 0; step < qllm_gen_bound(qctx); ++step) {
 		char piece[256];
 		int n;
 
@@ -1963,4 +1983,73 @@ auren_systemzero_eval(struct auren_context *qctx,
 		*decision_out = decision;
 
 	return 0;
+}
+
+/*
+ * Closed multiple-choice evaluation by next-token logits: the options are
+ * lettered A, B, C ... in the prompt and the model's first answer token is
+ * read straight from the logits. One forward pass, no sampling, no JSON to
+ * parse, and real probabilities (softmax over the option letters) — so the
+ * answer is always one of the declared options and never a fabricated default.
+ */
+int
+qllm_choice_eval(struct qllm_context *qctx,
+		 const struct qllm_message *msgs, size_t n_msgs,
+		 int n_options, double *probs_out)
+{
+	char *full = NULL;
+	size_t full_len = 0;
+	int32_t n_prompt, n_vocab;
+	const float *logits;
+	float lg[QLLM_CHOICE_MAX];
+	float max_l = -1e9f;
+	double sum = 0.0;
+	int i, best = 0;
+
+	if (!QLLM_VALID(qctx) || !qctx->ctx || !msgs || n_msgs == 0 ||
+	    n_options < 2 || n_options > QLLM_CHOICE_MAX || !probs_out)
+		return -1;
+
+	if (qllm_render(qctx, msgs, n_msgs, true, &full, &full_len) != 0)
+		return -1;
+
+	llama_memory_clear(llama_get_memory(qctx->ctx), true);
+	qctx->gen_tokens = 0;
+	qctx->n_cached_blocks = 0;
+	qctx->current_block_idx = 0;
+	qctx->anchor_start = 0;
+	qctx->anchor_end = 0;
+	qctx->n_cached_tokens = 0;
+
+	n_prompt = llama_tokenize(qctx->vocab, full, (int32_t)full_len,
+				  qctx->token_buf, qctx->max_tokens, true, true);
+	free(full);
+	if (n_prompt <= 0 || qllm_decode_tokens(qctx, qctx->token_buf, n_prompt, 0) != 0)
+		return -1;
+
+	logits = llama_get_logits_ith(qctx->ctx, -1);
+	if (!logits)
+		return -1;
+	n_vocab = llama_vocab_n_tokens(qctx->vocab);
+
+	for (i = 0; i < n_options; ++i) {
+		char letter[2] = { (char)('A' + i), '\0' };
+
+		lg[i] = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, letter);
+		if (lg[i] > max_l) {
+			max_l = lg[i];
+			best = i;
+		}
+	}
+	if (max_l <= -1e8f)
+		return -1; /* none of the option letters is a known token */
+
+	for (i = 0; i < n_options; ++i) {
+		probs_out[i] = lg[i] <= -1e8f ? 0.0 : exp((double)(lg[i] - max_l));
+		sum += probs_out[i];
+	}
+	for (i = 0; i < n_options; ++i)
+		probs_out[i] /= sum;
+
+	return best;
 }

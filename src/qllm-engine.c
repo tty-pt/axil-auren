@@ -18,6 +18,7 @@
 
 #include "qllm-engine.h"
 #include "qllm-registry.h"
+#include "systemone-choice.h"
 
 #include <ttypt/qllm.h>
 
@@ -1073,7 +1074,17 @@ worker_oneshot(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	st.acc = &full;
 	st.acc_len = &flen;
 
+	/* Honour the client's max_tokens so an abandoned request cannot keep
+	 * generating until the context window is full. */
+	{
+		struct json_object *mt = json_object_object_get(o, "max_tokens");
+		int64_t cap = (mt && json_object_is_type(mt, json_type_int)) ?
+		    json_object_get_int64(mt) : 0;
+
+		qllm_set_max_gen(ctx, cap > 0 && cap < INT32_MAX ? (int32_t)cap : 0);
+	}
 	rc = qllm_chat(ctx, msgs, n, NULL, oneshot_chat_cb, &st);
+	qllm_set_max_gen(ctx, 0);
 	if (rc != 0 && st.err == 0)
 		st.err = -4;
 
@@ -1108,6 +1119,12 @@ out:
 	if (o)
 		json_object_put(o);
 }
+
+/* Room for the "Allowed Choices" text of a question (an 8-option intent
+ * question with descriptions is well over the old 512 bytes). */
+#define SYSTEMONE_CHOICES_DESC_MAX 4096
+/* A judge answer is one short JSON object; never let it run to n_ctx. */
+#define SYSTEMONE_MAX_GEN 64
 
 struct systemone_accum {
 	char *buf;
@@ -1167,32 +1184,44 @@ build_single_typed_answer(const char *qid, struct json_object *q, const char *st
 			}
 		}
 
-		/* Fallback heuristic if model output is not one of allowed choices */
+		/* Legacy pi-mm "remember" questions keep their heuristic default. */
+		int legacy_remember = crit && json_object_is_type(crit, json_type_object) &&
+		    json_object_object_get(crit, "remember") != NULL;
 		char fallback_buf[64] = "";
-		if (crit && json_object_is_type(crit, json_type_object)) {
-			struct json_object_iterator cit = json_object_iter_begin(crit);
-			struct json_object_iterator cit_end = json_object_iter_end(crit);
-			if (!json_object_iter_equal(&cit, &cit_end)) {
-				snprintf(fallback_buf, sizeof(fallback_buf), "%s", json_object_iter_peek_name(&cit));
+
+		if (!legacy_remember) {
+			/* The answer must be exactly one declared option. Anything
+			 * else is reported as unparseable: inventing a default (and a
+			 * confidence for it) made a failing judge look decisive. */
+			const char *resolved = chosen ? systemone_resolve_choice(chosen, q) : NULL;
+
+			if (!resolved) {
+				json_object_object_add(ans, "choice", NULL);
+				json_object_object_add(ans, "error",
+				    json_object_new_string("unparseable model output"));
+				return ans;
 			}
-		} else if (cho && json_object_is_type(cho, json_type_array) && json_object_array_length(cho) > 0) {
-			const char *first_c = json_object_get_string(json_object_array_get_idx(cho, 0));
-			if (first_c)
-				snprintf(fallback_buf, sizeof(fallback_buf), "%s", first_c);
+			chosen = resolved;
+		} else {
+			if (crit && json_object_is_type(crit, json_type_object)) {
+				struct json_object_iterator cit = json_object_iter_begin(crit);
+				struct json_object_iterator cit_end = json_object_iter_end(crit);
+				if (!json_object_iter_equal(&cit, &cit_end))
+					snprintf(fallback_buf, sizeof(fallback_buf), "%s",
+					    json_object_iter_peek_name(&cit));
+			}
+			if (state_str) {
+				if (strstr(state_str, "update") || strstr(state_str, "3 shards"))
+					snprintf(fallback_buf, sizeof(fallback_buf), "update");
+				else if (strstr(state_str, "morning") || strstr(state_str, "weather") ||
+				    strstr(state_str, "Hello"))
+					snprintf(fallback_buf, sizeof(fallback_buf), "skip");
+				else
+					snprintf(fallback_buf, sizeof(fallback_buf), "remember");
+			}
+			if (!chosen || !chosen[0])
+				chosen = fallback_buf[0] ? fallback_buf : "default";
 		}
-
-		/* Specific memory fallback for pi-mm questions containing 'remember' */
-		if (state_str && crit && json_object_object_get(crit, "remember")) {
-			if (strstr(state_str, "update") || strstr(state_str, "3 shards"))
-				snprintf(fallback_buf, sizeof(fallback_buf), "update");
-			else if (strstr(state_str, "morning") || strstr(state_str, "weather") || strstr(state_str, "Hello"))
-				snprintf(fallback_buf, sizeof(fallback_buf), "skip");
-			else
-				snprintf(fallback_buf, sizeof(fallback_buf), "remember");
-		}
-
-		if (!chosen || !chosen[0])
-			chosen = fallback_buf[0] ? fallback_buf : "default";
 
 		json_object_object_add(ans, "choice", json_object_new_string(chosen));
 		json_object_object_add(ans, "confidence", json_object_new_double(0.90));
@@ -1374,6 +1403,125 @@ out:
 		json_object_put(o);
 }
 
+/*
+ * Closed single-question choice: answer by option-letter logits instead of
+ * asking the model to write JSON. Handles a request with exactly one question
+ * of type "choice" that declares 2..QLLM_CHOICE_MAX options (`criteria` object
+ * or `choices` array). Returns 1 and sets *payload on success; 0 when the
+ * request has another shape (the generic JSON path then handles it).
+ */
+static int
+systemone_choice_fast_path(struct qllm_context *ctx, const char *state_str,
+    struct json_object *qs_o, const char *model, char **payload)
+{
+	struct json_object_iterator it, it_end;
+	struct json_object *q, *to, *io, *crit, *cho, *resp, *answers, *ans, *probs, *usage;
+	const char *qid, *t, *instr, *keys[QLLM_CHOICE_MAX], *descs[QLLM_CHOICE_MAX];
+	struct qllm_message msgs[1];
+	double p[QLLM_CHOICE_MAX];
+	char *prompt = NULL;
+	size_t plen = 0, n = 0, i;
+	FILE *mem;
+	int best;
+
+	if (!qs_o || !json_object_is_type(qs_o, json_type_object) ||
+	    json_object_object_length(qs_o) != 1)
+		return 0;
+	it = json_object_iter_begin(qs_o);
+	it_end = json_object_iter_end(qs_o);
+	if (json_object_iter_equal(&it, &it_end))
+		return 0;
+	qid = json_object_iter_peek_name(&it);
+	q = json_object_iter_peek_value(&it);
+	if (!q || !json_object_is_type(q, json_type_object))
+		return 0;
+	to = json_object_object_get(q, "type");
+	t = to ? json_object_get_string(to) : "choice";
+	if (strcmp(t, "choice") != 0)
+		return 0;
+	io = json_object_object_get(q, "instructions");
+	if (!io) io = json_object_object_get(q, "prompt");
+	instr = io ? json_object_get_string(io) : "";
+
+	crit = json_object_object_get(q, "criteria");
+	cho = json_object_object_get(q, "choices");
+	if (crit && json_object_is_type(crit, json_type_object)) {
+		struct json_object_iterator ci = json_object_iter_begin(crit);
+		struct json_object_iterator ce = json_object_iter_end(crit);
+
+		while (!json_object_iter_equal(&ci, &ce)) {
+			if (n >= QLLM_CHOICE_MAX)
+				return 0;
+			keys[n] = json_object_iter_peek_name(&ci);
+			descs[n] = json_object_get_string(json_object_iter_peek_value(&ci));
+			++n;
+			json_object_iter_next(&ci);
+		}
+	} else if (cho && json_object_is_type(cho, json_type_array)) {
+		size_t cn = json_object_array_length(cho);
+
+		for (i = 0; i < cn; ++i) {
+			if (n >= QLLM_CHOICE_MAX)
+				return 0;
+			keys[n] = json_object_get_string(json_object_array_get_idx(cho, i));
+			descs[n] = "";
+			++n;
+		}
+	}
+	if (n < 2)
+		return 0;
+	for (i = 0; i < n; ++i)
+		if (!keys[i] || !keys[i][0])
+			return 0;
+
+	mem = open_memstream(&prompt, &plen);
+	if (!mem)
+		return 0;
+	/* Prompt shape matters for small local models: measured on olmoe, a
+	 * system message or the option keys next to the descriptions cut intent
+	 * accuracy sharply, so the lettered options carry the description only
+	 * (the key when none is given) in a single user message. */
+	fprintf(mem, "%s\n\n%s\n", state_str, instr);
+	for (i = 0; i < n; ++i)
+		fprintf(mem, "%c) %s\n", (int)('A' + i),
+		    (descs[i] && descs[i][0]) ? descs[i] : keys[i]);
+	fprintf(mem, "\nAnswer with a single letter.");
+	fclose(mem);
+
+	msgs[0].role = "user";
+	msgs[0].content = prompt;
+
+	best = qllm_choice_eval(ctx, msgs, 1, (int)n, p);
+	free(prompt);
+	if (best < 0)
+		return 0;
+
+	resp = json_object_new_object();
+	answers = json_object_new_object();
+	ans = json_object_new_object();
+	probs = json_object_new_object();
+	usage = json_object_new_object();
+	for (i = 0; i < n; ++i)
+		json_object_object_add(probs, keys[i], json_object_new_double(p[i]));
+	json_object_object_add(ans, "type", json_object_new_string("choice"));
+	json_object_object_add(ans, "choice", json_object_new_string(keys[best]));
+	json_object_object_add(ans, "confidence", json_object_new_double(p[best]));
+	json_object_object_add(ans, "probabilities", probs);
+	json_object_object_add(answers, qid, ans);
+	json_object_object_add(resp, "model", json_object_new_string(model));
+	json_object_object_add(resp, "answers", answers);
+	json_object_object_add(usage, "input_tokens", json_object_new_int((int)(plen / 4 + 10)));
+	json_object_object_add(usage, "output_tokens", json_object_new_int(1));
+	json_object_object_add(resp, "usage", usage);
+	{
+		const char *str = json_object_to_json_string(resp);
+
+		*payload = strdup(str ? str : "{}");
+	}
+	json_object_put(resp);
+	return *payload != NULL;
+}
+
 static void
 worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 {
@@ -1427,6 +1575,14 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	const char *state_str = json_object_is_type(state_o, json_type_string) ?
 	                        json_object_get_string(state_o) : json_object_to_json_string(state_o);
 
+	if (systemone_choice_fast_path(ctx, state_str, qs_o,
+	    model_used[0] ? model_used : g_engine.model_path, &out->payload)) {
+		out->err = 0;
+		qllm_reset(ctx);
+		qllm_registry_release(model_used);
+		goto out;
+	}
+
 	p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
 	                     "State:\n%s\n\nQuestions:\n", state_str);
 
@@ -1444,7 +1600,7 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 
 			struct json_object *crit = json_object_object_get(q, "criteria");
 			struct json_object *cho = json_object_object_get(q, "choices");
-			char choices_desc[512] = "";
+			char choices_desc[SYSTEMONE_CHOICES_DESC_MAX] = "";
 			size_t c_off = 0;
 			if (crit && json_object_is_type(crit, json_type_object)) {
 				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
@@ -1490,7 +1646,7 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 
 			struct json_object *crit = json_object_object_get(q, "criteria");
 			struct json_object *cho = json_object_object_get(q, "choices");
-			char choices_desc[512] = "";
+			char choices_desc[SYSTEMONE_CHOICES_DESC_MAX] = "";
 			size_t c_off = 0;
 			if (crit && json_object_is_type(crit, json_type_object)) {
 				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
@@ -1531,7 +1687,9 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	msgs[1].content = prompt_buf;
 
 	struct systemone_accum acc = {0};
+	qllm_set_max_gen(ctx, SYSTEMONE_MAX_GEN);
 	rc = qllm_chat(ctx, msgs, 2, NULL, systemone_token_cb, &acc);
+	qllm_set_max_gen(ctx, 0);
 
 	struct json_object *resp_obj = json_object_new_object();
 	struct json_object *answers_obj = json_object_new_object();

@@ -6,7 +6,7 @@ TEST_SRC := $(wildcard unit/core/*.c edge/*.c stress/*.c)
 
 FRAMEWORK_SRC := framework/test_utils.c
 MOCK_SRC := mocks/llama_mock.c mocks/gguf_mock.c mocks/corm_mock.c mocks/vulkan_mock.c
-LIB_SRC := libqllm.o qllm-registry.o
+LIB_SRC := libqllm.o qllm-registry.o systemone-choice.o
 MAIN_SRC := test_main.c
 
 ALL_SRC := $(MAIN_SRC) $(FRAMEWORK_SRC) $(MOCK_SRC) $(TEST_SRC)
@@ -27,6 +27,9 @@ $(TARGET): $(ALL_OBJ)
 # libqllm.c is the unit under test; it is compiled against the mocks.
 libqllm.o: ../src/libqllm.c
 	$(CC) $(CFLAGS) -I./mocks -c -o $@ $<
+
+systemone-choice.o: ../src/systemone-choice.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 qllm-registry.o: ../src/qllm-registry.c
 	$(CC) $(CFLAGS) -I./mocks -c -o $@ $<

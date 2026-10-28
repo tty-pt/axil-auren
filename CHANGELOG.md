@@ -1,3 +1,13 @@
+## [Unreleased]
+
+- **System One judge is bounded and honest.**
+  - Judge generation is capped (`SYSTEMONE_MAX_GEN`, 64 tokens) via the new `auren_set_max_gen()` / `qllm_set_max_gen()`; `/v1/chat/completions` now honours a request `max_tokens` through the same cap. Before, generation was bounded only by `n_ctx` (131072 for `qwen`), so one runaway request could occupy the single engine worker for hours and make every later call time out.
+  - An answer that is not exactly one declared option is returned as `{"choice": null, "error": "unparseable model output"}`. The old silent fallback (first option, fixed 0.90 confidence, 0.05 for the rest) is removed; only the legacy pi-mm `remember` question keeps its heuristic default.
+  - A single closed `choice` question (2..26 options, `criteria` or `choices`) is answered by option-letter logits (`auren_choice_eval()`): one forward pass, no JSON to parse, real softmax probabilities.
+  - The "Allowed Choices" buffer grew from 512 to 4096 bytes so long option lists are no longer truncated.
+  - `~/auren.json` judge models now use `temperature` 0.1 (was 0.7); this is a user config change, not part of the build.
+  - Tests: `systemone-choice` resolver, `auren_set_max_gen`, `auren_choice_eval`; the llama mock's `llama_chat_apply_template` now supports the NULL-buffer size query like the real API.
+
 ## [1.3.1]
 
 - **System Zero High-Efficiency Binary Decision Endpoint (`POST /api/v1/systemzero/`)**:

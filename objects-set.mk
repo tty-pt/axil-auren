@@ -5,6 +5,7 @@ CFLAGS-qllm-registry-o := -fPIC
 CFLAGS-openai_embed-o := -fPIC
 CFLAGS-openai_chat-o := -fPIC
 CFLAGS-systemone-o := -fPIC
+CFLAGS-systemone-choice-o := -fPIC
 CFLAGS-systemzero-o := -fPIC
 CFLAGS-vulkan-o := -fPIC
 CFLAGS-metal-o := -fPIC

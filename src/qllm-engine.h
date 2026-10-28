@@ -28,6 +28,7 @@ enum {
 	QE_JOB_CHAT_ONESHOT, /* HTTP: stateless chat, input = full request JSON */
 	QE_JOB_SYSTEMONE, /* HTTP: Jev-compatible System One decision */
 	QE_JOB_SYSTEMZERO, /* HTTP: High-efficiency binary logit decision */
+	QE_JOB_CLASSIFY,   /* HTTP: In-memory nearest-exemplar classification */
 	QE_JOB_OPEN,      /* meta: open/ensure a session slot for sid */
 	QE_JOB_RESET,     /* meta: reset session history + KV */
 	QE_JOB_CLOSE,     /* meta: close/free a session slot */
@@ -95,8 +96,16 @@ int qllm_engine_chat_oneshot_model_session(const char *model, const char *sessio
 
 /*
  * Submit a Jev-compatible System One decision request.
+ * DEPRECATED: Use in-memory classification (QE_JOB_CLASSIFY) instead.
  */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((deprecated("System One decision is deprecated; use QE_JOB_CLASSIFY / POST /v1/classify instead")))
+#endif
 int qllm_engine_systemone(const char *request_json, void *ud, int *job_id_out);
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((deprecated("System One decision is deprecated; use QE_JOB_CLASSIFY / POST /v1/classify instead")))
+#endif
 int qllm_engine_systemone_model(const char *model, const char *request_json, void *ud, int *job_id_out);
 
 /*

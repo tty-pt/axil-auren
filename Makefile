@@ -3,14 +3,14 @@ all := libaxil-auren auren-chat engine-test
 INSTALL_BIN := auren-chat auren-path auren-list
 
 engine-test-obj-y :=
-LDLIBS-engine-test := -laxil-auren -ljson-c -lpthread -lm
+LDLIBS-engine-test := -laxil-auren -lsepal -lcorm -ljson-c -lpthread -lm
 LDFLAGS-engine-test = -Wl,-rpath,${pwd}/lib
 
-libaxil-auren-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/systemone.o src/systemone-choice.o src/systemzero.o
+libaxil-auren-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/openai_classify.o src/auren-collections.o src/systemone.o src/systemone-choice.o src/systemzero.o
 libaxil-auren-obj-y-Linux := src/vulkan.o
 libaxil-auren-obj-y-Darwin := src/metal.o
 
-LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lqsys -ljson-c \
+LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lqsys -ljson-c \
 	-lllama -lggml -lggml-cpu -lggml-base -ldl -lpthread -lm -lstdc++
 LDLIBS-libaxil-auren-Linux := -lgomp -lvulkan -lggml-vulkan
 LDLIBS-libaxil-auren-Darwin := -lggml-metal -lggml-blas -lomp \

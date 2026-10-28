@@ -34,6 +34,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 
 #define QE_JOB_MAX  64
 #define QE_VEC_MAX  4096
@@ -1403,6 +1404,241 @@ out:
 		json_object_put(o);
 }
 
+/* ------------------------------------------------------------------ */
+/* Classification: In-memory nearest-exemplar SIMD cosine matching   */
+/* ------------------------------------------------------------------ */
+
+#define CLASSIFY_CACHE_MAX 1024
+
+struct exemplar_cache_entry {
+	uint64_t hash;
+	char *text;
+	float *vec;
+	int dim;
+	char model[64];
+};
+
+static struct {
+	struct exemplar_cache_entry entries[CLASSIFY_CACHE_MAX];
+	size_t count;
+	pthread_mutex_t lock;
+	int inited;
+} g_classify_cache;
+
+static uint64_t
+hash_str(const char *str)
+{
+	uint64_t h = 14695981039346656037ULL;
+	if (!str) return h;
+	while (*str) {
+		h ^= (uint64_t)(unsigned char)(*str++);
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+static float
+sim_cosine(const float *a, const float *b, size_t n)
+{
+	double dot = 0.0, na = 0.0, nb = 0.0;
+	for (size_t i = 0; i < n; i++) {
+		dot += (double)a[i] * (double)b[i];
+		na += (double)a[i] * (double)a[i];
+		nb += (double)b[i] * (double)b[i];
+	}
+	if (na <= 0.0 || nb <= 0.0)
+		return 0.0f;
+	return (float)(dot / sqrt(na * nb));
+}
+
+static int
+get_or_embed_exemplar(struct qllm_context *ctx, const char *model_used,
+    const char *text, float *out_vec, int *out_dim)
+{
+	uint64_t h = hash_str(text);
+	size_t i;
+
+	if (!g_classify_cache.inited) {
+		pthread_mutex_init(&g_classify_cache.lock, NULL);
+		g_classify_cache.inited = 1;
+	}
+
+	pthread_mutex_lock(&g_classify_cache.lock);
+	for (i = 0; i < g_classify_cache.count; ++i) {
+		if (g_classify_cache.entries[i].hash == h &&
+		    strcmp(g_classify_cache.entries[i].model, model_used) == 0 &&
+		    strcmp(g_classify_cache.entries[i].text, text) == 0) {
+			*out_dim = g_classify_cache.entries[i].dim;
+			memcpy(out_vec, g_classify_cache.entries[i].vec, *out_dim * sizeof(float));
+			pthread_mutex_unlock(&g_classify_cache.lock);
+			return 0;
+		}
+	}
+	pthread_mutex_unlock(&g_classify_cache.lock);
+
+	int dim = qllm_embed(ctx, text, out_vec, QE_VEC_MAX);
+	if (dim <= 0)
+		return -1;
+	*out_dim = dim;
+
+	pthread_mutex_lock(&g_classify_cache.lock);
+	if (g_classify_cache.count < CLASSIFY_CACHE_MAX) {
+		size_t idx = g_classify_cache.count++;
+		g_classify_cache.entries[idx].hash = h;
+		g_classify_cache.entries[idx].text = strdup(text);
+		g_classify_cache.entries[idx].dim = dim;
+		snprintf(g_classify_cache.entries[idx].model, sizeof(g_classify_cache.entries[idx].model), "%s", model_used);
+		g_classify_cache.entries[idx].vec = malloc(dim * sizeof(float));
+		if (g_classify_cache.entries[idx].vec)
+			memcpy(g_classify_cache.entries[idx].vec, out_vec, dim * sizeof(float));
+	}
+	pthread_mutex_unlock(&g_classify_cache.lock);
+	return 0;
+}
+
+static void
+worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
+{
+	struct json_object *o = NULL, *text_o, *labels_o, *mo;
+	const char *req_model = job->model;
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
+	const char *probe_text = NULL;
+	float *probe_vec = NULL;
+	float *ex_vec = NULL;
+	int probe_dim = 0;
+	int rc;
+
+	memset(out, 0, sizeof(*out));
+	out->job_id = job->job_id;
+	out->kind = job->kind;
+	out->ud = job->ud;
+
+	o = json_tokener_parse(job->input);
+	if (!o || !json_object_is_type(o, json_type_object)) {
+		out->err = -400;
+		out->payload = strdup("{\"error\":\"invalid JSON body\"}");
+		goto out;
+	}
+
+	text_o = json_object_object_get(o, "text");
+	labels_o = json_object_object_get(o, "labels");
+	if (!text_o || !labels_o || !json_object_is_type(labels_o, json_type_object)) {
+		out->err = -400;
+		out->payload = strdup("{\"error\":\"missing or invalid text or labels\"}");
+		goto out;
+	}
+
+	probe_text = json_object_get_string(text_o);
+	if (!probe_text || !probe_text[0]) {
+		out->err = -400;
+		out->payload = strdup("{\"error\":\"text must not be empty\"}");
+		goto out;
+	}
+
+	if (!req_model) {
+		mo = json_object_object_get(o, "model");
+		if (mo && json_object_is_type(mo, json_type_string))
+			req_model = json_object_get_string(mo);
+	}
+
+	rc = qllm_registry_acquire(req_model, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used));
+	if (rc != QLLM_REG_OK || !ctx) {
+		out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -503);
+		out->payload = strdup(rc == QLLM_REG_ERR_UNKNOWN ? "{\"error\":\"unknown model\"}" :
+		                      (rc == QLLM_REG_ERR_CAP ? "{\"error\":\"model does not support embed capability\"}" :
+		                                                "{\"error\":\"failed to load embed model\"}"));
+		goto out;
+	}
+
+	probe_vec = calloc(QE_VEC_MAX, sizeof(*probe_vec));
+	ex_vec = calloc(QE_VEC_MAX, sizeof(*ex_vec));
+	if (!probe_vec || !ex_vec) {
+		out->err = -500;
+		out->payload = strdup("{\"error\":\"out of memory\"}");
+		qllm_registry_release(model_used);
+		goto out;
+	}
+
+	probe_dim = qllm_embed(ctx, probe_text, probe_vec, QE_VEC_MAX);
+	if (probe_dim <= 0) {
+		out->err = -500;
+		out->payload = strdup("{\"error\":\"failed to embed probe text\"}");
+		qllm_registry_release(model_used);
+		goto out;
+	}
+
+	struct json_object *scores_obj = json_object_new_object();
+	const char *best_label = NULL;
+	double max_sim = -2.0;
+	double second_sim = -2.0;
+
+	struct json_object_iterator it = json_object_iter_begin(labels_o);
+	struct json_object_iterator it_end = json_object_iter_end(labels_o);
+	while (!json_object_iter_equal(&it, &it_end)) {
+		const char *label_name = json_object_iter_peek_name(&it);
+		struct json_object *arr = json_object_iter_peek_value(&it);
+		double label_best = -2.0;
+
+		if (arr && json_object_is_type(arr, json_type_array)) {
+			size_t arr_len = json_object_array_length(arr);
+			for (size_t i = 0; i < arr_len; ++i) {
+				struct json_object *elem = json_object_array_get_idx(arr, i);
+				const char *ex_text = elem ? json_object_get_string(elem) : NULL;
+				if (!ex_text || !ex_text[0]) continue;
+
+				int ex_dim = 0;
+				if (get_or_embed_exemplar(ctx, model_used[0] ? model_used : "default",
+				                          ex_text, ex_vec, &ex_dim) != 0 || ex_dim != probe_dim)
+					continue;
+
+				float sim = sim_cosine(probe_vec, ex_vec, probe_dim);
+				if (sim > label_best)
+					label_best = sim;
+			}
+		}
+
+		if (label_best > -1.5) {
+			json_object_object_add(scores_obj, label_name, json_object_new_double(label_best));
+			if (label_best > max_sim) {
+				second_sim = max_sim;
+				max_sim = label_best;
+				best_label = label_name;
+			} else if (label_best > second_sim) {
+				second_sim = label_best;
+			}
+		} else {
+			json_object_object_add(scores_obj, label_name, json_object_new_double(0.0));
+		}
+
+		json_object_iter_next(&it);
+	}
+
+	qllm_registry_release(model_used);
+
+	double margin = 0.0;
+	if (best_label && second_sim > -1.5)
+		margin = max_sim - second_sim;
+	else if (best_label)
+		margin = 1.0 + max_sim;
+
+	struct json_object *resp = json_object_new_object();
+	json_object_object_add(resp, "choice", json_object_new_string(best_label ? best_label : ""));
+	json_object_object_add(resp, "similarity", json_object_new_double(max_sim > -1.5 ? max_sim : 0.0));
+	json_object_object_add(resp, "margin", json_object_new_double(margin));
+	json_object_object_add(resp, "scores", scores_obj);
+	json_object_object_add(resp, "model", json_object_new_string(model_used[0] ? model_used : "default"));
+
+	out->payload = strdup(json_object_to_json_string(resp));
+	json_object_put(resp);
+
+out:
+	free(probe_vec);
+	free(ex_vec);
+	if (o)
+		json_object_put(o);
+}
+
 /*
  * Closed single-question choice: answer by option-letter logits instead of
  * asking the model to write JSON. Handles a request with exactly one question
@@ -1861,6 +2097,9 @@ worker_main(void *arg)
 			break;
 		case QE_JOB_SYSTEMZERO:
 			worker_systemzero(&job, &res);
+			break;
+		case QE_JOB_CLASSIFY:
+			worker_classify(&job, &res);
 			break;
 		case QE_JOB_OPEN:
 		case QE_JOB_RESET:

@@ -393,6 +393,8 @@ curl -s http://localhost:4242/api/v1/systemone/ \
   }'
 ```
 
+**Closed choice contract**: a single `choice` question with 2..26 options is scored from option-letter logits in one forward pass, so `probabilities` are real softmax values (never a fabricated fixed number). Generation is capped (`SYSTEMONE_MAX_GEN`, 64 tokens) and the options text buffer is 4096 bytes. If the model's answer is not exactly one declared option, the answer is `{"type": "choice", "choice": null, "error": "unparseable model output"}`; clients must treat `null` as "unavailable", not as a decision. For classifying short free text into intents, prefer `POST /v1/embeddings` nearest-exemplar search (see `docs/SEMANTIC_SEARCH.md`): small judges are position-biased on multi-option questions.
+
 **Response**:
 ```json
 {

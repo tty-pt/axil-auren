@@ -130,6 +130,21 @@ Renders a conversation transcript using the model's embedded Jinja/ChatML templa
 
 ---
 
+## Bounded generation & closed choices
+
+### `auren_set_max_gen`
+```c
+void auren_set_max_gen(struct auren_context *ctx, int32_t n);
+```
+Caps how many tokens one generate/chat call may produce (`0` removes the cap, leaving only the context window). Classification and judge callers must set it so a runaway generation cannot occupy the engine worker; the System One judge uses 64.
+
+### `auren_choice_eval`
+```c
+int auren_choice_eval(struct auren_context *ctx, const struct auren_message *msgs, size_t n_msgs,
+                      int n_options, double *probs_out);
+```
+Closed multiple-choice evaluation by next-token logits: the caller letters its options A, B, C ... in the prompt, one forward pass reads the first answer token, and `probs_out[0..n_options-1]` receives softmax probabilities. Returns the best option index (`>= 0`) or `< 0` on error.
+
 ## Vector Embeddings
 
 ### `auren_embed`

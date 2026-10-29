@@ -20,14 +20,6 @@ LDLIBS-libaxil-auren-Darwin := -lggml-metal -lggml-blas -lomp \
 	-framework Metal \
 	-framework Accelerate
 
-# Backward compatibility aliases
-libaxil-qllm-obj-y := ${libaxil-auren-obj-y}
-libaxil-qllm-obj-y-Linux := ${libaxil-auren-obj-y-Linux}
-libaxil-qllm-obj-y-Darwin := ${libaxil-auren-obj-y-Darwin}
-LDLIBS-libaxil-qllm := ${LDLIBS-libaxil-auren}
-LDLIBS-libaxil-qllm-Linux := ${LDLIBS-libaxil-auren-Linux}
-LDLIBS-libaxil-qllm-Darwin := ${LDLIBS-libaxil-auren-Darwin}
-LDFLAGS-libaxil-qllm = ${LDFLAGS-libaxil-auren}
 
 llamacpp := submodules/llama.cpp/build
 
@@ -91,15 +83,6 @@ bin/auren-list: scripts/auren-list | bin
 	cp $< $@
 	chmod 755 $@
 
-bin/qllm-path: bin/auren-path | bin
-	ln -sf auren-path $@
-
-bin/qllm-list: bin/auren-list | bin
-	ln -sf auren-list $@
-
-bin/qllm-chat: bin/auren-chat | bin
-	ln -sf auren-chat $@
-
 ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc: auren.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
 	install -m 644 auren.pc $@
@@ -108,11 +91,7 @@ ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc: axil-auren.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
 	install -m 644 axil-auren.pc $@
 
-${DESTDIR}${PREFIX}/lib/pkgconfig/axil-qllm.pc: axil-qllm.pc
-	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
-	install -m 644 axil-qllm.pc $@
-
-install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-qllm.pc
+install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc
 
 src/libqllm.o: $(llamacpp)/src/libllama.a
 

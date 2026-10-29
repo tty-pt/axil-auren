@@ -1,12 +1,18 @@
-## [Unreleased]
+## [1.4.0] - 2026-10-29
 
-- **System One judge is bounded and honest.**
-  - Judge generation is capped (`SYSTEMONE_MAX_GEN`, 64 tokens) via the new `auren_set_max_gen()` / `qllm_set_max_gen()`; `/v1/chat/completions` now honours a request `max_tokens` through the same cap. Before, generation was bounded only by `n_ctx` (131072 for `qwen`), so one runaway request could occupy the single engine worker for hours and make every later call time out.
-  - An answer that is not exactly one declared option is returned as `{"choice": null, "error": "unparseable model output"}`. The old silent fallback (first option, fixed 0.90 confidence, 0.05 for the rest) is removed; only the legacy pi-mm `remember` question keeps its heuristic default.
-  - A single closed `choice` question (2..26 options, `criteria` or `choices`) is answered by option-letter logits (`auren_choice_eval()`): one forward pass, no JSON to parse, real softmax probabilities.
-  - The "Allowed Choices" buffer grew from 512 to 4096 bytes so long option lists are no longer truncated.
-  - `~/auren.json` judge models now use `temperature` 0.1 (was 0.7); this is a user config change, not part of the build.
-  - Tests: `systemone-choice` resolver, `auren_set_max_gen`, `auren_choice_eval`; the llama mock's `llama_chat_apply_template` now supports the NULL-buffer size query like the real API.
+- **In-Memory Embedding Classification (`POST /v1/classify`)**:
+  - Implemented high-throughput, zero-allocation cosine similarity classification against exemplar embeddings (`src/openai_classify.c`).
+  - Evaluates decision questions, intent classification, and multi-class categories in 10–20 ms using pre-computed or on-the-fly SIMD vector dot products, eliminating the latency and stochastic variance of generative LLM decoding.
+  - Automatically normalizes embeddings and computes margin scores between top-ranking candidate categories.
+- **Multi-Tenant Vector Collections (`POST /v1/collections`)**:
+  - Added dynamic in-memory vector collection management for grouped embeddings and semantic recall.
+- **Compiler Deprecation Notices & Attributes**:
+  - Formally deprecated legacy `systemzero` (`POST /v1/chat/completions`) and `systemone` (`POST /v1/judge`) with `__attribute__((deprecated))` compiler attributes and runtime upgrade notices, directing callers to `POST /v1/classify` and native embedding workflows.
+- **System One Judge Boundedness & Honest Scoring**:
+  - Judge generation is capped (`SYSTEMONE_MAX_GEN`, 64 tokens) via `auren_set_max_gen()` / `qllm_set_max_gen()`; `/v1/chat/completions` honours request `max_tokens` through the same cap.
+  - An answer that is not exactly one declared option is returned as `{"choice": null, "error": "unparseable model output"}`, eliminating silent fabricated defaults.
+  - Closed `choice` questions (2..26 options, `criteria` or `choices`) are evaluated by option-letter logits (`auren_choice_eval()`): one forward pass, real softmax probabilities, with allowed choices buffer expanded to 4096 bytes.
+  - Tests: `systemone-choice` resolver, `auren_set_max_gen`, `auren_choice_eval`; mock `llama_chat_apply_template` size query support.
 
 ## [1.3.1]
 

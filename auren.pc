@@ -6,5 +6,5 @@ includedir=${prefix}/include
 Name: auren
 Description: Local LLM inference and embeddings via llama.cpp (standalone library)
 Version: 1.4.0
-Libs: -L${libdir} -laxil-auren -laxil -lxylem -lcorm -lqsys -ljson-c
+Libs: -L${libdir} -laxil-auren -laxil -lxylem -lcorm -lsepal -lqsys -ljson-c
 Cflags: -I${includedir}

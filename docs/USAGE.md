@@ -340,7 +340,9 @@ curl -s http://localhost:4242/v1/embeddings \
   }'
 ```
 
-### C. System Zero Binary Decisions (`POST /api/v1/systemzero/`)
+### C. System Zero Binary Decisions (`POST /api/v1/systemzero/`) — DEPRECATED
+
+> **DEPRECATION NOTICE**: `systemzero` is deprecated. Use `POST /v1/classify` for in-memory semantic classification instead.
 
 Ultra-fast binary decision judging with **zero decode steps**. It evaluates the prompt once, reads the raw next-token logits from `llama_get_logits_ith(ctx, -1)`, and computes calibrated sigmoid probabilities ($P = \sigma(L_{pos} - L_{neg})$) between candidate options (e.g. `[y/n]`, `[proceed/abort]`, `[remember/skip]`):
 
@@ -367,7 +369,9 @@ curl -s http://localhost:4242/api/v1/systemzero/ \
 }
 ```
 
-### D. System One Decisions (`POST /api/v1/systemone/`)
+### D. System One Decisions (`POST /api/v1/systemone/`) — DEPRECATED
+
+> **DEPRECATION NOTICE**: Heavyweight generative `systemone` questions are deprecated. Use `POST /v1/classify` for fast in-memory SIMD dot-product classification instead.
 
 Evaluates structured questions against conversational state, returning calibrated mathematical probabilities rather than free-form text. Ideal for memory classifiers, autonomous agents, and safety filters.
 

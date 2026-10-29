@@ -67,11 +67,15 @@ Models reside in `~/.models/` and are automatically discovered:
 
 | Endpoint | Method | Input Model / Role | Description |
 | :--- | :--- | :--- | :--- |
+| `/v1/classify` | `POST` | `model: "bge-base"` | In-memory semantic classification using SIMD unit-vector dot products (~10–20ms) |
+| `/v1/collections/{name}/documents` | `POST` | `text`, `id?` | Multi-tenant persistent document ingestion using `libsepal` and `libcorm` |
+| `/v1/collections/{name}/search` | `GET` | `q`, `limit?` | Multi-tenant ranked vector search |
+| `/v1/collections/{name}/documents/{id}` | `DELETE` | *none* | Delete document and vector from tenant collection |
 | `/v1/chat/completions` | `POST` | `model: "chat"` (or explicit ID) | OpenAI-compatible streaming and non-streaming text generation |
 | `/v1/embeddings` | `POST` | `model: "bge-base"` / `"bge-small"` | Generate dense vector embeddings for semantic search |
-| `/api/v1/systemzero/` | `POST` | `model: "judge"` | Zero-decode binary logit-probe decision evaluation |
-| `/api/v1/systemone/` | `POST` | `model: "judge"` | Jev-compatible structured choice question classifier |
 | `/v1/models` | `GET` | *none* | List all registered models and active capabilities |
+| `/api/v1/systemzero/` | `POST` | *(DEPRECATED)* | *(Deprecated: use `POST /v1/classify`)* Zero-decode binary logit-probe decision evaluation |
+| `/api/v1/systemone/` | `POST` | *(DEPRECATED)* | *(Deprecated: use `POST /v1/classify`)* Jev-compatible structured choice question classifier |
 
 ---
 

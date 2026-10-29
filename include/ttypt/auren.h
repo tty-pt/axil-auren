@@ -303,6 +303,9 @@ auren_set_eos_bias(struct auren_context *ctx,
  *
  * Returns 0 on success, < 0 on error.
  */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((deprecated("auren_systemzero_eval is deprecated; use in-memory semantic classification instead")))
+#endif
 int
 auren_systemzero_eval(struct auren_context *ctx,
 		      const char *prompt,

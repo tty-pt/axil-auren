@@ -111,7 +111,14 @@ int qllm_engine_systemone_model(const char *model, const char *request_json, voi
 /*
  * Submit a high-efficiency binary logit decision request (System Zero).
  */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((deprecated("System Zero decision is deprecated; use QE_JOB_CLASSIFY / POST /v1/classify instead")))
+#endif
 int qllm_engine_systemzero(const char *request_json, void *ud, int *job_id_out);
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((deprecated("System Zero decision is deprecated; use QE_JOB_CLASSIFY / POST /v1/classify instead")))
+#endif
 int qllm_engine_systemzero_model(const char *model, const char *request_json, void *ud, int *job_id_out);
 
 /*

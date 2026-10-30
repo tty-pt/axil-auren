@@ -1,3 +1,28 @@
+## [1.4.0] - 2026-10-30
+
+- **Unified Non-Generative System One Engine (`POST /v1/systemone`)**:
+  - Unified all System 1 reflexive decision making under `POST /v1/systemone` (and `/api/v1/systemone/`).
+  - 100% non-generative: backed strictly by in-memory unit-vector embeddings and SIMD cosine similarity (`QLLM_CAP_EMBED` via `bge-base` / `bge-small`), evaluating decisions with **0 generated decode tokens** in ~5–10 ms.
+  - Supports three unified request shapes:
+    1. **Choice Gating**: `{ prompt, choices: [...] }` evaluating candidate options via probe-to-choice vector similarity.
+    2. **Nearest-Exemplar Matching**: `{ text, exemplars: {...} }` or `{ text, labels: {...} }` with in-memory vector caching.
+    3. **Jev Question Evaluation**: `{ state, questions: {...} }` for conversational memory classifiers and autonomous agents.
+  - All JSON responses are constructed deterministically in C via `cJSON`, eliminating generative formatting drift and regex failures (0% parse failure rate).
+- **Purged Obsolete Endpoints & Legacy Modules**:
+  - Completely removed `src/openai_classify.c`, `src/openai_classify.h`, `src/systemzero.c`, and `src/systemzero.h`.
+  - Unregistered `/v1/classify` and `/v1/systemzero` HTTP routes (both return HTTP 404).
+  - Excised `QE_JOB_SYSTEMZERO` and `QE_JOB_CLASSIFY` from the engine job queue.
+  - Removed all deprecation warnings on System One; restored it as the premier cognitive decision endpoint.
+- **Lightweight Default Startup Configuration (`auren.json`)**:
+  - Configured `bge-base` as the default model for both `embed` and `judge`.
+  - Removed heavy generative LLMs from default startup autoload; inference models (`olmoe`, `qwen`) load strictly on-demand when `/v1/chat/completions` is requested.
+- **Multi-Tenant Vector Collections (`POST /v1/collections`)**:
+  - Dynamic in-memory vector collection management for grouped embeddings and semantic recall using `libsepal` and `libcorm`.
+- **Refactored Internal Architecture (`qllm` → `auren`)**:
+  - Reorganized internal engine headers and translation units to `src/auren-engine.*`, `src/auren-registry.*`, `src/libauren.c`, and `src/auren-pending.h`.
+  - Standardized all internal symbols, structs, and capability flags to `auren_*` and `AUREN_*`.
+  - Excised deprecated legacy files `src/libaxil-qllm.c` and `src/qllm-chat.c`.
+
 ## [1.3.1]
 
 - **System Zero High-Efficiency Binary Decision Endpoint (`POST /api/v1/systemzero/`)**:

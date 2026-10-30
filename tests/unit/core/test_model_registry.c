@@ -1,7 +1,7 @@
 /* test_model_registry.c — Unit tests for qllm multi-model registry and runtime */
 
 #include "../framework/test_utils.h"
-#include "../../src/qllm-registry.h"
+#include "../../src/auren-registry.h"
 #include <json-c/json.h>
 #include <stdlib.h>
 #include <string.h>

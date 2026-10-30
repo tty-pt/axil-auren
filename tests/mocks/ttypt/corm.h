@@ -35,6 +35,8 @@ uint32_t corm_open(const char *filename,
 		   uint32_t flags);
 const void *corm_get(uint32_t hd, const void * const key);
 uint32_t corm_put(uint32_t hd, const void * const key, const void * const value);
+void corm_del(uint32_t hd, const void * const key);
+void corm_save(void);
 void corm_close(uint32_t hd);
 
 #ifdef __cplusplus

@@ -1,6 +1,6 @@
 /* qllm-registry.c — Model registry and lifecycle implementation for axil-qllm. */
 
-#include "qllm-registry.h"
+#include "auren-registry.h"
 #include <ttypt/qsys.h>
 
 #include <json-c/json.h>

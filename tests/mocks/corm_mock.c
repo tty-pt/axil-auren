@@ -131,12 +131,38 @@ corm_put(uint32_t hd, const void * const key, const void * const value)
 	if (m->n >= MAX_CORM_ENTRIES)
 		return CM_MISS;
 
-	strncpy(m->entries[m->n].key, skey,
-		sizeof(m->entries[m->n].key) - 1);
+	strncpy(m->entries[m->n].key, skey, sizeof(m->entries[m->n].key) - 1);
+	m->entries[m->n].key[sizeof(m->entries[m->n].key) - 1] = '\0';
 	m->entries[m->n].value = 0;
 	memcpy(&m->entries[m->n].value, value, sizeof(uint64_t));
 	m->n++;
 	return 0;
+}
+
+void
+corm_del(uint32_t hd, const void * const key)
+{
+	corm_map_t *m = map_by_hd(hd);
+	const char *skey = key;
+	int i;
+
+	if (!m || !skey)
+		return;
+
+	for (i = 0; i < m->n; i++) {
+		if (strcmp(m->entries[i].key, skey) == 0) {
+			for (int j = i; j < m->n - 1; j++)
+				m->entries[j] = m->entries[j + 1];
+			m->n--;
+			return;
+		}
+	}
+}
+
+void
+corm_save(void)
+{
+	/* Mock save */
 }
 
 void

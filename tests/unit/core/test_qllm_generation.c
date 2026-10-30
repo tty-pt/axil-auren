@@ -467,3 +467,83 @@ TEST(auren_generate_stream_full_tokens)
 
     auren_free(ctx);
 }
+
+TEST(auren_set_max_gen_bounds_generation)
+{
+    llama_token toks[] = { 101, 102 };
+    mock_llama_set_tokenizer_result(toks, 2);
+
+    llama_token gen_toks[] = { 201, 202, 203, 204, 205, 206, 207, 208 };
+    mock_llama_set_next_tokens(gen_toks, 8);
+
+    struct auren_context *ctx = create_test_context();
+    ASSERT_NOT_NULL(ctx);
+
+    auren_set_max_gen(ctx, 3);
+
+    struct full_stream_data data = { 0, 0 };
+    int ret = auren_generate_stream_full(ctx, "prompt", test_full_stream_cb, &data);
+    ASSERT_EQ(ret, 0);
+    ASSERT_EQ(data.calls, 3);
+
+    auren_free(ctx);
+}
+
+TEST(auren_set_max_gen_zero_means_unbounded)
+{
+    llama_token toks[] = { 101, 102 };
+    mock_llama_set_tokenizer_result(toks, 2);
+
+    llama_token gen_toks[] = { 201, 202, 203, 204, 205, 206, 207, 208 };
+    mock_llama_set_next_tokens(gen_toks, 8);
+
+    struct auren_context *ctx = create_test_context();
+    ASSERT_NOT_NULL(ctx);
+
+    auren_set_max_gen(ctx, 3);
+    auren_set_max_gen(ctx, 0);
+
+    struct full_stream_data data = { 0, 0 };
+    int ret = auren_generate_stream_full(ctx, "prompt", test_full_stream_cb, &data);
+    ASSERT_EQ(ret, 0);
+    ASSERT_TRUE(data.calls >= 8);
+
+    auren_free(ctx);
+}
+
+TEST(auren_choice_eval_returns_distribution)
+{
+    llama_token toks[] = { 101, 102 };
+    mock_llama_set_tokenizer_result(toks, 2);
+
+    struct qllm_context *ctx = create_test_context();
+    ASSERT_NOT_NULL(ctx);
+
+    struct qllm_message msgs[2] = {
+        { .role = "system", .content = "classify" },
+        { .role = "user", .content = "A) one\nB) two\nC) three" },
+    };
+    double p[3] = { 0, 0, 0 };
+    int best = auren_choice_eval(ctx, msgs, 2, 3, p);
+
+    ASSERT_TRUE(best >= 0 && best < 3);
+    ASSERT_TRUE(p[0] > 0.0 && p[1] > 0.0 && p[2] > 0.0);
+    ASSERT_TRUE(p[0] + p[1] + p[2] > 0.999 && p[0] + p[1] + p[2] < 1.001);
+
+    qllm_free(ctx);
+}
+
+TEST(auren_choice_eval_rejects_bad_option_counts)
+{
+    struct qllm_context *ctx = create_test_context();
+    ASSERT_NOT_NULL(ctx);
+
+    struct qllm_message msgs[1] = { { .role = "user", .content = "x" } };
+    double p[QLLM_CHOICE_MAX + 1];
+
+    ASSERT_TRUE(auren_choice_eval(ctx, msgs, 1, 1, p) < 0);
+    ASSERT_TRUE(auren_choice_eval(ctx, msgs, 1, QLLM_CHOICE_MAX + 1, p) < 0);
+    ASSERT_TRUE(auren_choice_eval(ctx, msgs, 1, 2, NULL) < 0);
+
+    qllm_free(ctx);
+}

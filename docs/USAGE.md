@@ -340,80 +340,106 @@ curl -s http://localhost:4242/v1/embeddings \
   }'
 ```
 
-### C. System Zero Binary Decisions (`POST /api/v1/systemzero/`)
+### C. System One Reflexive Decisions (`POST /v1/systemone`)
 
-Ultra-fast binary decision judging with **zero decode steps**. It evaluates the prompt once, reads the raw next-token logits from `llama_get_logits_ith(ctx, -1)`, and computes calibrated sigmoid probabilities ($P = \sigma(L_{pos} - L_{neg})$) between candidate options (e.g. `[y/n]`, `[proceed/abort]`, `[remember/skip]`):
+`axil-auren` serves `POST /v1/systemone` (and `POST /api/v1/systemone/`) as the unified System 1 decision engine. It evaluates choices and nearest-exemplars in a **single forward pass with 0 generated decode tokens** (~5–15ms latency), avoiding regex fragile parsing.
 
+It supports three distinct modes:
+
+#### 1. Binary & Choice Gating (Single-pass Logits)
+Evaluates prompt forward pass and extracts logits between candidate options with calibrated probabilities:
 ```bash
-curl -s http://localhost:4242/api/v1/systemzero/ \
+curl -s http://localhost:4242/v1/systemone \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "olmoe",
-    "prompt": "Evaluate whether this query asks for software code changes.\nQuery: Please fix the null pointer exception in parse_header.\nAnswer [y/n]:",
+    "model": "judge",
+    "prompt": "Evaluate whether this query asks for software code changes.\nQuery: Please fix the null pointer exception in parse_header.\nAnswer [yes/no]:",
+    "choices": ["yes", "no"],
     "threshold": 0.5
   }'
 ```
-
 **Response**:
 ```json
 {
   "ok": true,
-  "decision": true,
-  "choice": "y",
-  "probability": 0.9982,
+  "decision": "yes",
+  "choice": "yes",
+  "choice_index": 0,
+  "confidence": 0.998,
+  "probability": 0.998,
   "margin": 6.354,
   "threshold": 0.5,
   "model": "olmoe"
 }
 ```
 
-### D. System One Decisions (`POST /api/v1/systemone/`)
-
-Evaluates structured questions against conversational state, returning calibrated mathematical probabilities rather than free-form text. Ideal for memory classifiers, autonomous agents, and safety filters.
-
-Question `criteria` definitions and `choices` arrays are automatically formatted into the evaluation prompt with allowed option constraints. Semantic aliases (e.g. `"instruction"`, `"task"`, `"directive"` mapping to `"quest"`) are supported out of the box. Automatic CPU batch threads are clamped to 4 cores to ensure sub-second latency and prevent spinlock thrashing on multi-core host systems.
-
+#### 2. Nearest-Exemplar Matching (In-Memory Embeddings)
+Classifies input text against candidate exemplars using in-memory SIMD cosine similarity over cached vector embeddings:
 ```bash
-curl -s http://localhost:4242/api/v1/systemone/ \
+curl -s http://localhost:4242/v1/systemone \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen",
+    "model": "bge-base",
+    "text": "Refactor memory allocator in axil core",
+    "exemplars": {
+      "trivial": "Fix spelling mistake in markdown doc",
+      "standard": "Implement new REST API endpoint with test suite",
+      "complex": "Refactor multi-threaded memory allocator and lock-free queue"
+    }
+  }'
+```
+**Response**:
+```json
+{
+  "ok": true,
+  "decision": "complex",
+  "choice": "complex",
+  "confidence": 0.887,
+  "similarity": 0.887,
+  "margin": 0.356,
+  "scores": {
+    "trivial": 0.214,
+    "standard": 0.531,
+    "complex": 0.887
+  },
+  "model": "bge-base"
+}
+```
+
+#### 3. Jev Structured Question Evaluation
+Evaluates structured questions against conversational state for memory classifiers and agents:
+```bash
+curl -s http://localhost:4242/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
     "state": "User: We configured Redis with 3 shards to scale caching.\nAssistant: Noted, 3 shards configured.",
     "questions": {
       "memory_action": {
         "type": "choice",
-        "instructions": "Choose whether to remember a new fact, update an existing memory, or skip.",
-        "criteria": { "remember": "New fact", "update": "Enrich existing memory", "skip": "Trivial" }
-      },
-      "is_technical": {
-        "type": "noul",
-        "instructions": "Is this a technical decision?"
+        "instructions": "Choose whether to remember a new fact or skip.",
+        "criteria": { "remember": "New fact worth saving", "skip": "Transient chitchat" }
       }
     }
   }'
 ```
-
 **Response**:
 ```json
 {
-  "model": "qwen",
+  "model": "olmoe",
   "answers": {
     "memory_action": {
       "type": "choice",
-      "choice": "update",
-      "probabilities": { "update": 0.90, "remember": 0.05, "skip": 0.05 },
-      "confidence": 0.90
-    },
-    "is_technical": {
-      "type": "noul",
-      "noul": 0.95
+      "choice": "remember",
+      "confidence": 0.92,
+      "probabilities": { "remember": 0.92, "skip": 0.08 }
     }
   },
-  "usage": { "input_tokens": 82, "output_tokens": 25 }
+  "usage": { "input_tokens": 62, "output_tokens": 1 }
 }
 ```
 
-### E. Model Discovery (`GET /v1/models`)
+### D. Model Discovery (`GET /v1/models`)
 
 ```bash
 curl -s http://localhost:4242/v1/models

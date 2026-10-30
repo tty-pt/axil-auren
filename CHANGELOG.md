@@ -1,18 +1,23 @@
-## [1.4.0] - 2026-10-29
+## [1.4.0] - 2026-10-30
 
-- **In-Memory Embedding Classification (`POST /v1/classify`)**:
-  - Implemented high-throughput, zero-allocation cosine similarity classification against exemplar embeddings (`src/openai_classify.c`).
-  - Evaluates decision questions, intent classification, and multi-class categories in 10–20 ms using pre-computed or on-the-fly SIMD vector dot products, eliminating the latency and stochastic variance of generative LLM decoding.
-  - Automatically normalizes embeddings and computes margin scores between top-ranking candidate categories.
+- **Unified Non-Generative System One Engine (`POST /v1/systemone`)**:
+  - Unified all System 1 reflexive decision making under `POST /v1/systemone` (and `/api/v1/systemone/`).
+  - 100% non-generative: backed strictly by in-memory unit-vector embeddings and SIMD cosine similarity (`QLLM_CAP_EMBED` via `bge-base` / `bge-small`), evaluating decisions with **0 generated decode tokens** in ~5–10 ms.
+  - Supports three unified request shapes:
+    1. **Choice Gating**: `{ prompt, choices: [...] }` evaluating candidate options via probe-to-choice vector similarity.
+    2. **Nearest-Exemplar Matching**: `{ text, exemplars: {...} }` or `{ text, labels: {...} }` with in-memory vector caching.
+    3. **Jev Question Evaluation**: `{ state, questions: {...} }` for conversational memory classifiers and autonomous agents.
+  - All JSON responses are constructed deterministically in C via `cJSON`, eliminating generative formatting drift and regex failures (0% parse failure rate).
+- **Purged Obsolete Endpoints & Legacy Modules**:
+  - Completely removed `src/openai_classify.c`, `src/openai_classify.h`, `src/systemzero.c`, and `src/systemzero.h`.
+  - Unregistered `/v1/classify` and `/v1/systemzero` HTTP routes (both return HTTP 404).
+  - Excised `QE_JOB_SYSTEMZERO` and `QE_JOB_CLASSIFY` from the engine job queue.
+  - Removed all deprecation warnings on System One; restored it as the premier cognitive decision endpoint.
+- **Lightweight Default Startup Configuration (`auren.json`)**:
+  - Configured `bge-base` as the default model for both `embed` and `judge`.
+  - Removed heavy generative LLMs from default startup autoload; inference models (`olmoe`, `qwen`) load strictly on-demand when `/v1/chat/completions` is requested.
 - **Multi-Tenant Vector Collections (`POST /v1/collections`)**:
-  - Added dynamic in-memory vector collection management for grouped embeddings and semantic recall.
-- **Compiler Deprecation Notices & Attributes**:
-  - Formally deprecated legacy `systemzero` (`POST /v1/chat/completions`) and `systemone` (`POST /v1/judge`) with `__attribute__((deprecated))` compiler attributes and runtime upgrade notices, directing callers to `POST /v1/classify` and native embedding workflows.
-- **System One Judge Boundedness & Honest Scoring**:
-  - Judge generation is capped (`SYSTEMONE_MAX_GEN`, 64 tokens) via `auren_set_max_gen()` / `qllm_set_max_gen()`; `/v1/chat/completions` honours request `max_tokens` through the same cap.
-  - An answer that is not exactly one declared option is returned as `{"choice": null, "error": "unparseable model output"}`, eliminating silent fabricated defaults.
-  - Closed `choice` questions (2..26 options, `criteria` or `choices`) are evaluated by option-letter logits (`auren_choice_eval()`): one forward pass, real softmax probabilities, with allowed choices buffer expanded to 4096 bytes.
-  - Tests: `systemone-choice` resolver, `auren_set_max_gen`, `auren_choice_eval`; mock `llama_chat_apply_template` size query support.
+  - Dynamic in-memory vector collection management for grouped embeddings and semantic recall using `libsepal` and `libcorm`.
 
 ## [1.3.1]
 

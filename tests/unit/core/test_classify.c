@@ -3,7 +3,7 @@
 #include <string.h>
 #include <math.h>
 
-#define QE_JOB_CLASSIFY 6
+#define QE_JOB_SYSTEMONE 4
 
 struct qllm_mock_job {
 	int kind;
@@ -107,10 +107,10 @@ mock_dispatch_worker_classify(struct qllm_mock_job *job, struct qllm_mock_res *o
 	json_object_put(o);
 }
 
-TEST(classify_mock_engine_dispatch_and_resolution)
+TEST(systemone_mock_engine_dispatch_and_resolution)
 {
 	struct qllm_mock_job job;
-	job.kind = QE_JOB_CLASSIFY;
+	job.kind = QE_JOB_SYSTEMONE;
 	job.model = "bge-base";
 	job.input = "{\"model\":\"bge-base\",\"text\":\"run tests\",\"labels\":{\"code\":[\"run tests\"],\"chat\":[\"hello\"]}}";
 
@@ -136,10 +136,10 @@ TEST(classify_mock_engine_dispatch_and_resolution)
 	free(res.payload);
 }
 
-TEST(classify_mock_engine_dispatch_rejects_empty_text)
+TEST(systemone_mock_engine_dispatch_rejects_empty_text)
 {
 	struct qllm_mock_job job;
-	job.kind = QE_JOB_CLASSIFY;
+	job.kind = QE_JOB_SYSTEMONE;
 	job.model = "bge-base";
 	job.input = "{\"model\":\"bge-base\",\"text\":\"\",\"labels\":{\"code\":[\"run tests\"]}}";
 

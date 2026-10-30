@@ -4,10 +4,8 @@
 
 #include "openai_chat.h"
 #include "openai_embed.h"
-#include "openai_classify.h"
 #include "auren-collections.h"
 #include "systemone.h"
-#include "systemzero.h"
 #include "qllm-engine.h"
 #include "qllm-pending.h"
 
@@ -282,7 +280,7 @@ drain(void *cbud __attribute__((unused)),
 		return;
 	}
 
-	if (r->kind == QE_JOB_SYSTEMONE || r->kind == QE_JOB_SYSTEMZERO || r->kind == QE_JOB_CLASSIFY) {
+	if (r->kind == QE_JOB_SYSTEMONE) {
 		if (r->err)
 			axil_respond_defer_abort(p->handle);
 		else
@@ -394,10 +392,8 @@ qllm_init(void)
 
 	openai_embed_init(qllm_model_path);
 	openai_chat_init(qllm_model_path);
-	openai_classify_init();
 	auren_collections_init();
 	systemone_init();
-	systemzero_init();
 
 	return 0;
 }
@@ -415,10 +411,8 @@ xy_shutdown(void)
 	qllm_engine_shutdown();
 	openai_embed_shutdown();
 	openai_chat_shutdown();
-	openai_classify_shutdown();
 	auren_collections_shutdown();
 	systemone_shutdown();
-	systemzero_shutdown();
 	free(crb_system);
 	crb_system = NULL;
 }

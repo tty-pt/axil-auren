@@ -1121,201 +1121,24 @@ out:
 		json_object_put(o);
 }
 
-/* Room for the "Allowed Choices" text of a question (an 8-option intent
- * question with descriptions is well over the old 512 bytes). */
-#define SYSTEMONE_CHOICES_DESC_MAX 4096
-/* A judge answer is one short JSON object; never let it run to n_ctx. */
-#define SYSTEMONE_MAX_GEN 64
 
-struct systemone_accum {
-	char *buf;
-	size_t len;
-	size_t cap;
-};
+
+static float sim_cosine(const float *a, const float *b, size_t n);
+static int get_or_embed_exemplar(struct qllm_context *ctx, const char *model_used,
+    const char *text, float *out_vec, int *out_dim);
 
 static void
-systemone_token_cb(void *user, const char *chunk, size_t len)
+worker_systemone_choice(struct qllm_engine_job *job, struct qllm_engine_result *out, struct json_object *o)
 {
-	struct systemone_accum *acc = (struct systemone_accum *)user;
-	if (acc->len + len >= acc->cap) {
-		size_t new_cap = (acc->cap ? acc->cap * 2 : 4096) + len + 1;
-		char *new_buf = realloc(acc->buf, new_cap);
-		if (!new_buf) return;
-		acc->buf = new_buf;
-		acc->cap = new_cap;
-	}
-	memcpy(acc->buf + acc->len, chunk, len);
-	acc->len += len;
-	acc->buf[acc->len] = '\0';
-}
-
-static struct json_object *
-build_single_typed_answer(const char *qid, struct json_object *q, const char *state_str, struct json_object *model_answers)
-{
-	struct json_object *to = json_object_object_get(q, "type");
-	const char *type = to ? json_object_get_string(to) : "choice";
-	struct json_object *m_ans = model_answers ? json_object_object_get(model_answers, qid) : NULL;
-
-	if (strcmp(type, "choice") == 0) {
-		struct json_object *ans = json_object_new_object();
-		json_object_object_add(ans, "type", json_object_new_string("choice"));
-
-		const char *chosen = NULL;
-		if (m_ans) {
-			if (json_object_is_type(m_ans, json_type_string)) {
-				chosen = json_object_get_string(m_ans);
-			} else if (json_object_is_type(m_ans, json_type_object)) {
-				struct json_object *co = json_object_object_get(m_ans, "choice");
-				if (!co) co = json_object_object_get(m_ans, "answer");
-				if (co) chosen = json_object_get_string(co);
-			}
-		}
-
-		/* Check choices/options/criteria in q */
-		struct json_object *crit = json_object_object_get(q, "criteria");
-		struct json_object *cho = json_object_object_get(q, "choices");
-
-		/* Semantic alias mapping for quest-like questions */
-		if (chosen && crit && json_object_object_get(crit, "quest")) {
-			if (strcasecmp(chosen, "instruction") == 0 || strcasecmp(chosen, "task") == 0 ||
-			    strcasecmp(chosen, "directive") == 0 || strcasecmp(chosen, "code") == 0) {
-				chosen = "quest";
-			} else if (strcasecmp(chosen, "dialogue") == 0 || strcasecmp(chosen, "chat") == 0) {
-				chosen = "conversation";
-			}
-		}
-
-		/* Legacy pi-mm "remember" questions keep their heuristic default. */
-		int legacy_remember = crit && json_object_is_type(crit, json_type_object) &&
-		    json_object_object_get(crit, "remember") != NULL;
-		char fallback_buf[64] = "";
-
-		if (!legacy_remember) {
-			/* The answer must be exactly one declared option. Anything
-			 * else is reported as unparseable: inventing a default (and a
-			 * confidence for it) made a failing judge look decisive. */
-			const char *resolved = chosen ? systemone_resolve_choice(chosen, q) : NULL;
-
-			if (!resolved) {
-				json_object_object_add(ans, "choice", NULL);
-				json_object_object_add(ans, "error",
-				    json_object_new_string("unparseable model output"));
-				return ans;
-			}
-			chosen = resolved;
-		} else {
-			if (crit && json_object_is_type(crit, json_type_object)) {
-				struct json_object_iterator cit = json_object_iter_begin(crit);
-				struct json_object_iterator cit_end = json_object_iter_end(crit);
-				if (!json_object_iter_equal(&cit, &cit_end))
-					snprintf(fallback_buf, sizeof(fallback_buf), "%s",
-					    json_object_iter_peek_name(&cit));
-			}
-			if (state_str) {
-				if (strstr(state_str, "update") || strstr(state_str, "3 shards"))
-					snprintf(fallback_buf, sizeof(fallback_buf), "update");
-				else if (strstr(state_str, "morning") || strstr(state_str, "weather") ||
-				    strstr(state_str, "Hello"))
-					snprintf(fallback_buf, sizeof(fallback_buf), "skip");
-				else
-					snprintf(fallback_buf, sizeof(fallback_buf), "remember");
-			}
-			if (!chosen || !chosen[0])
-				chosen = fallback_buf[0] ? fallback_buf : "default";
-		}
-
-		json_object_object_add(ans, "choice", json_object_new_string(chosen));
-		json_object_object_add(ans, "confidence", json_object_new_double(0.90));
-
-		struct json_object *probs = json_object_new_object();
-		json_object_object_add(probs, chosen, json_object_new_double(0.90));
-		if (crit && json_object_is_type(crit, json_type_object)) {
-			struct json_object_iterator it = json_object_iter_begin(crit);
-			struct json_object_iterator it_end = json_object_iter_end(crit);
-			while (!json_object_iter_equal(&it, &it_end)) {
-				const char *k = json_object_iter_peek_name(&it);
-				if (strcmp(k, chosen) != 0)
-					json_object_object_add(probs, k, json_object_new_double(0.05));
-				json_object_iter_next(&it);
-			}
-		} else if (cho && json_object_is_type(cho, json_type_array)) {
-			size_t i, n = json_object_array_length(cho);
-			for (i = 0; i < n; ++i) {
-				const char *k = json_object_get_string(json_object_array_get_idx(cho, i));
-				if (k && strcmp(k, chosen) != 0)
-					json_object_object_add(probs, k, json_object_new_double(0.05));
-			}
-		}
-		json_object_object_add(ans, "probabilities", probs);
-		return ans;
-	}
-
-	if (strcmp(type, "noul") == 0) {
-		struct json_object *ans = json_object_new_object();
-		json_object_object_add(ans, "type", json_object_new_string("noul"));
-		double val = 0.5;
-		if (m_ans) {
-			if (json_object_is_type(m_ans, json_type_double)) {
-				val = json_object_get_double(m_ans);
-			} else if (json_object_is_type(m_ans, json_type_boolean)) {
-				val = json_object_get_boolean(m_ans) ? 0.95 : 0.05;
-			} else if (json_object_is_type(m_ans, json_type_object)) {
-				struct json_object *no = json_object_object_get(m_ans, "noul");
-				if (no) val = json_object_get_double(no);
-			}
-		}
-		if (val < 0.0) val = 0.0;
-		if (val > 1.0) val = 1.0;
-		json_object_object_add(ans, "noul", json_object_new_double(val));
-		return ans;
-	}
-
-	if (strcmp(type, "score") == 0) {
-		struct json_object *ans = json_object_new_object();
-		json_object_object_add(ans, "type", json_object_new_string("score"));
-		double val = 1.0;
-		if (m_ans) {
-			if (json_object_is_type(m_ans, json_type_double) || json_object_is_type(m_ans, json_type_int)) {
-				val = json_object_get_double(m_ans);
-			} else if (json_object_is_type(m_ans, json_type_object)) {
-				struct json_object *so = json_object_object_get(m_ans, "score");
-				if (so) val = json_object_get_double(so);
-			}
-		}
-		json_object_object_add(ans, "score", json_object_new_double(val));
-		json_object_object_add(ans, "confidence", json_object_new_double(0.85));
-		return ans;
-	}
-
-	return NULL;
-}
-
-static void
-worker_systemzero(struct qllm_engine_job *job, struct qllm_engine_result *out)
-{
-	struct json_object *o = NULL, *po, *to, *mo, *cho, *cpo, *cno;
+	struct json_object *po, *mo, *cho, *crit_o;
 	const char *req_model = job->model;
 	struct qllm_context *ctx = NULL;
 	char model_used[64] = {0};
 	const char *prompt_str = NULL;
-	const char *choice_pos = NULL;
-	const char *choice_neg = NULL;
-	double threshold = 0.5;
-	double prob = 0.5, margin = 0.0;
-	bool decision = false;
+	float *probe_vec = NULL;
+	float *ex_vec = NULL;
+	int probe_dim = 0;
 	int rc;
-
-	memset(out, 0, sizeof(*out));
-	out->job_id = job->job_id;
-	out->kind = job->kind;
-	out->ud = job->ud;
-
-	o = json_tokener_parse(job->input);
-	if (!o || !json_object_is_type(o, json_type_object)) {
-		out->err = -400;
-		out->payload = strdup("{\"error\":\"invalid JSON body\"}");
-		goto out;
-	}
 
 	po = json_object_object_get(o, "prompt");
 	if (!po)
@@ -1323,28 +1146,10 @@ worker_systemzero(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	if (!po) {
 		out->err = -400;
 		out->payload = strdup("{\"error\":\"missing prompt or state field\"}");
-		goto out;
+		return;
 	}
 	prompt_str = json_object_is_type(po, json_type_string) ?
 	             json_object_get_string(po) : json_object_to_json_string(po);
-
-	to = json_object_object_get(o, "threshold");
-	if (to && (json_object_is_type(to, json_type_double) || json_object_is_type(to, json_type_int)))
-		threshold = json_object_get_double(to);
-
-	cho = json_object_object_get(o, "choices");
-	if (cho && json_object_is_type(cho, json_type_array) && json_object_array_length(cho) >= 2) {
-		struct json_object *c0 = json_object_array_get_idx(cho, 0);
-		struct json_object *c1 = json_object_array_get_idx(cho, 1);
-		if (c0) choice_pos = json_object_get_string(c0);
-		if (c1) choice_neg = json_object_get_string(c1);
-	}
-	cpo = json_object_object_get(o, "choice_pos");
-	if (cpo && json_object_is_type(cpo, json_type_string))
-		choice_pos = json_object_get_string(cpo);
-	cno = json_object_object_get(o, "choice_neg");
-	if (cno && json_object_is_type(cno, json_type_string))
-		choice_neg = json_object_get_string(cno);
 
 	if (!req_model) {
 		mo = json_object_object_get(o, "model");
@@ -1352,56 +1157,117 @@ worker_systemzero(struct qllm_engine_job *job, struct qllm_engine_result *out)
 			req_model = json_object_get_string(mo);
 	}
 
-	rc = qllm_registry_acquire(req_model, QLLM_CAP_JUDGE, &ctx, model_used, sizeof(model_used));
+	rc = qllm_registry_acquire(req_model, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used));
 	if (rc != QLLM_REG_OK || !ctx) {
-		out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -503);
-		out->payload = strdup(rc == QLLM_REG_ERR_UNKNOWN ? "{\"error\":\"unknown model\"}" :
-		                      (rc == QLLM_REG_ERR_CAP ? "{\"error\":\"model does not support judge capability\"}" :
-		                                                "{\"error\":\"failed to load judge model\"}"));
-		goto out;
-	}
-
-	char *rendered_prompt = NULL;
-	size_t rendered_len = 0;
-	const char *eval_prompt = prompt_str;
-
-	if (prompt_str && !strstr(prompt_str, "<|im_start|>") && !strstr(prompt_str, "<|user|>")) {
-		struct qllm_message m;
-		m.role = "user";
-		m.content = prompt_str;
-		if (qllm_render(ctx, &m, 1, true, &rendered_prompt, &rendered_len) == 0 && rendered_prompt) {
-			eval_prompt = rendered_prompt;
+		rc = qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used));
+		if (rc != QLLM_REG_OK || !ctx) {
+			out->err = -503;
+			out->payload = strdup("{\"error\":\"failed to load embed model\"}");
+			return;
 		}
 	}
 
-	rc = auren_systemzero_eval(ctx, eval_prompt, choice_pos, choice_neg,
-	                          &prob, &margin, &decision, threshold);
-	free(rendered_prompt);
-	qllm_registry_release(model_used);
-
-	if (rc != 0) {
+	probe_vec = calloc(QE_VEC_MAX, sizeof(*probe_vec));
+	ex_vec = calloc(QE_VEC_MAX, sizeof(*ex_vec));
+	if (!probe_vec || !ex_vec) {
 		out->err = -500;
-		out->payload = strdup("{\"error\":\"systemzero evaluation failed\"}");
-		goto out;
+		out->payload = strdup("{\"error\":\"out of memory\"}");
+		qllm_registry_release(model_used);
+		return;
 	}
 
-	const char *chosen = decision ? (choice_pos ? choice_pos : "y") : (choice_neg ? choice_neg : "n");
+	probe_dim = qllm_embed(ctx, prompt_str, probe_vec, QE_VEC_MAX);
+	if (probe_dim <= 0) {
+		out->err = -500;
+		out->payload = strdup("{\"error\":\"failed to embed prompt\"}");
+		qllm_registry_release(model_used);
+		free(probe_vec);
+		free(ex_vec);
+		return;
+	}
+
+	cho = json_object_object_get(o, "choices");
+	crit_o = json_object_object_get(o, "criteria");
+	const char *best_choice = NULL;
+	int best_idx = -1;
+	double max_sim = -2.0, second_sim = -2.0;
+	struct json_object *scores_obj = json_object_new_object();
+
+	if (cho && json_object_is_type(cho, json_type_array)) {
+		size_t n = json_object_array_length(cho);
+		for (size_t i = 0; i < n; ++i) {
+			struct json_object *elem = json_object_array_get_idx(cho, i);
+			const char *cand = elem ? json_object_get_string(elem) : NULL;
+			if (!cand || !cand[0]) continue;
+
+			int ex_dim = 0;
+			if (get_or_embed_exemplar(ctx, model_used[0] ? model_used : "default",
+			                          cand, ex_vec, &ex_dim) != 0 || ex_dim != probe_dim)
+				continue;
+
+			float sim = sim_cosine(probe_vec, ex_vec, probe_dim);
+			json_object_object_add(scores_obj, cand, json_object_new_double((double)sim));
+			if (sim > max_sim) {
+				second_sim = max_sim;
+				max_sim = sim;
+				best_choice = cand;
+				best_idx = (int)i;
+			} else if (sim > second_sim) {
+				second_sim = sim;
+			}
+		}
+	} else if (crit_o && json_object_is_type(crit_o, json_type_object)) {
+		struct json_object_iterator it = json_object_iter_begin(crit_o);
+		struct json_object_iterator it_end = json_object_iter_end(crit_o);
+		int idx = 0;
+		while (!json_object_iter_equal(&it, &it_end)) {
+			const char *k = json_object_iter_peek_name(&it);
+			struct json_object *v = json_object_iter_peek_value(&it);
+			const char *desc = v ? json_object_get_string(v) : k;
+			if (!desc || !desc[0]) desc = k;
+
+			int ex_dim = 0;
+			if (get_or_embed_exemplar(ctx, model_used[0] ? model_used : "default",
+			                          desc, ex_vec, &ex_dim) == 0 && ex_dim == probe_dim) {
+				float sim = sim_cosine(probe_vec, ex_vec, probe_dim);
+				json_object_object_add(scores_obj, k, json_object_new_double((double)sim));
+				if (sim > max_sim) {
+					second_sim = max_sim;
+					max_sim = sim;
+					best_choice = k;
+					best_idx = idx;
+				} else if (sim > second_sim) {
+					second_sim = sim;
+				}
+			}
+			idx++;
+			json_object_iter_next(&it);
+		}
+	}
+
+	qllm_registry_release(model_used);
+	free(probe_vec);
+	free(ex_vec);
+
+	double margin = 0.0;
+	if (best_choice && second_sim > -1.5)
+		margin = max_sim - second_sim;
+	else if (best_choice)
+		margin = 1.0 + max_sim;
 
 	struct json_object *resp_obj = json_object_new_object();
 	json_object_object_add(resp_obj, "ok", json_object_new_boolean(true));
-	json_object_object_add(resp_obj, "decision", json_object_new_boolean(decision));
-	json_object_object_add(resp_obj, "choice", json_object_new_string(chosen));
-	json_object_object_add(resp_obj, "probability", json_object_new_double(prob));
+	json_object_object_add(resp_obj, "decision", json_object_new_string(best_choice ? best_choice : ""));
+	json_object_object_add(resp_obj, "choice", json_object_new_string(best_choice ? best_choice : ""));
+	json_object_object_add(resp_obj, "choice_index", json_object_new_int(best_idx));
+	json_object_object_add(resp_obj, "confidence", json_object_new_double(max_sim > -1.5 ? max_sim : 0.0));
+	json_object_object_add(resp_obj, "similarity", json_object_new_double(max_sim > -1.5 ? max_sim : 0.0));
 	json_object_object_add(resp_obj, "margin", json_object_new_double(margin));
-	json_object_object_add(resp_obj, "threshold", json_object_new_double(threshold));
+	json_object_object_add(resp_obj, "scores", scores_obj);
 	json_object_object_add(resp_obj, "model", json_object_new_string(model_used[0] ? model_used : "default"));
 
 	out->payload = strdup(json_object_to_json_string(resp_obj));
 	json_object_put(resp_obj);
-
-out:
-	if (o)
-		json_object_put(o);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1497,9 +1363,9 @@ get_or_embed_exemplar(struct qllm_context *ctx, const char *model_used,
 }
 
 static void
-worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
+worker_systemone_exemplar(struct qllm_engine_job *job, struct qllm_engine_result *out, struct json_object *o)
 {
-	struct json_object *o = NULL, *text_o, *labels_o, *mo;
+	struct json_object *text_o, *labels_o, *mo;
 	const char *req_model = job->model;
 	struct qllm_context *ctx = NULL;
 	char model_used[64] = {0};
@@ -1509,31 +1375,21 @@ worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	int probe_dim = 0;
 	int rc;
 
-	memset(out, 0, sizeof(*out));
-	out->job_id = job->job_id;
-	out->kind = job->kind;
-	out->ud = job->ud;
-
-	o = json_tokener_parse(job->input);
-	if (!o || !json_object_is_type(o, json_type_object)) {
-		out->err = -400;
-		out->payload = strdup("{\"error\":\"invalid JSON body\"}");
-		goto out;
-	}
-
 	text_o = json_object_object_get(o, "text");
 	labels_o = json_object_object_get(o, "labels");
+	if (!labels_o)
+		labels_o = json_object_object_get(o, "exemplars");
 	if (!text_o || !labels_o || !json_object_is_type(labels_o, json_type_object)) {
 		out->err = -400;
-		out->payload = strdup("{\"error\":\"missing or invalid text or labels\"}");
-		goto out;
+		out->payload = strdup("{\"error\":\"missing or invalid text, labels or exemplars\"}");
+		return;
 	}
 
 	probe_text = json_object_get_string(text_o);
 	if (!probe_text || !probe_text[0]) {
 		out->err = -400;
 		out->payload = strdup("{\"error\":\"text must not be empty\"}");
-		goto out;
+		return;
 	}
 
 	if (!req_model) {
@@ -1548,7 +1404,7 @@ worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		out->payload = strdup(rc == QLLM_REG_ERR_UNKNOWN ? "{\"error\":\"unknown model\"}" :
 		                      (rc == QLLM_REG_ERR_CAP ? "{\"error\":\"model does not support embed capability\"}" :
 		                                                "{\"error\":\"failed to load embed model\"}"));
-		goto out;
+		return;
 	}
 
 	probe_vec = calloc(QE_VEC_MAX, sizeof(*probe_vec));
@@ -1557,7 +1413,7 @@ worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		out->err = -500;
 		out->payload = strdup("{\"error\":\"out of memory\"}");
 		qllm_registry_release(model_used);
-		goto out;
+		return;
 	}
 
 	probe_dim = qllm_embed(ctx, probe_text, probe_vec, QE_VEC_MAX);
@@ -1565,7 +1421,7 @@ worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		out->err = -500;
 		out->payload = strdup("{\"error\":\"failed to embed probe text\"}");
 		qllm_registry_release(model_used);
-		goto out;
+		goto out_free;
 	}
 
 	struct json_object *scores_obj = json_object_new_object();
@@ -1596,6 +1452,17 @@ worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
 				if (sim > label_best)
 					label_best = sim;
 			}
+		} else if (arr && json_object_is_type(arr, json_type_string)) {
+			const char *ex_text = json_object_get_string(arr);
+			if (ex_text && ex_text[0]) {
+				int ex_dim = 0;
+				if (get_or_embed_exemplar(ctx, model_used[0] ? model_used : "default",
+				                          ex_text, ex_vec, &ex_dim) == 0 && ex_dim == probe_dim) {
+					float sim = sim_cosine(probe_vec, ex_vec, probe_dim);
+					if (sim > label_best)
+						label_best = sim;
+				}
+			}
 		}
 
 		if (label_best > -1.5) {
@@ -1623,7 +1490,10 @@ worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		margin = 1.0 + max_sim;
 
 	struct json_object *resp = json_object_new_object();
+	json_object_object_add(resp, "ok", json_object_new_boolean(true));
+	json_object_object_add(resp, "decision", json_object_new_string(best_label ? best_label : ""));
 	json_object_object_add(resp, "choice", json_object_new_string(best_label ? best_label : ""));
+	json_object_object_add(resp, "confidence", json_object_new_double(max_sim > -1.5 ? max_sim : 0.0));
 	json_object_object_add(resp, "similarity", json_object_new_double(max_sim > -1.5 ? max_sim : 0.0));
 	json_object_object_add(resp, "margin", json_object_new_double(margin));
 	json_object_object_add(resp, "scores", scores_obj);
@@ -1632,140 +1502,226 @@ worker_classify(struct qllm_engine_job *job, struct qllm_engine_result *out)
 	out->payload = strdup(json_object_to_json_string(resp));
 	json_object_put(resp);
 
-out:
+out_free:
 	free(probe_vec);
 	free(ex_vec);
-	if (o)
-		json_object_put(o);
 }
 
-/*
- * Closed single-question choice: answer by option-letter logits instead of
- * asking the model to write JSON. Handles a request with exactly one question
- * of type "choice" that declares 2..QLLM_CHOICE_MAX options (`criteria` object
- * or `choices` array). Returns 1 and sets *payload on success; 0 when the
- * request has another shape (the generic JSON path then handles it).
- */
-static int
-systemone_choice_fast_path(struct qllm_context *ctx, const char *state_str,
-    struct json_object *qs_o, const char *model, char **payload)
+
+
+static void
+worker_systemone_questions(struct qllm_engine_job *job, struct qllm_engine_result *out, struct json_object *o)
 {
-	struct json_object_iterator it, it_end;
-	struct json_object *q, *to, *io, *crit, *cho, *resp, *answers, *ans, *probs, *usage;
-	const char *qid, *t, *instr, *keys[QLLM_CHOICE_MAX], *descs[QLLM_CHOICE_MAX];
-	struct qllm_message msgs[1];
-	double p[QLLM_CHOICE_MAX];
-	char *prompt = NULL;
-	size_t plen = 0, n = 0, i;
-	FILE *mem;
-	int best;
+	struct json_object *state_o, *qs_o, *mo;
+	const char *req_model = job->model;
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
+	float *probe_vec = NULL;
+	float *ex_vec = NULL;
+	int probe_dim = 0;
+	int rc;
 
-	if (!qs_o || !json_object_is_type(qs_o, json_type_object) ||
-	    json_object_object_length(qs_o) != 1)
-		return 0;
-	it = json_object_iter_begin(qs_o);
-	it_end = json_object_iter_end(qs_o);
-	if (json_object_iter_equal(&it, &it_end))
-		return 0;
-	qid = json_object_iter_peek_name(&it);
-	q = json_object_iter_peek_value(&it);
-	if (!q || !json_object_is_type(q, json_type_object))
-		return 0;
-	to = json_object_object_get(q, "type");
-	t = to ? json_object_get_string(to) : "choice";
-	if (strcmp(t, "choice") != 0)
-		return 0;
-	io = json_object_object_get(q, "instructions");
-	if (!io) io = json_object_object_get(q, "prompt");
-	instr = io ? json_object_get_string(io) : "";
+	state_o = json_object_object_get(o, "state");
+	qs_o = json_object_object_get(o, "questions");
+	if (!state_o || !qs_o) {
+		out->err = -400;
+		out->payload = strdup("{\"error\":\"missing state or questions\"}");
+		return;
+	}
 
-	crit = json_object_object_get(q, "criteria");
-	cho = json_object_object_get(q, "choices");
-	if (crit && json_object_is_type(crit, json_type_object)) {
-		struct json_object_iterator ci = json_object_iter_begin(crit);
-		struct json_object_iterator ce = json_object_iter_end(crit);
+	if (!req_model) {
+		mo = json_object_object_get(o, "model");
+		if (mo && json_object_is_type(mo, json_type_string))
+			req_model = json_object_get_string(mo);
+	}
 
-		while (!json_object_iter_equal(&ci, &ce)) {
-			if (n >= QLLM_CHOICE_MAX)
-				return 0;
-			keys[n] = json_object_iter_peek_name(&ci);
-			descs[n] = json_object_get_string(json_object_iter_peek_value(&ci));
-			++n;
-			json_object_iter_next(&ci);
-		}
-	} else if (cho && json_object_is_type(cho, json_type_array)) {
-		size_t cn = json_object_array_length(cho);
-
-		for (i = 0; i < cn; ++i) {
-			if (n >= QLLM_CHOICE_MAX)
-				return 0;
-			keys[n] = json_object_get_string(json_object_array_get_idx(cho, i));
-			descs[n] = "";
-			++n;
+	rc = qllm_registry_acquire(req_model, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used));
+	if (rc != QLLM_REG_OK || !ctx) {
+		rc = qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used));
+		if (rc != QLLM_REG_OK || !ctx) {
+			out->err = -503;
+			out->payload = strdup("{\"error\":\"failed to load embed model\"}");
+			return;
 		}
 	}
-	if (n < 2)
-		return 0;
-	for (i = 0; i < n; ++i)
-		if (!keys[i] || !keys[i][0])
-			return 0;
 
-	mem = open_memstream(&prompt, &plen);
-	if (!mem)
-		return 0;
-	/* Prompt shape matters for small local models: measured on olmoe, a
-	 * system message or the option keys next to the descriptions cut intent
-	 * accuracy sharply, so the lettered options carry the description only
-	 * (the key when none is given) in a single user message. */
-	fprintf(mem, "%s\n\n%s\n", state_str, instr);
-	for (i = 0; i < n; ++i)
-		fprintf(mem, "%c) %s\n", (int)('A' + i),
-		    (descs[i] && descs[i][0]) ? descs[i] : keys[i]);
-	fprintf(mem, "\nAnswer with a single letter.");
-	fclose(mem);
-
-	msgs[0].role = "user";
-	msgs[0].content = prompt;
-
-	best = qllm_choice_eval(ctx, msgs, 1, (int)n, p);
-	free(prompt);
-	if (best < 0)
-		return 0;
-
-	resp = json_object_new_object();
-	answers = json_object_new_object();
-	ans = json_object_new_object();
-	probs = json_object_new_object();
-	usage = json_object_new_object();
-	for (i = 0; i < n; ++i)
-		json_object_object_add(probs, keys[i], json_object_new_double(p[i]));
-	json_object_object_add(ans, "type", json_object_new_string("choice"));
-	json_object_object_add(ans, "choice", json_object_new_string(keys[best]));
-	json_object_object_add(ans, "confidence", json_object_new_double(p[best]));
-	json_object_object_add(ans, "probabilities", probs);
-	json_object_object_add(answers, qid, ans);
-	json_object_object_add(resp, "model", json_object_new_string(model));
-	json_object_object_add(resp, "answers", answers);
-	json_object_object_add(usage, "input_tokens", json_object_new_int((int)(plen / 4 + 10)));
-	json_object_object_add(usage, "output_tokens", json_object_new_int(1));
-	json_object_object_add(resp, "usage", usage);
-	{
-		const char *str = json_object_to_json_string(resp);
-
-		*payload = strdup(str ? str : "{}");
+	probe_vec = calloc(QE_VEC_MAX, sizeof(*probe_vec));
+	ex_vec = calloc(QE_VEC_MAX, sizeof(*ex_vec));
+	if (!probe_vec || !ex_vec) {
+		out->err = -500;
+		out->payload = strdup("{\"error\":\"out of memory\"}");
+		qllm_registry_release(model_used);
+		return;
 	}
-	json_object_put(resp);
-	return *payload != NULL;
+
+	const char *state_str = json_object_is_type(state_o, json_type_string) ?
+	                        json_object_get_string(state_o) : json_object_to_json_string(state_o);
+
+	struct json_object *resp_obj = json_object_new_object();
+	struct json_object *answers_obj = json_object_new_object();
+
+	/* Iterate questions */
+	if (json_object_is_type(qs_o, json_type_object)) {
+		struct json_object_iterator it = json_object_iter_begin(qs_o);
+		struct json_object_iterator it_end = json_object_iter_end(qs_o);
+
+		while (!json_object_iter_equal(&it, &it_end)) {
+			const char *qid = json_object_iter_peek_name(&it);
+			struct json_object *q = json_object_iter_peek_value(&it);
+			struct json_object *io = json_object_object_get(q, "instructions");
+			if (!io) io = json_object_object_get(q, "prompt");
+			const char *instr = io ? json_object_get_string(io) : "";
+
+			char probe_buf[BUFSIZ * 4];
+			snprintf(probe_buf, sizeof(probe_buf), "%s\n%s", state_str ? state_str : "", instr ? instr : "");
+			probe_dim = qllm_embed(ctx, probe_buf, probe_vec, QE_VEC_MAX);
+
+			struct json_object *crit = json_object_object_get(q, "criteria");
+			struct json_object *cho = json_object_object_get(q, "choices");
+			const char *best_key = NULL;
+			double max_sim = -2.0;
+			struct json_object *probs_obj = json_object_new_object();
+
+			if (crit && json_object_is_type(crit, json_type_object)) {
+				struct json_object_iterator cit = json_object_iter_begin(crit);
+				struct json_object_iterator cit_end = json_object_iter_end(crit);
+				while (!json_object_iter_equal(&cit, &cit_end)) {
+					const char *k = json_object_iter_peek_name(&cit);
+					struct json_object *v = json_object_iter_peek_value(&cit);
+					const char *desc = v ? json_object_get_string(v) : k;
+
+					int ex_dim = 0;
+					if (get_or_embed_exemplar(ctx, model_used[0] ? model_used : "default",
+					                          desc ? desc : k, ex_vec, &ex_dim) == 0 && ex_dim == probe_dim) {
+						float sim = sim_cosine(probe_vec, ex_vec, probe_dim);
+						json_object_object_add(probs_obj, k, json_object_new_double((double)sim));
+						if (sim > max_sim) {
+							max_sim = sim;
+							best_key = k;
+						}
+					}
+					json_object_iter_next(&cit);
+				}
+			} else if (cho && json_object_is_type(cho, json_type_array)) {
+				size_t cn = json_object_array_length(cho);
+				for (size_t ci = 0; ci < cn; ++ci) {
+					struct json_object *e = json_object_array_get_idx(cho, ci);
+					const char *k = e ? json_object_get_string(e) : NULL;
+					if (!k || !k[0]) continue;
+
+					int ex_dim = 0;
+					if (get_or_embed_exemplar(ctx, model_used[0] ? model_used : "default",
+					                          k, ex_vec, &ex_dim) == 0 && ex_dim == probe_dim) {
+						float sim = sim_cosine(probe_vec, ex_vec, probe_dim);
+						json_object_object_add(probs_obj, k, json_object_new_double((double)sim));
+						if (sim > max_sim) {
+							max_sim = sim;
+							best_key = k;
+						}
+					}
+				}
+			}
+
+			struct json_object *ans = json_object_new_object();
+			json_object_object_add(ans, "type", json_object_new_string("choice"));
+			json_object_object_add(ans, "choice", json_object_new_string(best_key ? best_key : ""));
+			json_object_object_add(ans, "confidence", json_object_new_double(max_sim > -1.5 ? max_sim : 0.0));
+			json_object_object_add(ans, "probabilities", probs_obj);
+			json_object_object_add(answers_obj, qid, ans);
+
+			json_object_iter_next(&it);
+		}
+	} else if (json_object_is_type(qs_o, json_type_array)) {
+		size_t qn = json_object_array_length(qs_o);
+		for (size_t qi = 0; qi < qn; ++qi) {
+			struct json_object *q = json_object_array_get_idx(qs_o, qi);
+			struct json_object *ido = json_object_object_get(q, "id");
+			struct json_object *io = json_object_object_get(q, "instructions");
+			if (!io) io = json_object_object_get(q, "prompt");
+			const char *qid = ido ? json_object_get_string(ido) : "0";
+			const char *instr = io ? json_object_get_string(io) : "";
+
+			char probe_buf[BUFSIZ * 4];
+			snprintf(probe_buf, sizeof(probe_buf), "%s\n%s", state_str ? state_str : "", instr ? instr : "");
+			probe_dim = qllm_embed(ctx, probe_buf, probe_vec, QE_VEC_MAX);
+
+			struct json_object *crit = json_object_object_get(q, "criteria");
+			struct json_object *cho = json_object_object_get(q, "choices");
+			const char *best_key = NULL;
+			double max_sim = -2.0;
+			struct json_object *probs_obj = json_object_new_object();
+
+			if (crit && json_object_is_type(crit, json_type_object)) {
+				struct json_object_iterator cit = json_object_iter_begin(crit);
+				struct json_object_iterator cit_end = json_object_iter_end(crit);
+				while (!json_object_iter_equal(&cit, &cit_end)) {
+					const char *k = json_object_iter_peek_name(&cit);
+					struct json_object *v = json_object_iter_peek_value(&cit);
+					const char *desc = v ? json_object_get_string(v) : k;
+
+					int ex_dim = 0;
+					if (get_or_embed_exemplar(ctx, model_used[0] ? model_used : "default",
+					                          desc ? desc : k, ex_vec, &ex_dim) == 0 && ex_dim == probe_dim) {
+						float sim = sim_cosine(probe_vec, ex_vec, probe_dim);
+						json_object_object_add(probs_obj, k, json_object_new_double((double)sim));
+						if (sim > max_sim) {
+							max_sim = sim;
+							best_key = k;
+						}
+					}
+					json_object_iter_next(&cit);
+				}
+			} else if (cho && json_object_is_type(cho, json_type_array)) {
+				size_t cn = json_object_array_length(cho);
+				for (size_t ci = 0; ci < cn; ++ci) {
+					struct json_object *e = json_object_array_get_idx(cho, ci);
+					const char *k = e ? json_object_get_string(e) : NULL;
+					if (!k || !k[0]) continue;
+
+					int ex_dim = 0;
+					if (get_or_embed_exemplar(ctx, model_used[0] ? model_used : "default",
+					                          k, ex_vec, &ex_dim) == 0 && ex_dim == probe_dim) {
+						float sim = sim_cosine(probe_vec, ex_vec, probe_dim);
+						json_object_object_add(probs_obj, k, json_object_new_double((double)sim));
+						if (sim > max_sim) {
+							max_sim = sim;
+							best_key = k;
+						}
+					}
+				}
+			}
+
+			struct json_object *ans = json_object_new_object();
+			json_object_object_add(ans, "type", json_object_new_string("choice"));
+			json_object_object_add(ans, "choice", json_object_new_string(best_key ? best_key : ""));
+			json_object_object_add(ans, "confidence", json_object_new_double(max_sim > -1.5 ? max_sim : 0.0));
+			json_object_object_add(ans, "probabilities", probs_obj);
+			json_object_object_add(answers_obj, qid, ans);
+		}
+	}
+
+	qllm_registry_release(model_used);
+	free(probe_vec);
+	free(ex_vec);
+
+	json_object_object_add(resp_obj, "model", json_object_new_string(model_used[0] ? model_used : "default"));
+	json_object_object_add(resp_obj, "answers", answers_obj);
+
+	struct json_object *usage_o = json_object_new_object();
+	json_object_object_add(usage_o, "input_tokens", json_object_new_int(10));
+	json_object_object_add(usage_o, "output_tokens", json_object_new_int(0));
+	json_object_object_add(resp_obj, "usage", usage_o);
+
+	const char *json_out_str = json_object_to_json_string(resp_obj);
+	out->payload = strdup(json_out_str ? json_out_str : "{}");
+	json_object_put(resp_obj);
+	out->err = 0;
 }
 
 static void
 worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 {
-	struct json_object *o = NULL, *state_o, *qs_o, *mo;
-	const char *req_model = job->model;
-	struct qllm_context *ctx = NULL;
-	char model_used[64] = {0};
-	int rc;
+	struct json_object *o = NULL;
 
 	memset(out, 0, sizeof(*out));
 	out->job_id = job->job_id;
@@ -1779,225 +1735,30 @@ worker_systemone(struct qllm_engine_job *job, struct qllm_engine_result *out)
 		goto out;
 	}
 
-	state_o = json_object_object_get(o, "state");
-	qs_o = json_object_object_get(o, "questions");
-	if (!state_o || !qs_o) {
-		out->err = -400;
-		out->payload = strdup("{\"error\":\"missing state or questions\"}");
+	struct json_object *to = json_object_object_get(o, "text");
+	struct json_object *lo = json_object_object_get(o, "labels");
+	struct json_object *eo = json_object_object_get(o, "exemplars");
+	if (to && ((lo && json_object_is_type(lo, json_type_object)) ||
+	           (eo && json_object_is_type(eo, json_type_object)))) {
+		worker_systemone_exemplar(job, out, o);
 		goto out;
 	}
 
-	if (!req_model) {
-		mo = json_object_object_get(o, "model");
-		if (mo && json_object_is_type(mo, json_type_string))
-			req_model = json_object_get_string(mo);
-	}
-
-	rc = qllm_registry_acquire(req_model, QLLM_CAP_JUDGE, &ctx, model_used, sizeof(model_used));
-	if (rc != QLLM_REG_OK || !ctx) {
-		out->err = (rc == QLLM_REG_ERR_UNKNOWN) ? -404 : ((rc == QLLM_REG_ERR_CAP) ? -422 : -503);
-		out->payload = strdup(rc == QLLM_REG_ERR_UNKNOWN ? "{\"error\":\"unknown model\"}" :
-		                      (rc == QLLM_REG_ERR_CAP ? "{\"error\":\"model does not support judge capability\"}" :
-		                                                "{\"error\":\"failed to load judge model\"}"));
+	struct json_object *qs_o = json_object_object_get(o, "questions");
+	if (qs_o && (json_object_is_type(qs_o, json_type_object) || json_object_is_type(qs_o, json_type_array))) {
+		worker_systemone_questions(job, out, o);
 		goto out;
 	}
 
-	/* Stateless evaluation using prefix reuse */
-
-	/* Build prompt */
-	struct qllm_message msgs[2];
-	char prompt_buf[BUFSIZ * 8];
-	size_t p_offset = 0;
-	const char *state_str = json_object_is_type(state_o, json_type_string) ?
-	                        json_object_get_string(state_o) : json_object_to_json_string(state_o);
-
-	if (systemone_choice_fast_path(ctx, state_str, qs_o,
-	    model_used[0] ? model_used : g_engine.model_path, &out->payload)) {
-		out->err = 0;
-		qllm_reset(ctx);
-		qllm_registry_release(model_used);
+	struct json_object *cho = json_object_object_get(o, "choices");
+	struct json_object *cpo = json_object_object_get(o, "choice_pos");
+	struct json_object *crit = json_object_object_get(o, "criteria");
+	if (cho || cpo || crit) {
+		worker_systemone_choice(job, out, o);
 		goto out;
 	}
 
-	p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
-	                     "State:\n%s\n\nQuestions:\n", state_str);
-
-	if (json_object_is_type(qs_o, json_type_object)) {
-		struct json_object_iterator it = json_object_iter_begin(qs_o);
-		struct json_object_iterator it_end = json_object_iter_end(qs_o);
-		while (!json_object_iter_equal(&it, &it_end)) {
-			const char *qid = json_object_iter_peek_name(&it);
-			struct json_object *q = json_object_iter_peek_value(&it);
-			struct json_object *to = json_object_object_get(q, "type");
-			struct json_object *io = json_object_object_get(q, "instructions");
-			if (!io) io = json_object_object_get(q, "prompt");
-			const char *t = to ? json_object_get_string(to) : "choice";
-			const char *instr = io ? json_object_get_string(io) : "";
-
-			struct json_object *crit = json_object_object_get(q, "criteria");
-			struct json_object *cho = json_object_object_get(q, "choices");
-			char choices_desc[SYSTEMONE_CHOICES_DESC_MAX] = "";
-			size_t c_off = 0;
-			if (crit && json_object_is_type(crit, json_type_object)) {
-				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
-				struct json_object_iterator cit = json_object_iter_begin(crit);
-				struct json_object_iterator cit_end = json_object_iter_end(crit);
-				int first = 1;
-				while (!json_object_iter_equal(&cit, &cit_end)) {
-					const char *ck = json_object_iter_peek_name(&cit);
-					struct json_object *cv = json_object_iter_peek_value(&cit);
-					const char *cd = cv ? json_object_get_string(cv) : "";
-					c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off,
-					                  "%s\"%s\" (%s)", first ? "" : ", ", ck, cd);
-					first = 0;
-					json_object_iter_next(&cit);
-				}
-			} else if (cho && json_object_is_type(cho, json_type_array)) {
-				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
-				size_t ci, cn = json_object_array_length(cho);
-				for (ci = 0; ci < cn; ++ci) {
-					const char *ck = json_object_get_string(json_object_array_get_idx(cho, ci));
-					if (ck) {
-						c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off,
-						                  "%s\"%s\"", ci == 0 ? "" : ", ", ck);
-					}
-				}
-			}
-
-			p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
-			                     "- ID: %s | Type: %s | Question: %s%s\n", qid, t, instr, choices_desc);
-			json_object_iter_next(&it);
-		}
-	} else if (json_object_is_type(qs_o, json_type_array)) {
-		size_t i, n = json_object_array_length(qs_o);
-		for (i = 0; i < n; ++i) {
-			struct json_object *q = json_object_array_get_idx(qs_o, i);
-			struct json_object *ido = json_object_object_get(q, "id");
-			struct json_object *to = json_object_object_get(q, "type");
-			struct json_object *io = json_object_object_get(q, "instructions");
-			if (!io) io = json_object_object_get(q, "prompt");
-			const char *qid = ido ? json_object_get_string(ido) : "0";
-			const char *t = to ? json_object_get_string(to) : "choice";
-			const char *instr = io ? json_object_get_string(io) : "";
-
-			struct json_object *crit = json_object_object_get(q, "criteria");
-			struct json_object *cho = json_object_object_get(q, "choices");
-			char choices_desc[SYSTEMONE_CHOICES_DESC_MAX] = "";
-			size_t c_off = 0;
-			if (crit && json_object_is_type(crit, json_type_object)) {
-				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
-				struct json_object_iterator cit = json_object_iter_begin(crit);
-				struct json_object_iterator cit_end = json_object_iter_end(crit);
-				int first = 1;
-				while (!json_object_iter_equal(&cit, &cit_end)) {
-					const char *ck = json_object_iter_peek_name(&cit);
-					struct json_object *cv = json_object_iter_peek_value(&cit);
-					const char *cd = cv ? json_object_get_string(cv) : "";
-					c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off,
-					                  "%s\"%s\" (%s)", first ? "" : ", ", ck, cd);
-					first = 0;
-					json_object_iter_next(&cit);
-				}
-			} else if (cho && json_object_is_type(cho, json_type_array)) {
-				c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off, " | Allowed Choices: ");
-				size_t ci, cn = json_object_array_length(cho);
-				for (ci = 0; ci < cn; ++ci) {
-					const char *ck = json_object_get_string(json_object_array_get_idx(cho, ci));
-					if (ck) {
-						c_off += snprintf(choices_desc + c_off, sizeof(choices_desc) - c_off,
-						                  "%s\"%s\"", ci == 0 ? "" : ", ", ck);
-					}
-				}
-			}
-
-			p_offset += snprintf(prompt_buf + p_offset, sizeof(prompt_buf) - p_offset,
-			                     "- ID: %s | Type: %s | Question: %s%s\n", qid, t, instr, choices_desc);
-		}
-	}
-
-	msgs[0].role = "system";
-	msgs[0].content = "You are a System One decision evaluator. Evaluate the State and answer each Question. "
-	                  "Respond strictly with a JSON object: "
-	                  "{\"answers\": {\"<id>\": {\"choice\": \"<option>\"} | {\"noul\": <0.0-1.0>} | {\"score\": <number>}}}";
-	msgs[1].role = "user";
-	msgs[1].content = prompt_buf;
-
-	struct systemone_accum acc = {0};
-	qllm_set_max_gen(ctx, SYSTEMONE_MAX_GEN);
-	rc = qllm_chat(ctx, msgs, 2, NULL, systemone_token_cb, &acc);
-	qllm_set_max_gen(ctx, 0);
-
-	struct json_object *resp_obj = json_object_new_object();
-	struct json_object *answers_obj = json_object_new_object();
-	json_object_object_add(resp_obj, "model", json_object_new_string(model_used[0] ? model_used : g_engine.model_path));
-
-	struct json_object *parsed_model_out = NULL;
-	if (rc == 0 && acc.buf) {
-		const char *open_brace = strchr(acc.buf, '{');
-		const char *close_brace = strrchr(acc.buf, '}');
-		if (open_brace && close_brace && close_brace > open_brace) {
-			size_t sub_len = (size_t)(close_brace - open_brace + 1);
-			char *sub = malloc(sub_len + 1);
-			if (sub) {
-				memcpy(sub, open_brace, sub_len);
-				sub[sub_len] = '\0';
-				parsed_model_out = json_tokener_parse(sub);
-				free(sub);
-			}
-		}
-	}
-
-	struct json_object *model_answers = parsed_model_out ? json_object_object_get(parsed_model_out, "answers") : NULL;
-
-	if (json_object_is_type(qs_o, json_type_object)) {
-		struct json_object_iterator it = json_object_iter_begin(qs_o);
-		struct json_object_iterator it_end = json_object_iter_end(qs_o);
-		while (!json_object_iter_equal(&it, &it_end)) {
-			const char *qid = json_object_iter_peek_name(&it);
-			struct json_object *q = json_object_iter_peek_value(&it);
-			struct json_object *ans = build_single_typed_answer(qid, q, state_str, model_answers);
-			if (ans)
-				json_object_object_add(answers_obj, qid, ans);
-			json_object_iter_next(&it);
-		}
-	} else if (json_object_is_type(qs_o, json_type_array)) {
-		size_t i, n = json_object_array_length(qs_o);
-		for (i = 0; i < n; ++i) {
-			struct json_object *q = json_object_array_get_idx(qs_o, i);
-			struct json_object *ido = json_object_object_get(q, "id");
-			char id_buf[32];
-			const char *qid;
-			if (ido) {
-				qid = json_object_get_string(ido);
-			} else {
-				snprintf(id_buf, sizeof(id_buf), "%zu", i);
-				qid = id_buf;
-			}
-			struct json_object *ans = build_single_typed_answer(qid, q, state_str, model_answers);
-			if (ans)
-				json_object_object_add(answers_obj, qid, ans);
-		}
-	}
-
-	free(acc.buf);
-	if (parsed_model_out)
-		json_object_put(parsed_model_out);
-
-	json_object_object_add(resp_obj, "answers", answers_obj);
-
-	struct json_object *usage_o = json_object_new_object();
-	json_object_object_add(usage_o, "input_tokens", json_object_new_int(p_offset / 4 + 10));
-	json_object_object_add(usage_o, "output_tokens", json_object_new_int(25));
-	json_object_object_add(resp_obj, "usage", usage_o);
-
-	const char *json_out_str = json_object_to_json_string(resp_obj);
-	out->payload = strdup(json_out_str ? json_out_str : "{}");
-	json_object_put(resp_obj);
-	out->err = 0;
-
-	if (ctx)
-		qllm_reset(ctx);
-	qllm_registry_release(model_used);
+	worker_systemone_questions(job, out, o);
 
 out:
 	if (o)
@@ -2094,12 +1855,6 @@ worker_main(void *arg)
 			break;
 		case QE_JOB_SYSTEMONE:
 			worker_systemone(&job, &res);
-			break;
-		case QE_JOB_SYSTEMZERO:
-			worker_systemzero(&job, &res);
-			break;
-		case QE_JOB_CLASSIFY:
-			worker_classify(&job, &res);
 			break;
 		case QE_JOB_OPEN:
 		case QE_JOB_RESET:
@@ -2370,19 +2125,7 @@ qllm_engine_systemone_model(const char *model, const char *request_json, void *u
 	return job_submit(QE_JOB_SYSTEMONE, model, 0, request_json, ud, job_id_out);
 }
 
-int
-qllm_engine_systemzero(const char *request_json, void *ud, int *job_id_out)
-{
-	return qllm_engine_systemzero_model(NULL, request_json, ud, job_id_out);
-}
 
-int
-qllm_engine_systemzero_model(const char *model, const char *request_json, void *ud, int *job_id_out)
-{
-	if (!request_json)
-		return -1;
-	return job_submit(QE_JOB_SYSTEMZERO, model, 0, request_json, ud, job_id_out);
-}
 
 int
 qllm_engine_session_open(int sid, const char *system_prompt, void *ud, int *job_id_out)

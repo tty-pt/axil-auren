@@ -1846,7 +1846,7 @@ qllm_chat(struct qllm_context *qctx,
 }
 
 static float
-systemzero_word_max_logit(const struct llama_vocab *vocab, const float *logits, int32_t n_vocab, const char *word)
+token_word_max_logit(const struct llama_vocab *vocab, const float *logits, int32_t n_vocab, const char *word)
 {
 	float max_l = -1e9f;
 	char spaced[128];
@@ -1875,7 +1875,7 @@ systemzero_word_max_logit(const struct llama_vocab *vocab, const float *logits, 
 }
 
 int
-auren_systemzero_eval(struct auren_context *qctx,
+auren_binary_choice_eval(struct auren_context *qctx,
 		      const char *prompt,
 		      const char *choice_pos,
 		      const char *choice_neg,
@@ -1942,25 +1942,25 @@ auren_systemzero_eval(struct auren_context *qctx,
 	n_vocab = llama_vocab_n_tokens(qctx->vocab);
 
 	if (choice_pos && choice_pos[0]) {
-		pos_l = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, choice_pos);
+		pos_l = token_word_max_logit(qctx->vocab, logits, n_vocab, choice_pos);
 	} else {
 		static const char *default_pos[] = {
 			"y", "Y", "yes", "Yes", "YES", "1", "true", "True", "proceed", "remember"
 		};
 		for (size_t i = 0; i < sizeof(default_pos)/sizeof(default_pos[0]); ++i) {
-			float l = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, default_pos[i]);
+			float l = token_word_max_logit(qctx->vocab, logits, n_vocab, default_pos[i]);
 			if (l > pos_l) pos_l = l;
 		}
 	}
 
 	if (choice_neg && choice_neg[0]) {
-		neg_l = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, choice_neg);
+		neg_l = token_word_max_logit(qctx->vocab, logits, n_vocab, choice_neg);
 	} else {
 		static const char *default_neg[] = {
 			"n", "N", "no", "No", "NO", "0", "false", "False", "abort", "skip"
 		};
 		for (size_t i = 0; i < sizeof(default_neg)/sizeof(default_neg[0]); ++i) {
-			float l = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, default_neg[i]);
+			float l = token_word_max_logit(qctx->vocab, logits, n_vocab, default_neg[i]);
 			if (l > neg_l) neg_l = l;
 		}
 	}
@@ -2035,7 +2035,7 @@ qllm_choice_eval(struct qllm_context *qctx,
 	for (i = 0; i < n_options; ++i) {
 		char letter[2] = { (char)('A' + i), '\0' };
 
-		lg[i] = systemzero_word_max_logit(qctx->vocab, logits, n_vocab, letter);
+		lg[i] = token_word_max_logit(qctx->vocab, logits, n_vocab, letter);
 		if (lg[i] > max_l) {
 			max_l = lg[i];
 			best = i;

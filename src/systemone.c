@@ -1,6 +1,7 @@
-/* systemone.c — Jev-compatible System One decision endpoint for axil-qllm.
+/* systemone.c — Unified System One decision endpoint for axil-auren.
  *
  * Implements POST /api/v1/systemone/ and POST /v1/systemone
+ * Evaluates decisions, choices, and exemplars purely using fast in-memory embeddings (QLLM_CAP_EMBED).
  */
 
 #include "systemone.h"
@@ -11,6 +12,7 @@
 #include <ttypt/axil.h>
 #include <json-c/json.h>
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,7 +30,7 @@ systemone_respond_error(socket_t fd, int code, const char *msg)
 static int
 handler_systemone(socket_t cfd, char *body)
 {
-	struct json_object *req = NULL, *state_o, *qs_o, *mo;
+	struct json_object *req = NULL, *mo;
 	const char *model_id = NULL;
 	void *handle;
 
@@ -43,72 +45,19 @@ handler_systemone(socket_t cfd, char *body)
 		goto out;
 	}
 
-	state_o = json_object_object_get(req, "state");
-	if (!state_o) {
-		systemone_respond_error(cfd, 400, "missing 'state' field");
-		goto out;
-	}
-
-	qs_o = json_object_object_get(req, "questions");
-	if (!qs_o || (!json_object_is_type(qs_o, json_type_object) && !json_object_is_type(qs_o, json_type_array))) {
-		systemone_respond_error(cfd, 400, "missing or invalid 'questions' field");
-		goto out;
-	}
-
-	if (json_object_is_type(qs_o, json_type_object)) {
-		if (json_object_object_length(qs_o) == 0) {
-			systemone_respond_error(cfd, 400, "no questions provided");
-			goto out;
-		}
-	} else if (json_object_is_type(qs_o, json_type_array)) {
-		if (json_object_array_length(qs_o) == 0) {
-			systemone_respond_error(cfd, 400, "no questions provided");
-			goto out;
-		}
-	}
-
-	/* Validate questions types */
-	if (json_object_is_type(qs_o, json_type_object)) {
-		struct json_object_iterator it = json_object_iter_begin(qs_o);
-		struct json_object_iterator it_end = json_object_iter_end(qs_o);
-		while (!json_object_iter_equal(&it, &it_end)) {
-			struct json_object *val = json_object_iter_peek_value(&it);
-			struct json_object *type_o = val ? json_object_object_get(val, "type") : NULL;
-			const char *t = type_o ? json_object_get_string(type_o) : NULL;
-			if (!t || (strcmp(t, "choice") != 0 && strcmp(t, "noul") != 0 && strcmp(t, "score") != 0)) {
-				systemone_respond_error(cfd, 400, "unsupported question type (expected choice, noul, or score)");
-				goto out;
-			}
-			json_object_iter_next(&it);
-		}
-	} else {
-		size_t i, n = json_object_array_length(qs_o);
-		for (i = 0; i < n; ++i) {
-			struct json_object *item = json_object_array_get_idx(qs_o, i);
-			struct json_object *type_o = item ? json_object_object_get(item, "type") : NULL;
-			const char *t = type_o ? json_object_get_string(type_o) : NULL;
-			if (!t || (strcmp(t, "choice") != 0 && strcmp(t, "noul") != 0 && strcmp(t, "score") != 0)) {
-				systemone_respond_error(cfd, 400, "unsupported question type (expected choice, noul, or score)");
-				goto out;
-			}
-		}
-	}
-
 	mo = json_object_object_get(req, "model");
 	if (mo && json_object_is_type(mo, json_type_string))
 		model_id = json_object_get_string(mo);
 
-	const struct qllm_model_entry *me = qllm_registry_find_for_cap(QLLM_CAP_JUDGE, model_id);
+	/* All System One decisions rely strictly on embedding models (QLLM_CAP_EMBED) */
+	const struct qllm_model_entry *me = qllm_registry_find_for_cap(QLLM_CAP_EMBED, model_id);
 	if (!me) {
-		if (model_id && model_id[0] && strcmp(model_id, "default") != 0)
-			systemone_respond_error(cfd, 404, "unknown model");
-		else
-			systemone_respond_error(cfd, 503, "no judge model configured");
-		goto out;
-	}
-	if (!(me->capabilities & QLLM_CAP_JUDGE)) {
-		systemone_respond_error(cfd, 422, "model does not support judge capability");
-		goto out;
+		me = qllm_registry_find_for_cap(QLLM_CAP_EMBED, NULL);
+		if (!me) {
+			systemone_respond_error(cfd, 503, "no embed model configured");
+			goto out;
+		}
+		model_id = me->id;
 	}
 
 	axil_header_set(cfd, "Content-Type", "application/json");

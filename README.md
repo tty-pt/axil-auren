@@ -41,10 +41,16 @@ curl -s http://127.0.0.1:4242/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{"model":"bge-base","input":"Zero-copy in-memory associative search"}'
 
-# 3. System Zero: Instant Binary Decision (0 decode steps)
-curl -s http://127.0.0.1:4242/api/v1/systemzero/ \
+# 3. System One: Fast Reflexive Decisions (0 decode tokens)
+# A. Choice Gating
+curl -s http://127.0.0.1:4242/v1/systemone \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"Is this statement about programming? Statement: I wrote a C struct.\nAnswer [y/n]:"}'
+  -d '{"prompt":"Is this statement about programming? Statement: I wrote a C struct.\nAnswer [yes/no]:","choices":["yes","no"]}'
+
+# B. Nearest-Exemplar Matching
+curl -s http://127.0.0.1:4242/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Fix typo in README","exemplars":{"trivial":"fix spelling","complex":"refactor allocator"}}'
 ```
 
 ---
@@ -67,15 +73,13 @@ Models reside in `~/.models/` and are automatically discovered:
 
 | Endpoint | Method | Input Model / Role | Description |
 | :--- | :--- | :--- | :--- |
-| `/v1/classify` | `POST` | `model: "bge-base"` | In-memory semantic classification using SIMD unit-vector dot products (~10–20ms) |
+| `/v1/systemone` | `POST` | `model: "bge-base"` or `"judge"` | Unified System 1 reflexive decision: choice gating, exemplar matching, and question evaluation (~5–15ms) |
 | `/v1/collections/{name}/documents` | `POST` | `text`, `id?` | Multi-tenant persistent document ingestion using `libsepal` and `libcorm` |
 | `/v1/collections/{name}/search` | `GET` | `q`, `limit?` | Multi-tenant ranked vector search |
 | `/v1/collections/{name}/documents/{id}` | `DELETE` | *none* | Delete document and vector from tenant collection |
 | `/v1/chat/completions` | `POST` | `model: "chat"` (or explicit ID) | OpenAI-compatible streaming and non-streaming text generation |
 | `/v1/embeddings` | `POST` | `model: "bge-base"` / `"bge-small"` | Generate dense vector embeddings for semantic search |
 | `/v1/models` | `GET` | *none* | List all registered models and active capabilities |
-| `/api/v1/systemzero/` | `POST` | *(DEPRECATED)* | *(Deprecated: use `POST /v1/classify`)* Zero-decode binary logit-probe decision evaluation |
-| `/api/v1/systemone/` | `POST` | *(DEPRECATED)* | *(Deprecated: use `POST /v1/classify`)* Jev-compatible structured choice question classifier |
 
 ---
 

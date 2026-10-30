@@ -18,6 +18,10 @@
   - Removed heavy generative LLMs from default startup autoload; inference models (`olmoe`, `qwen`) load strictly on-demand when `/v1/chat/completions` is requested.
 - **Multi-Tenant Vector Collections (`POST /v1/collections`)**:
   - Dynamic in-memory vector collection management for grouped embeddings and semantic recall using `libsepal` and `libcorm`.
+- **Refactored Internal Architecture (`qllm` → `auren`)**:
+  - Reorganized internal engine headers and translation units to `src/auren-engine.*`, `src/auren-registry.*`, `src/libauren.c`, and `src/auren-pending.h`.
+  - Standardized all internal symbols, structs, and capability flags to `auren_*` and `AUREN_*`.
+  - Excised deprecated legacy files `src/libaxil-qllm.c` and `src/qllm-chat.c`.
 
 ## [1.3.1]
 

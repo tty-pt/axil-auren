@@ -1,5 +1,5 @@
-#ifndef QLLM_PENDING_H
-#define QLLM_PENDING_H
+#ifndef AUREN_PENDING_H
+#define AUREN_PENDING_H
 
 /* Per-deferred-response bookkeeping carried in each engine job's ud.
  * Owned by the loop-thread drain callback, which frees it.

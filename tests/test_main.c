@@ -17,7 +17,7 @@ main(int argc, char **argv)
 	mock_corm_init();
 	mock_vulkan_init();
 
-	printf("=== libqllm Test Suite ===\n\n");
+	printf("=== auren Test Suite ===\n\n");
 
 	ret = run_all_tests();
 

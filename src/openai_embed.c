@@ -1,9 +1,9 @@
 /* openai_embed.c — OpenAI-compatible embeddings endpoint for qllmd. */
 
 #include "openai_embed.h"
-#include "qllm-engine.h"
-#include "qllm-registry.h"
-#include "qllm-pending.h"
+#include "auren-engine.h"
+#include "auren-registry.h"
+#include "auren-pending.h"
 
 #include <ttypt/axil.h>
 

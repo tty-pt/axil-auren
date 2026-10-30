@@ -16,8 +16,8 @@
  *     sid (queue_has_sid), which preserves all-but-one sessions' history.
  */
 
-#include "qllm-engine.h"
-#include "qllm-registry.h"
+#include "auren-engine.h"
+#include "auren-registry.h"
 #include "systemone-choice.h"
 
 #include <ttypt/qllm.h>

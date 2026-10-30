@@ -1,14 +1,12 @@
 CFLAGS-libaxil-auren-o := -fPIC
-CFLAGS-libqllm-o := -fPIC
-CFLAGS-qllm-engine-o := -fPIC
-CFLAGS-qllm-registry-o := -fPIC
+CFLAGS-libauren-o := -fPIC
+CFLAGS-auren-engine-o := -fPIC
+CFLAGS-auren-registry-o := -fPIC
 CFLAGS-openai_embed-o := -fPIC
 CFLAGS-openai_chat-o := -fPIC
-CFLAGS-openai_classify-o := -fPIC
 CFLAGS-auren-collections-o := -fPIC
 CFLAGS-systemone-o := -fPIC
 CFLAGS-systemone-choice-o := -fPIC
-CFLAGS-systemzero-o := -fPIC
 CFLAGS-vulkan-o := -fPIC
 CFLAGS-metal-o := -fPIC
 CFLAGS-auren-chat-o :=

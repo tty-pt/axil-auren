@@ -6,8 +6,8 @@
 #include "openai_embed.h"
 #include "auren-collections.h"
 #include "systemone.h"
-#include "qllm-engine.h"
-#include "qllm-pending.h"
+#include "auren-engine.h"
+#include "auren-pending.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -34,7 +34,7 @@ size_t crb_len = 0;
 char *crb_mapped = NULL;
 char *crb_system = NULL;	/* NUL-terminated heap copy of crb.txt */
 
-static char qllm_model_path[BUFSIZ];
+static char auren_model_path[BUFSIZ];
 
 pending_t *
 make_pending(void *handle, int mode, int sid)
@@ -336,7 +336,7 @@ setup_crb(const char *path)
 }
 
 static int
-qllm_init(void)
+auren_init(void)
 {
 	const char *model_path = getenv("AUREN_MODEL_PATH");
 	const char *crb_path = getenv("AUREN_CRB_PATH");
@@ -372,26 +372,26 @@ qllm_init(void)
 	}
 
 	if (model_path && model_path[0])
-		snprintf(qllm_model_path, sizeof(qllm_model_path), "%s", model_path);
+		snprintf(auren_model_path, sizeof(auren_model_path), "%s", model_path);
 	else
-		qllm_model_path[0] = '\0';
+		auren_model_path[0] = '\0';
 
 	setup_crb(crb_path && crb_path[0] ? crb_path : "crb.txt");
 
 	axil_register("ask", do_ASK, CF_NOAUTH | CF_NOTRIM);
 	axil_register("chat", do_CHAT, CF_NOAUTH | CF_NOTRIM);
 
-	if (qllm_engine_init(qllm_model_path) != 0) {
+	if (auren_engine_init(auren_model_path) != 0) {
 		qsyslog(QLOG_ERR, "Failed to init engine\n");
 		return -1;
 	}
 
-	qllm_engine_set_system(crb_system);
+	auren_engine_set_system(crb_system);
 
-	axil_fd_watch(qllm_engine_wake_fd());
+	axil_fd_watch(auren_engine_wake_fd());
 
-	openai_embed_init(qllm_model_path);
-	openai_chat_init(qllm_model_path);
+	openai_embed_init(auren_model_path);
+	openai_chat_init(auren_model_path);
 	auren_collections_init();
 	systemone_init();
 
@@ -401,14 +401,14 @@ qllm_init(void)
 XY_MODULE_API void
 xy_install(void)
 {
-	if (qllm_init() != 0)
-		qsyslog(QLOG_ERR, "libaxil-qllm: init failed\n");
+	if (auren_init() != 0)
+		qsyslog(QLOG_ERR, "libaxil-auren: init failed\n");
 }
 
 XY_MODULE_API void
 xy_shutdown(void)
 {
-	qllm_engine_shutdown();
+	auren_engine_shutdown();
 	openai_embed_shutdown();
 	openai_chat_shutdown();
 	auren_collections_shutdown();

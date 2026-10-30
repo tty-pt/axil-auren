@@ -10,7 +10,7 @@
  * Exit:  0 on PASS, 1 on FAIL.
  */
 
-#include "qllm-engine.h"
+#include "auren-engine.h"
 
 #include <json-c/json.h>
 

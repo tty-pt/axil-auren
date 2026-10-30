@@ -6,7 +6,7 @@ engine-test-obj-y :=
 LDLIBS-engine-test := -laxil-auren -lsepal -lcorm -ljson-c -lpthread -lm
 LDFLAGS-engine-test = -Wl,-rpath,${pwd}/lib
 
-libaxil-auren-obj-y := src/libqllm.o src/qllm-engine.o src/qllm-registry.o src/openai_embed.o src/openai_chat.o src/auren-collections.o src/systemone.o src/systemone-choice.o
+libaxil-auren-obj-y := src/libauren.o src/auren-engine.o src/auren-registry.o src/openai_embed.o src/openai_chat.o src/auren-collections.o src/systemone.o src/systemone-choice.o
 libaxil-auren-obj-y-Linux := src/vulkan.o
 libaxil-auren-obj-y-Darwin := src/metal.o
 
@@ -93,7 +93,7 @@ ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc: axil-auren.pc
 
 install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc
 
-src/libqllm.o: $(llamacpp)/src/libllama.a
+src/libauren.o: $(llamacpp)/src/libllama.a
 
 $(llamacpp)/src/libllama.a: ${llamacpp}/Makefile
 	make -C ${llamacpp} -j1; \
@@ -111,7 +111,7 @@ $(llamacpp)/Makefile: ${third_party-${uname}}
 		export CXX=${COMPILER_CXX} && \
 		cd ${llamacpp} && \
 		cmake .. ${CMAKE_FLAGS-${uname}} \
-			-DCMAKE_INSTALL_PREFIX:PATH=${PREFIX}/share/qllm \
+			-DCMAKE_INSTALL_PREFIX:PATH=${PREFIX}/share/auren \
 			-DGGML_NATIVE=${GGML_NATIVE} \
 			$(if $(filter OFF,${GGML_NATIVE}),-DGGML_AVX_VNNI=OFF -DGGML_AVX512_VNNI=OFF) \
 			-DLLAMA_CURL=OFF \

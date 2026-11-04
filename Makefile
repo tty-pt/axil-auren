@@ -10,7 +10,7 @@ libaxil-auren-obj-y := src/libauren.o src/auren-engine.o src/auren-registry.o sr
 libaxil-auren-obj-y-Linux := src/vulkan.o
 libaxil-auren-obj-y-Darwin := src/metal.o
 
-LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lqsys -ljson-c \
+LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lstele -ljson-c \
 	-lllama -lggml -lggml-cpu -lggml-base -ldl -lpthread -lm -lstdc++
 LDLIBS-libaxil-auren-Linux := -lgomp -lvulkan -lggml-vulkan
 LDLIBS-libaxil-auren-Darwin := -lggml-metal -lggml-blas -lomp \

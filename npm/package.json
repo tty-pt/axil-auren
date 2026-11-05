@@ -1,0 +1,28 @@
+{
+  "name": "@tty-pt/auren-client",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Isomorphic typed client SDK for axil-auren local LLM inference, embeddings, and System 1 classification",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/auren-client.test.mjs"
+  },
+  "keywords": [
+    "auren",
+    "axil-auren",
+    "llm",
+    "inference",
+    "embeddings",
+    "semantic-search",
+    "streaming",
+    "system-1"
+  ],
+  "author": "Paulo Quirino <q@qnixsoft.com>",
+  "license": "CC-BY-NC-SA-4.0"
+}

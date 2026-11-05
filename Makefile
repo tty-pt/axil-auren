@@ -128,6 +128,12 @@ $(vulkan)/include/shaderc/shaderc.h:
 	wget -qO third_party/vulkan-sdk.tar.xz "$(SDK_URL)"
 	tar -xf third_party/vulkan-sdk.tar.xz -C third_party
 
-.PHONY: test
+.PHONY: test npm-build npm-test
 test:
 	$(MAKE) -C tests run
+
+npm-build:
+	@echo "=== Building npm package @tty-pt/auren-client ==="
+
+npm-test: npm-build
+	@node --test npm/tests/auren-client.test.mjs

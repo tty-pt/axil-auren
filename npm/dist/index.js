@@ -1,53 +1,234 @@
 /**
  * @file index.js
- * @brief Universal isomorphic SDK for axil-auren local LLM and semantic search service.
+ * @brief Universal isomorphic SDK for @tty-pt/auren local LLM inference,
+ *        embeddings, System 1 classification, and client-side browser execution.
  */
 
-export function cosineSimilarity(a, b) {
-  if (!a || !b || a.length !== b.length || a.length === 0) return 0;
+import { loadWasmModule, loadNativeAddon, getSubstrate } from "@tty-pt/stele";
+
+const nativeBinding = loadNativeAddon(import.meta.url, "auren");
+let wasmInstance = null;
+
+/**
+ * Plug-and-play WebAssembly loader for @tty-pt/auren via Stele substrate
+ */
+export function getAurenWasm() {
+  if (wasmInstance) return wasmInstance;
+  try {
+    wasmInstance = loadWasmModule(new URL("./auren.wasm", import.meta.url));
+  } catch (err) {
+    console.warn("[auren] Wasm substrate unavailable, falling back to pure JS/native:", err.message);
+  }
+  return wasmInstance;
+}
+
+/**
+ * Calculates normalized cosine similarity between two float vectors
+ * strictly via WebAssembly when available.
+ */
+export function cosineSimilarity(vecA, vecB) {
+  if (nativeBinding && nativeBinding.cosine) {
+    return nativeBinding.cosine(vecA, vecB);
+  }
+
+  if (!vecA || !vecB || vecA.length !== vecB.length || vecA.length === 0) {
+    return 0.0;
+  }
+
+  const wasm = getAurenWasm();
+  const substrate = getSubstrate ? getSubstrate() : null;
+  if (wasm && wasm.exports.auren_wasm_cosine && substrate && wasm.exports.malloc) {
+    const dim = vecA.length;
+    const ptrA = wasm.exports.malloc(dim * 4);
+    const ptrB = wasm.exports.malloc(dim * 4);
+    const mem = substrate.memory.buffer;
+    new Float32Array(mem, ptrA, dim).set(vecA);
+    new Float32Array(mem, ptrB, dim).set(vecB);
+    const score = wasm.exports.auren_wasm_cosine(ptrA, ptrB, dim);
+    wasm.exports.free(ptrA);
+    wasm.exports.free(ptrB);
+    return score;
+  }
+
+  /* Fallback JS computation */
   let dot = 0;
   let normA = 0;
   let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
   }
   if (normA <= 0 || normB <= 0) return 0;
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export class AurenCollectionClient {
-  constructor(client, name) {
-    this.client = client;
-    this.name = name;
+/**
+ * Browser Model Cache Helper using Origin Private File System (OPFS)
+ */
+export async function getCachedModelFile(modelName, modelUrl, onProgress) {
+  if (typeof navigator === "undefined" || !navigator.storage || !navigator.storage.getDirectory) {
+    /* Fallback for environments without OPFS */
+    const res = await fetch(modelUrl);
+    return await res.arrayBuffer();
   }
 
-  async insert(doc) {
-    return this.client._fetch(`/v1/collections/${encodeURIComponent(this.name)}/documents`, {
-      method: "POST",
-      body: JSON.stringify(doc),
+  const root = await navigator.storage.getDirectory();
+  const modelsDir = await root.getDirectoryHandle("models", { create: true });
+
+  try {
+    const fileHandle = await modelsDir.getFileHandle(modelName);
+    const file = await fileHandle.getFile();
+    if (file.size > 0) {
+      if (onProgress) onProgress({ loaded: file.size, total: file.size, cached: true });
+      return await file.arrayBuffer();
+    }
+  } catch {
+    /* File not in cache yet */
+  }
+
+  /* Stream download and store to OPFS */
+  const response = await fetch(modelUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}`);
+  }
+
+  const total = parseInt(response.headers.get("Content-Length") || "0", 10);
+  const reader = response.body.getReader();
+  const fileHandle = await modelsDir.getFileHandle(modelName, { create: true });
+  const writable = await fileHandle.createWritable();
+
+  let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    await writable.write(value);
+    loaded += value.length;
+    if (onProgress) {
+      onProgress({ loaded, total: total || loaded, cached: false });
+    }
+  }
+  await writable.close();
+
+  const file = await fileHandle.getFile();
+  return await file.arrayBuffer();
+}
+
+/**
+ * Browser In-Worker Execution Client
+ */
+export class AurenBrowserEngine {
+  constructor(options = {}) {
+    this.modelName = options.modelName || "smollm2-135m-instruct-q4_k_m.gguf";
+    this.modelUrl = options.modelUrl || `/models/${this.modelName}`;
+    this.workerPath = options.workerPath || new URL("./auren-worker.js", import.meta.url);
+    this.worker = null;
+    this.isReady = false;
+  }
+
+  async init(onProgress) {
+    return new Promise((resolve, reject) => {
+      this.worker = new Worker(this.workerPath, { type: "module" });
+
+      this.worker.onmessage = (e) => {
+        const { type, data, error } = e.data;
+        if (type === "progress" && onProgress) {
+          onProgress(data);
+        } else if (type === "ready") {
+          this.isReady = true;
+          resolve(this);
+        } else if (type === "error") {
+          reject(new Error(error));
+        }
+      };
+
+      this.worker.onerror = (err) => reject(err);
+
+      this.worker.postMessage({
+        type: "init",
+        modelName: this.modelName,
+        modelUrl: this.modelUrl,
+      });
     });
   }
 
-  async search(query, limit = 10) {
-    const q = encodeURIComponent(query);
-    return this.client._fetch(`/v1/collections/${encodeURIComponent(this.name)}/search?q=${q}&limit=${limit}`, {
-      method: "GET",
+  async *chatStream(request) {
+    if (!this.worker || !this.isReady) {
+      throw new Error("AurenBrowserEngine is not initialized");
+    }
+
+    const streamId = Math.random().toString(36).slice(2);
+    const queue = [];
+    let resolveNext = null;
+    let streamDone = false;
+    let streamError = null;
+
+    const handler = (e) => {
+      if (e.data.streamId !== streamId) return;
+      if (e.data.type === "token") {
+        queue.push(e.data.token);
+        if (resolveNext) {
+          resolveNext();
+          resolveNext = null;
+        }
+      } else if (e.data.type === "done") {
+        streamDone = true;
+        if (resolveNext) {
+          resolveNext();
+          resolveNext = null;
+        }
+      } else if (e.data.type === "error") {
+        streamError = new Error(e.data.error);
+        if (resolveNext) {
+          resolveNext();
+          resolveNext = null;
+        }
+      }
+    };
+
+    this.worker.addEventListener("message", handler);
+    this.worker.postMessage({
+      type: "generate",
+      streamId,
+      messages: request.messages || [],
+      prompt: request.prompt || "",
+      maxTokens: request.maxTokens || 256,
+      temperature: request.temperature || 0.7,
     });
+
+    try {
+      while (!streamDone || queue.length > 0) {
+        if (queue.length > 0) {
+          yield queue.shift();
+        } else if (streamError) {
+          throw streamError;
+        } else if (!streamDone) {
+          await new Promise((resolve) => {
+            resolveNext = resolve;
+          });
+        }
+      }
+    } finally {
+      this.worker.removeEventListener("message", handler);
+    }
   }
 
-  async delete(id) {
-    return this.client._fetch(`/v1/collections/${encodeURIComponent(this.name)}/documents/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    });
+  terminate() {
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+      this.isReady = false;
+    }
   }
 }
 
+/**
+ * Universal AurenClient supporting HTTP daemon, native add-on, and browser fallback.
+ */
 export class AurenClient {
   constructor(options = {}) {
     this.baseUrl = (options.baseUrl || "http://localhost:4242").replace(/\/+$/, "");
-    this.defaultModel = options.defaultModel || "bge-base";
+    this.defaultModel = options.defaultModel || "smollm2-135m-instruct";
     this.timeoutMs = options.timeoutMs || 30000;
     this.headers = options.headers || {};
   }
@@ -79,13 +260,6 @@ export class AurenClient {
     } finally {
       clearTimeout(timer);
     }
-  }
-
-  async models() {
-    const res = await this._fetch("/v1/models");
-    if (Array.isArray(res)) return res;
-    if (res && Array.isArray(res.data)) return res.data.map((m) => (typeof m === "string" ? m : m.id));
-    return [];
   }
 
   async chat(request) {
@@ -144,7 +318,7 @@ export class AurenClient {
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
-        buffer = lines.pop(); // keep uncompleted line
+        buffer = lines.pop();
 
         for (const line of lines) {
           const trimmed = line.trim();
@@ -187,10 +361,6 @@ export class AurenClient {
       method: "POST",
       body: JSON.stringify(payload),
     });
-  }
-
-  collection(name) {
-    return new AurenCollectionClient(this, name);
   }
 }
 

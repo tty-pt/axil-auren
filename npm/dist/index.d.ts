@@ -1,121 +1,62 @@
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+/**
+ * @file index.d.ts
+ * @brief TypeScript definitions for @tty-pt/auren.
+ */
+
+export interface AurenMessage {
+  role: "system" | "user" | "assistant";
   content: string;
 }
 
 export interface ChatRequest {
   model?: string;
-  messages: ChatMessage[];
+  messages?: AurenMessage[];
+  prompt?: string;
+  maxTokens?: number;
   temperature?: number;
-  max_tokens?: number;
-  stream?: boolean;
+  top_p?: number;
 }
 
-export interface ChatChoice {
-  index: number;
-  message: ChatMessage;
-  finish_reason?: string;
-}
-
-export interface ChatResponse {
-  id: string;
-  model: string;
-  choices: ChatChoice[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
-
-export interface ChatChunkChoice {
-  index: number;
-  delta: Partial<ChatMessage>;
-  finish_reason?: string | null;
-}
-
-export interface ChatChunk {
-  id: string;
-  model: string;
-  choices: ChatChunkChoice[];
-}
-
-export interface EmbeddingRequest {
+export interface EmbedRequest {
   model?: string;
   input: string | string[];
-}
-
-export interface EmbeddingData {
-  index: number;
-  embedding: number[];
-  object: 'embedding';
-}
-
-export interface EmbeddingResponse {
-  model: string;
-  data: EmbeddingData[];
-  usage?: {
-    prompt_tokens: number;
-    total_tokens: number;
-  };
 }
 
 export interface SystemOneRequest {
   model?: string;
   text: string;
-  labels?: Record<string, string[]> | string[];
+  labels?: string[];
   question?: string;
 }
 
-export interface SystemOneResponse {
-  decision: string;
-  confidence: number;
-  scores?: Record<string, number>;
-  margin?: number;
+export interface ModelProgress {
+  loaded: number;
+  total: number;
+  cached: boolean;
+  percent?: number;
 }
 
-export interface CollectionDocument {
-  id: string;
-  text: string;
-  metadata?: Record<string, any>;
-}
+export function cosineSimilarity(a: number[] | Float32Array, b: number[] | Float32Array): number;
 
-export interface CollectionSearchResult {
-  id: string;
-  score: number;
-  text?: string;
-  metadata?: Record<string, any>;
-}
+export function getCachedModelFile(
+  modelName: string,
+  modelUrl: string,
+  onProgress?: (progress: ModelProgress) => void
+): Promise<ArrayBuffer>;
 
-export interface AurenClientOptions {
-  baseUrl?: string;
-  defaultModel?: string;
-  timeoutMs?: number;
-  headers?: Record<string, string>;
-}
-
-export class AurenCollectionClient {
-  constructor(client: AurenClient, name: string);
-  insert(doc: CollectionDocument): Promise<{ status: string; id: string }>;
-  search(query: string, limit?: number): Promise<CollectionSearchResult[]>;
-  delete(id: string): Promise<{ status: string; id: string }>;
+export class AurenBrowserEngine {
+  constructor(options?: { modelName?: string; modelUrl?: string; workerPath?: string | URL });
+  init(onProgress?: (progress: { status: string; percent: number }) => void): Promise<this>;
+  chatStream(request: ChatRequest): AsyncGenerator<string, void, unknown>;
+  terminate(): void;
 }
 
 export class AurenClient {
-  baseUrl: string;
-  defaultModel: string;
-  timeoutMs: number;
-  headers: Record<string, string>;
-
-  constructor(options?: AurenClientOptions);
-
-  models(): Promise<string[]>;
-  chat(request: ChatRequest): Promise<ChatResponse>;
-  chatStream(request: ChatRequest): AsyncIterable<ChatChunk>;
-  embeddings(request: EmbeddingRequest): Promise<EmbeddingResponse>;
-  systemOne(request: SystemOneRequest): Promise<SystemOneResponse>;
-  collection(name: string): AurenCollectionClient;
+  constructor(options?: { baseUrl?: string; defaultModel?: string; timeoutMs?: number; headers?: Record<string, string> });
+  chat(request: ChatRequest): Promise<any>;
+  chatStream(request: ChatRequest): AsyncGenerator<any, void, unknown>;
+  embeddings(request: EmbedRequest): Promise<any>;
+  systemOne(request: SystemOneRequest): Promise<any>;
 }
 
-export function createAurenClient(options?: AurenClientOptions): AurenClient;
-export function cosineSimilarity(a: number[], b: number[]): number;
+export function createAurenClient(options?: any): AurenClient;

@@ -69,6 +69,10 @@ LDFLAGS-Darwin := -L${ggmlp}/ggml-metal -L${ggmlp}/ggml-blas -L${omp}/lib
 CMAKE_FLAGS-Linux := -DGGML_VULKAN=ON
 CMAKE_FLAGS-Darwin := -DGGML_METAL=ON
 
+WASM := auren.wasm
+WASM_SRCS := npm/wasm/auren_wasm.c
+WASM_LDFLAGS += -Wl,--import-memory
+
 third_party-Linux := ${vulkan}/include/shaderc/shaderc.h
 
 include ./../mk/include.mk

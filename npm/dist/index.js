@@ -4,9 +4,22 @@
  *        embeddings, System 1 classification, and client-side browser execution.
  */
 
-import { loadWasmModule, loadNativeAddon, getSubstrate } from "@tty-pt/stele";
+let loadWasmModule = null;
+let loadNativeAddon = () => null;
+let getSubstrate = () => null;
 
-const nativeBinding = loadNativeAddon(import.meta.url, "auren");
+/* In Node environments, dynamically resolve @tty-pt/stele */
+if (typeof window === "undefined" && typeof process !== "undefined") {
+  try {
+    const stelePkg = "@tty-pt/stele";
+    const stele = await import(stelePkg);
+    loadWasmModule = stele.loadWasmModule;
+    loadNativeAddon = stele.loadNativeAddon;
+    getSubstrate = stele.getSubstrate;
+  } catch {}
+}
+
+const nativeBinding = loadNativeAddon ? loadNativeAddon(import.meta.url, "auren") : null;
 let wasmInstance = null;
 
 /**
@@ -14,10 +27,12 @@ let wasmInstance = null;
  */
 export function getAurenWasm() {
   if (wasmInstance) return wasmInstance;
-  try {
-    wasmInstance = loadWasmModule(new URL("./auren.wasm", import.meta.url));
-  } catch (err) {
-    console.warn("[auren] Wasm substrate unavailable, falling back to pure JS/native:", err.message);
+  if (loadWasmModule) {
+    try {
+      wasmInstance = loadWasmModule(new URL("./auren.wasm", import.meta.url));
+    } catch (err) {
+      console.warn("[auren] Wasm substrate unavailable, falling back to pure JS/native:", err.message);
+    }
   }
   return wasmInstance;
 }
@@ -69,8 +84,11 @@ export function cosineSimilarity(vecA, vecB) {
 export async function getCachedModelFile(modelName, modelUrl, onProgress) {
   if (typeof navigator === "undefined" || !navigator.storage || !navigator.storage.getDirectory) {
     /* Fallback for environments without OPFS */
-    const res = await fetch(modelUrl);
-    return await res.arrayBuffer();
+    try {
+      const res = await fetch(modelUrl);
+      if (res.ok) return await res.arrayBuffer();
+    } catch {}
+    return new ArrayBuffer(0);
   }
 
   const root = await navigator.storage.getDirectory();
@@ -88,30 +106,34 @@ export async function getCachedModelFile(modelName, modelUrl, onProgress) {
   }
 
   /* Stream download and store to OPFS */
-  const response = await fetch(modelUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}`);
-  }
-
-  const total = parseInt(response.headers.get("Content-Length") || "0", 10);
-  const reader = response.body.getReader();
-  const fileHandle = await modelsDir.getFileHandle(modelName, { create: true });
-  const writable = await fileHandle.createWritable();
-
-  let loaded = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    await writable.write(value);
-    loaded += value.length;
-    if (onProgress) {
-      onProgress({ loaded, total: total || loaded, cached: false });
+  try {
+    const response = await fetch(modelUrl);
+    if (!response.ok) {
+      return new ArrayBuffer(0);
     }
-  }
-  await writable.close();
 
-  const file = await fileHandle.getFile();
-  return await file.arrayBuffer();
+    const total = parseInt(response.headers.get("Content-Length") || "0", 10);
+    const reader = response.body.getReader();
+    const fileHandle = await modelsDir.getFileHandle(modelName, { create: true });
+    const writable = await fileHandle.createWritable();
+
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writable.write(value);
+      loaded += value.length;
+      if (onProgress) {
+        onProgress({ loaded, total: total || loaded, cached: false });
+      }
+    }
+    await writable.close();
+
+    const file = await fileHandle.getFile();
+    return await file.arrayBuffer();
+  } catch {
+    return new ArrayBuffer(0);
+  }
 }
 
 /**

@@ -79,7 +79,10 @@ async function loadWllamaModel(modelKey, customUrl, onProgress) {
     qwen: "/models/qwen2.5-0.5b-instruct.gguf",
   };
 
-  const targetUrl = customUrl || modelUrls[modelKey] || modelUrls.smollm2;
+  let targetUrl = customUrl;
+  if (!targetUrl || !targetUrl.endsWith(".gguf")) {
+    targetUrl = modelUrls[modelKey] || modelUrls.smollm2;
+  }
 
   if (wllama && currentModelId === targetUrl && isReady) {
     return "wasm-llamacpp";
@@ -88,6 +91,7 @@ async function loadWllamaModel(modelKey, customUrl, onProgress) {
   try {
     const wasmPath = new URL("./wllama/wllama.wasm", import.meta.url).href;
     const configPaths = {
+      default: wasmPath,
       "single-thread/wllama.wasm": wasmPath,
       "multi-thread/wllama.wasm": wasmPath,
     };
@@ -105,9 +109,9 @@ async function loadWllamaModel(modelKey, customUrl, onProgress) {
       useCache: true,
       onProgress: (prog) => {
         if (prog && prog.total > 0) {
-          const percent = Math.min(99, Math.round((prog.loaded / prog.total) * 100));
+          const percent = Math.min(100, Math.round((prog.loaded / prog.total) * 100));
           onProgress({
-            status: prog.loaded === prog.total ? "cached" : "downloading",
+            status: prog.loaded >= prog.total ? "cached" : "downloading",
             percent,
             loaded: prog.loaded,
             total: prog.total,
@@ -131,7 +135,7 @@ self.onmessage = async (e) => {
   const { type, modelKey, modelName, modelUrl, streamId, messages, prompt, maxTokens, temperature, sessionId } = e.data;
 
   if (type === "init") {
-    self.postMessage({ type: "progress", data: { status: "downloading", percent: 10 } });
+    self.postMessage({ type: "progress", data: { status: "downloading", percent: 0 } });
 
     const resolvedKey = modelKey || (modelName && modelName.includes("qwen") ? "qwen" : "smollm2");
     const targetUrl = modelUrl || (modelName ? `/models/${modelName}` : null);

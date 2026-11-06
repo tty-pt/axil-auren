@@ -144,6 +144,7 @@ export class AurenBrowserEngine {
     this.modelName = options.modelName || "smollm2-135m-instruct-q4_k_m.gguf";
     this.modelUrl = options.modelUrl || `/models/${this.modelName}`;
     this.workerPath = options.workerPath || new URL("./auren-worker.js", import.meta.url);
+    this.sessionId = options.sessionId || "default-session";
     this.worker = null;
     this.isReady = false;
   }
@@ -168,6 +169,7 @@ export class AurenBrowserEngine {
 
       this.worker.postMessage({
         type: "init",
+        modelKey: (this.modelName && this.modelName.includes("qwen")) ? "qwen" : "smollm2",
         modelName: this.modelName,
         modelUrl: this.modelUrl,
       });
@@ -212,6 +214,7 @@ export class AurenBrowserEngine {
     this.worker.postMessage({
       type: "generate",
       streamId,
+      sessionId: request.sessionId || this.sessionId,
       messages: request.messages || [],
       prompt: request.prompt || "",
       maxTokens: request.maxTokens || 256,
@@ -232,6 +235,12 @@ export class AurenBrowserEngine {
       }
     } finally {
       this.worker.removeEventListener("message", handler);
+    }
+  }
+
+  resetSession() {
+    if (this.worker) {
+      this.worker.postMessage({ type: "reset" });
     }
   }
 
@@ -282,6 +291,13 @@ export class AurenClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async models() {
+    const res = await this._fetch("/v1/models");
+    if (Array.isArray(res)) return res;
+    if (res && Array.isArray(res.data)) return res.data.map((m) => (typeof m === "string" ? m : m.id));
+    return [];
   }
 
   async chat(request) {
@@ -382,6 +398,37 @@ export class AurenClient {
     return this._fetch("/v1/systemone", {
       method: "POST",
       body: JSON.stringify(payload),
+    });
+  }
+
+  collection(name) {
+    return new AurenCollectionClient(this, name);
+  }
+}
+
+export class AurenCollectionClient {
+  constructor(client, name) {
+    this.client = client;
+    this.name = name;
+  }
+
+  async insert(doc) {
+    return this.client._fetch(`/v1/collections/${encodeURIComponent(this.name)}/documents`, {
+      method: "POST",
+      body: JSON.stringify(doc),
+    });
+  }
+
+  async search(query, limit = 10) {
+    const q = encodeURIComponent(query);
+    return this.client._fetch(`/v1/collections/${encodeURIComponent(this.name)}/search?q=${q}&limit=${limit}`, {
+      method: "GET",
+    });
+  }
+
+  async delete(id) {
+    return this.client._fetch(`/v1/collections/${encodeURIComponent(this.name)}/documents/${encodeURIComponent(id)}`, {
+      method: "DELETE",
     });
   }
 }

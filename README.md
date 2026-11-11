@@ -1,9 +1,10 @@
 <p align="center">
-  <img src="logo.png" alt="axil-auren logo" width="220" />
+  <img src="assets/logo.png" alt="axil-auren logo" width="220" />
 </p>
 
 # axil-auren
 
+[![npm](https://img.shields.io/badge/npm-@tty--pt/axil--auren-CB3837?logo=npm)](npm/README.md)
 [![C99](https://img.shields.io/badge/C-C99-555?logo=c)](#)
 [![BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue)](#)
 [![Vulkan/Metal/CPU](https://img.shields.io/badge/backends-Vulkan%20%7C%20Metal%20%7C%20CPU-4B8BBE)](#)
@@ -146,6 +147,20 @@ make                  # builds lib/libaxil-auren.so and bin/auren-chat
 make test             # run comprehensive unit test suite
 sudo make install     # install headers, library, and launchers to system
 ```
+
+---
+
+## 6. JavaScript & WebAssembly Bindings (`@tty-pt/axil-auren`)
+
+For browser, Node.js, and WebSocket/HTTP clients, `axil-auren` ships a TypeScript and WebAssembly client package on npm:
+
+```sh
+npm install @tty-pt/axil-auren
+```
+
+See [npm/README.md](npm/README.md) for the full TypeScript and WebAssembly API reference.
+
+---
 
 ## License
 

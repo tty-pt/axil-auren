@@ -16,10 +16,10 @@
     "test": "node --test tests/auren-client.test.mjs"
   },
   "peerDependencies": {
-    "@tty-pt/stele": ">=1.6.0"
+    "@tty-pt/stele": ">=1.6.1"
   },
   "devDependencies": {
-    "@tty-pt/stele": "^1.6.0"
+    "@tty-pt/stele": "^1.6.1"
   },
   "keywords": [
     "auren",

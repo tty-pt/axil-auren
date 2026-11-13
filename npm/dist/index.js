@@ -10,13 +10,22 @@ let getSubstrate = () => null;
 
 /* In Node environments, dynamically resolve @tty-pt/stele */
 if (typeof window === "undefined" && typeof process !== "undefined") {
-  try {
-    const stelePkg = "@tty-pt/stele";
-    const stele = await import(stelePkg);
-    loadWasmModule = stele.loadWasmModule;
-    loadNativeAddon = stele.loadNativeAddon;
-    getSubstrate = stele.getSubstrate;
-  } catch {}
+  const candidates = [
+    "@tty-pt/stele",
+    new URL("../../../libstele/npm/dist/index.js", import.meta.url).href,
+    new URL("../../../site/external/libstele/npm/dist/index.js", import.meta.url).href,
+  ];
+  for (const cand of candidates) {
+    try {
+      const stele = await import(cand);
+      if (stele?.loadWasmModule) {
+        loadWasmModule = stele.loadWasmModule;
+        loadNativeAddon = stele.loadNativeAddon;
+        getSubstrate = stele.getSubstrate;
+        break;
+      }
+    } catch {}
+  }
 }
 
 const nativeBinding = loadNativeAddon ? loadNativeAddon(import.meta.url, "auren") : null;
@@ -41,8 +50,8 @@ export function getAurenWasm() {
  * Calculates normalized cosine similarity between two float vectors
  * strictly via WebAssembly when available.
  */
-export function cosineSimilarity(vecA, vecB) {
-  if (nativeBinding && nativeBinding.cosine) {
+export function cosineSimilarity(vecA, vecB, options = {}) {
+  if (!options.wasm && nativeBinding && nativeBinding.cosine) {
     return nativeBinding.cosine(vecA, vecB);
   }
 

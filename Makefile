@@ -71,11 +71,13 @@ CMAKE_FLAGS-Darwin := -DGGML_METAL=ON
 
 WASM := auren.wasm
 WASM_SRCS := npm/wasm/auren_wasm.c
-WASM_LDFLAGS += -Wl,--import-memory
 
 third_party-Linux := ${vulkan}/include/shaderc/shaderc.h
 
 include ./../mk/include.mk
+
+wasm: ${wasmtarget}
+	@cp -f ${wasmtarget} npm/dist/auren.wasm 2>/dev/null || true
 
 all: bin/auren-path bin/auren-list
 

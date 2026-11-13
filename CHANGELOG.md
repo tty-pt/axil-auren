@@ -1,3 +1,13 @@
+## [1.5.0] - 2026-11-13
+
+- **Wllama WebAssembly llama.cpp Browser Inference & SmolLM2 Runtime**:
+  - Unified browser execution with WebAssembly llama.cpp (Wllama) and GGUF models.
+  - Added default wasm config and targetUrl resolution to wllama worker.
+  - Updated worker with SmolLM2 default and concise sampling.
+- **Libstele v1.6.0 Substrate Alignment**:
+  - Upgraded substrate baseline to @tty-pt/stele@^1.6.0 (>=1.6.0).
+  - Standalone @tty-pt/auren package version bumped to 1.2.0.
+
 ## [1.4.0] - 2026-10-30
 
 - **Unified Non-Generative System One Engine (`POST /v1/systemone`)**:

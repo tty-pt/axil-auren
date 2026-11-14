@@ -15,7 +15,7 @@
 #include <llama.h>
 #include <gguf.h>
 
-#include <ttypt/qsys.h>
+#include <ttypt/stele.h>
 #include <ttypt/corm.h>
 
 #define QLLM_MAX_CACHED_BLOCKS 64
@@ -1651,7 +1651,7 @@ qllm_render(struct qllm_context *qctx,
 
 	tmpl = llama_model_chat_template(qctx->model, NULL);
 	if (!tmpl) {
-		qsyslog(QLOG_ERR, "model has no chat template\n");
+		stl_syslog(STL_LOG_ERR, "model has no chat template\n");
 		return -1;
 	}
 
@@ -1791,7 +1791,7 @@ qllm_chat(struct qllm_context *qctx,
 		}
 	}
 
-	qsyslog(QLOG_INFO, "qllm_chat: prefix reuse %d/%d tokens (delta=%d, cached=%d)\n",
+	stl_syslog(STL_LOG_INFO, "qllm_chat: prefix reuse %d/%d tokens (delta=%d, cached=%d)\n",
 		pfx, n_tokens, n_tokens - pfx, qctx->n_cached_tokens);
 
 	/* Truncate downstream KV cells from pfx onwards */

@@ -120,7 +120,7 @@ handler_chat_completions(socket_t cfd, char *body)
 			snprintf(sess_id, sizeof(sess_id), "%s", json_object_get_string(so));
 		}
 	}
-	qsyslog(QLOG_INFO, "chat_completions: sess_id='%s'\n", sess_id);
+	stl_syslog(STL_LOG_INFO, "chat_completions: sess_id='%s'\n", sess_id);
 	if (sess_id[0]) {
 		axil_header_set(cfd, "x-session-id", sess_id);
 	}

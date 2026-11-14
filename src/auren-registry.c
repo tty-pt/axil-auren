@@ -1,7 +1,7 @@
 /* qllm-registry.c — Model registry and lifecycle implementation for axil-qllm. */
 
 #include "auren-registry.h"
-#include <ttypt/qsys.h>
+#include <ttypt/stele.h>
 
 #include <json-c/json.h>
 #include <limits.h>
@@ -327,7 +327,7 @@ parse_json_config(const char *json_text)
 
 	root = json_tokener_parse(json_text);
 	if (!root) {
-		qsyslog(QLOG_ERR, "qllm: failed to parse JSON configuration\n");
+		stl_syslog(STL_LOG_ERR, "qllm: failed to parse JSON configuration\n");
 		return;
 	}
 
@@ -445,7 +445,7 @@ qllm_registry_init(const char *legacy_fallback_path)
 			parse_json_config(text);
 			free(text);
 		} else {
-			qsyslog(QLOG_ERR, "auren: failed to open config at '%s'\n", resolved_cfg);
+			stl_syslog(STL_LOG_ERR, "auren: failed to open config at '%s'\n", resolved_cfg);
 		}
 	} else {
 		static const char *candidate_paths[] = {

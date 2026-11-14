@@ -1,5 +1,5 @@
 #include <ttypt/axil.h>
-#include <ttypt/qsys.h>
+#include <ttypt/stele.h>
 #include <ttypt/xy-mod.h>
 
 #include "openai_chat.h"
@@ -180,7 +180,7 @@ do_CHAT(int fd, int argc __attribute__((unused)),
 {
 	/* Clear the connection's session history + KV in the engine. */
 	if (qllm_engine_session_reset(fd, NULL, NULL) != 0)
-		qsyslog(QLOG_ERR, "chat reset queue full\n");
+		stl_syslog(STL_LOG_ERR, "chat reset queue full\n");
 }
 
 /* Feed a streamed chunk's newlines through "$ " command execution. */
@@ -309,7 +309,7 @@ XY_IMPL(int, on_axil_disconnect, socket_t, fd)
 
 	/* Release the engine session; the worker frees ctx/history. */
 	if (qllm_engine_session_close(fd, NULL, NULL) != 0)
-		qsyslog(QLOG_ERR, "session close queue full\n");
+		stl_syslog(STL_LOG_ERR, "session close queue full\n");
 
 	fdi->busy = 0;
 	line_reset(fdi);
@@ -367,7 +367,7 @@ auren_init(void)
 	                 (home_config_auren[0] && access(home_config_auren, R_OK) == 0);
 
 	if (!has_models) {
-		qsyslog(QLOG_ERR, "No model configuration set; auren engine disabled\n");
+		stl_syslog(STL_LOG_ERR, "No model configuration set; auren engine disabled\n");
 		return -1;
 	}
 
@@ -382,7 +382,7 @@ auren_init(void)
 	axil_register("chat", do_CHAT, CF_NOAUTH | CF_NOTRIM);
 
 	if (auren_engine_init(auren_model_path) != 0) {
-		qsyslog(QLOG_ERR, "Failed to init engine\n");
+		stl_syslog(STL_LOG_ERR, "Failed to init engine\n");
 		return -1;
 	}
 
@@ -402,7 +402,7 @@ XY_MODULE_API void
 xy_install(void)
 {
 	if (auren_init() != 0)
-		qsyslog(QLOG_ERR, "libaxil-auren: init failed\n");
+		stl_syslog(STL_LOG_ERR, "libaxil-auren: init failed\n");
 }
 
 XY_MODULE_API void

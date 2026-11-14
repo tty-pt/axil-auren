@@ -76,6 +76,8 @@ third_party-Linux := ${vulkan}/include/shaderc/shaderc.h
 
 include ./../mk/include.mk
 
+WASM_CFLAGS += -Inpm/node_modules/@tty-pt/stele/include
+
 wasm: ${wasmtarget}
 	@cp -f ${wasmtarget} npm/dist/auren.wasm 2>/dev/null || true
 

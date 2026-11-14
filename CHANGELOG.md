@@ -6,7 +6,7 @@
   - Updated worker with SmolLM2 default and concise sampling.
 - **Libstele v1.6.0 Substrate Alignment**:
   - Upgraded substrate baseline to @tty-pt/stele@^1.6.0 (>=1.6.0).
-  - Standalone @tty-pt/auren package version bumped to 1.2.0.
+  - The standalone @tty-pt/auren npm package now carries the repository version (1.5.0); it had not been published before.
 
 ## [1.4.0] - 2026-10-30
 

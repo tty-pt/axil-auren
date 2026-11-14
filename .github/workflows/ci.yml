@@ -16,13 +16,4 @@ jobs:
       deps_rpm: "axil,libxylem,libstele,libcorm,libsepal,vulkan-headers,vulkan-loader,vulkan-loader-devel,vulkan-tools,glslang,cmake,wget,g++,json-c-devel"
       deps_brew: "axil,libxylem,libstele,libcorm,libsepal,cmake,libomp,json-c"
       publish_to: "deb,rpm,brew"
-    secrets:
-      HOST: ${{ secrets.OPENBSD_HOST }}
-      USER: ${{ secrets.OPENBSD_USER }}
-      SSH_KEY: ${{ secrets.OPENBSD_SSH_KEY }}
-      GPG_PRIVATE_KEY: ${{ secrets.OPENBSD_GPG_PRIVATE_KEY }}
-      GPG_PASSPHRASE: ${{ secrets.OPENBSD_GPG_PASSPHRASE }}
-      GPG_KEYID: ${{ secrets.OPENBSD_GPG_KEY_ID }}
-      ABUILD_PRIVATE_KEY: ${{ secrets.ABUILD_PRIVATE_KEY }}
-      ABUILD_PUBLIC_KEY: ${{ secrets.ABUILD_PUBLIC_KEY }}
-      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    secrets: inherit

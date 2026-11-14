@@ -1,6 +1,6 @@
 {
   "name": "@tty-pt/auren",
-  "version": "1.2.0",
+  "version": "1.5.0",
   "type": "module",
   "description": "Universal Isomorphic WebAssembly, WebGPU, and Node SDK for Auren local LLM inference, embeddings, and client-side SmolLM2",
   "main": "dist/index.js",

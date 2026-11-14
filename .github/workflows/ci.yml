@@ -16,4 +16,5 @@ jobs:
       deps_rpm: "axil,libxylem,libstele,libcorm,libsepal,vulkan-headers,vulkan-loader,vulkan-loader-devel,vulkan-tools,glslang,cmake,wget,g++,json-c-devel"
       deps_brew: "axil,libxylem,libstele,libcorm,libsepal,cmake,libomp,json-c"
       publish_to: "deb,rpm,brew"
+      test_build: "true"
     secrets: inherit

@@ -18,13 +18,13 @@
   },
   "dependencies": {
     "@tty-pt/axil": "^1.8.0",
-    "@tty-pt/stele": "^1.8.0"
+    "@tty-pt/stele": "^1.7.1"
   },
   "peerDependencies": {
-    "@tty-pt/stele": ">=1.6.2"
+    "@tty-pt/stele": ">=1.7.0"
   },
   "devDependencies": {
-    "@tty-pt/stele": "^1.8.0"
+    "@tty-pt/stele": "^1.7.1"
   },
   "keywords": [
     "auren",

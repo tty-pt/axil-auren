@@ -17,7 +17,7 @@
     "test": "node --test tests/auren-client.test.mjs"
   },
   "dependencies": {
-    "@tty-pt/axil": "^1.8.0",
+    "@tty-pt/axil": "^1.8.1",
     "@tty-pt/stele": "^1.7.1"
   },
   "peerDependencies": {

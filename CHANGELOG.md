@@ -6,6 +6,8 @@
 - **Xylem Module Discovery & `@tty-pt/axil` Integration (`npm/dist/index.js`, `npm/dist/index.d.ts`, `npm/package.json`)**:
   - Added `getModulePath()` to resolve the bundled `libaxil-auren` module path in `prebuilds/<platform>-<arch>/` (or local `lib/`).
   - Added `"@tty-pt/axil": "^1.8.0"` dependency so `npx axil -A -p 4242 -m axil-auren` launches the native `axil-auren` daemon out of the box without system-installed C packages.
+- **Embedding Context Reuse (`src/libauren.c`)**:
+  - Cleared KV memory (`llama_memory_clear`) on the existing `llama_context` instead of freeing and reallocating the context on every `/v1/embeddings` and `/v1/systemone` evaluation.
 
 ## [1.5.0] - 2026-11-13
 

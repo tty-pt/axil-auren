@@ -4,7 +4,7 @@
 
 # axil-auren
 
-[![npm](https://img.shields.io/badge/npm-@tty--pt/axil--auren-CB3837?logo=npm)](npm/README.md)
+[![npm](https://img.shields.io/badge/npm-@tty--pt/auren-CB3837?logo=npm)](npm/README.md)
 [![C99](https://img.shields.io/badge/C-C99-555?logo=c)](#)
 [![BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue)](#)
 [![Vulkan/Metal/CPU](https://img.shields.io/badge/backends-Vulkan%20%7C%20Metal%20%7C%20CPU-4B8BBE)](#)
@@ -24,6 +24,9 @@ No CUDA toolchains to manage, no gigabytes of Python dependencies. `axil-auren` 
 ```bash
 # Primary execution: start axil daemon loading the auren module on port 4242
 axil -A -d -p 4242 -m libaxil-auren
+
+# Or via the @tty-pt/axil and @tty-pt/auren npm prebuilds (no system C install required):
+npx axil -A -d -p 4242 -m axil-auren
 
 # Or via the turnkey helper launcher:
 scripts/auren-server
@@ -150,15 +153,19 @@ sudo make install     # install headers, library, and launchers to system
 
 ---
 
-## 6. JavaScript & WebAssembly Bindings (`@tty-pt/axil-auren`)
+## 6. JavaScript, WebAssembly & N-API Bindings (`@tty-pt/auren`)
 
-For browser, Node.js, and WebSocket/HTTP clients, `axil-auren` ships a TypeScript and WebAssembly client package on npm:
+For browser, Node.js, and WebSocket/HTTP clients—as well as prebuilt `libaxil-auren` Xylem module distribution—`axil-auren` ships `@tty-pt/auren` on npm:
 
 ```sh
-npm install @tty-pt/axil-auren
+npm install @tty-pt/auren
 ```
 
-See [npm/README.md](npm/README.md) for the full TypeScript and WebAssembly API reference.
+- **Prebuilt `libaxil-auren` Server Module & `getModulePath()`**: Bundles `libaxil-auren.{so,dylib,dll}` and its runtime dependencies in `prebuilds/<platform>-<arch>/` with `$ORIGIN` RPATH so `@tty-pt/axil` (`npx axil -A -p 4242 -m axil-auren`) can host the native C server directly from `node_modules`.
+- **N-API Accelerated Cosine Similarity**: Bundles `auren.node` (`cosine(vecA, vecB)`) with automatic pure-JS fallback.
+- **Isomorphic Client & Browser Wllama Engine**: Provides `createAurenClient`, `AurenBrowserEngine` (WebAssembly `llama.cpp` + SmolLM2), and `createAurenBridge`.
+
+See [npm/README.md](npm/README.md) for the full TypeScript, N-API, and WebAssembly API reference.
 
 ---
 

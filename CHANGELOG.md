@@ -1,3 +1,12 @@
+## [1.5.1] - 2026-11-15
+
+- **Prebuilt `libaxil-auren` Packaging & Node-API Addon (`npm/native/auren_napi.c`, `npm/native/LIBS`, `Makefile`)**:
+  - Added Node-API native addon (`auren.node`) exposing `cosine(vecA, vecB)` and anchoring `DT_NEEDED` on `libaxil-auren` and `libsepal` so `build-node-addon.sh` automatically packages `libaxil-auren.{so,dylib,dll}` and its transitive shared libraries (`libsepal`, `libjson-c`, `libvulkan`, etc.) into `npm/prebuilds/<platform>-<arch>/`.
+  - Added `-Wl,--disable-new-dtags -Wl,-rpath,'$ORIGIN'` to `LDFLAGS-libaxil-auren-Linux` in `Makefile` so `libaxil-auren.so` resolves sibling prebuilt libraries directly from `prebuilds/<key>/` when dynamically loaded via `xy_load()`.
+- **Xylem Module Discovery & `@tty-pt/axil` Integration (`npm/dist/index.js`, `npm/dist/index.d.ts`, `npm/package.json`)**:
+  - Added `getModulePath()` to resolve the bundled `libaxil-auren` module path in `prebuilds/<platform>-<arch>/` (or local `lib/`).
+  - Added `"@tty-pt/axil": "^1.8.0"` dependency so `npx axil -A -p 4242 -m axil-auren` launches the native `axil-auren` daemon out of the box without system-installed C packages.
+
 ## [1.5.0] - 2026-11-13
 
 - **Wllama WebAssembly llama.cpp Browser Inference & SmolLM2 Runtime**:

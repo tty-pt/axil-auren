@@ -1,15 +1,33 @@
-# @tty-pt/auren-client
+# @tty-pt/auren
 
-Isomorphic typed client SDK for `axil-auren`, the pure-C local LLM inference, OpenAI-compatible streaming chat, dense vector embeddings, and System 1 classification engine.
+Isomorphic typed client SDK, WebAssembly browser inference engine (`AurenBrowserEngine`), N-API vector utilities, and prebuilt **`libaxil-auren`** Xylem server module for `axil-auren`—the pure-C local LLM inference, OpenAI-compatible streaming chat, dense vector embeddings, and System 1 classification engine.
 
 ## Features
-- **Zero Dependencies**: Powered by native `fetch`, `ReadableStream`, and `TextDecoder`.
-- **Isomorphic**: Runs identically in Node.js, Bun, Deno, and browser frontends.
+- **Prebuilt `libaxil-auren` Daemon Module**: Ships `libaxil-auren.{so,dylib,dll}` and its native dependencies inside `prebuilds/<platform>-<arch>/` so `@tty-pt/axil` (`npx axil -A -p 4242 -m axil-auren`) can launch the native C server without system-installed binaries.
+- **N-API Accelerated Vector Math**: Exposes `cosineSimilarity(vecA, vecB)` backed by `auren.node` in Node.js with automatic pure-JS fallback in browsers.
+- **Isomorphic Client & Browser Wllama Runtime**: Runs identically in Node.js, Bun, Deno, and browsers, with built-in WebAssembly `llama.cpp` (`AurenBrowserEngine`) fallback when no local server is reachable.
 - **Full Capabilities**: Streaming chat (`chatStream`), non-streaming chat (`chat`), embeddings (`embeddings`), System 1 zero-decode fast classification (`systemOne`), and persistent collections (`collection`).
 
 ## Usage
+
+### 1. Launch the Bundled Native `axil-auren` Server
+```bash
+npx axil -A -p 4242 -m axil-auren
+```
+
+Or resolve the bundled module path programmatically in Node.js:
 ```typescript
-import { createAurenClient, cosineSimilarity } from "@tty-pt/auren-client";
+import { getModulePath } from "@tty-pt/auren";
+import { runCli } from "@tty-pt/axil";
+
+console.log("Bundled module:", getModulePath());
+// Start in foreground on port 4242:
+// runCli(["-A", "-d", "-p", "4242", "-m", getModulePath()]);
+```
+
+### 2. Client SDK (`createAurenClient`)
+```typescript
+import { createAurenClient, cosineSimilarity } from "@tty-pt/auren";
 
 const auren = createAurenClient({ baseUrl: "http://localhost:4242" });
 
@@ -33,4 +51,4 @@ console.log("Decision:", res.decision);
 ```
 
 ## License
-CC BY-NC-SA 4.0 — Author: Paulo Quirino <q@qnixsoft.com>
+BSD-2-Clause — Author: Paulo Quirino <q@qnixsoft.com>

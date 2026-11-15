@@ -1438,11 +1438,21 @@ qllm_embed(struct qllm_context *qctx,
 	if (!QLLM_VALID(qctx) || !text || !out)
 		return -1;
 
-	llama_free(qctx->ctx);
-	qctx->ctx = llama_init_from_model(qctx->model, qctx->params);
+	if (!qctx->ctx) {
+		qctx->ctx = llama_init_from_model(qctx->model, qctx->params);
+		if (!qctx->ctx)
+			return -1;
+	} else {
+		llama_memory_t mem = llama_get_memory(qctx->ctx);
+		if (mem)
+			llama_memory_clear(mem, true);
+	}
 	qctx->anchor_start = 0;
 	qctx->anchor_end = 0;
 	qctx->gen_tokens = 0;
+	qctx->n_cached_blocks = 0;
+	qctx->current_block_idx = 0;
+	qctx->n_cached_tokens = 0;
 
 	n_tokens = llama_tokenize(qctx->vocab,
 				  text,

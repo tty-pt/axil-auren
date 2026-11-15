@@ -60,3 +60,5 @@ export class AurenClient {
 }
 
 export function createAurenClient(options?: any): AurenClient;
+export function getModulePath(): string | null;
+

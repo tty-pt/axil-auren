@@ -7,6 +7,7 @@
 let loadWasmModule = null;
 let loadNativeAddon = () => null;
 let getSubstrate = () => null;
+let getPlatformPrebuildKeys = () => [];
 
 /* In Node environments, dynamically resolve @tty-pt/stele */
 if (typeof window === "undefined" && typeof process !== "undefined") {
@@ -22,6 +23,9 @@ if (typeof window === "undefined" && typeof process !== "undefined") {
         loadWasmModule = stele.loadWasmModule;
         loadNativeAddon = stele.loadNativeAddon;
         getSubstrate = stele.getSubstrate;
+        if (typeof stele.getPlatformPrebuildKeys === "function") {
+          getPlatformPrebuildKeys = stele.getPlatformPrebuildKeys;
+        }
         break;
       }
     } catch {}
@@ -51,12 +55,12 @@ export function getAurenWasm() {
  * strictly via WebAssembly when available.
  */
 export function cosineSimilarity(vecA, vecB, options = {}) {
-  if (!options.wasm && nativeBinding && nativeBinding.cosine) {
-    return nativeBinding.cosine(vecA, vecB);
-  }
-
   if (!vecA || !vecB || vecA.length !== vecB.length || vecA.length === 0) {
     return 0.0;
+  }
+
+  if (!options.wasm && nativeBinding && nativeBinding.cosine) {
+    return nativeBinding.cosine(vecA, vecB);
   }
 
   const wasm = getAurenWasm();
@@ -445,3 +449,39 @@ export class AurenCollectionClient {
 export function createAurenClient(options) {
   return new AurenClient(options);
 }
+
+/**
+ * Resolve the path to the bundled `libaxil-auren` Xylem module (without `.so`/`.dylib`/`.dll` suffix)
+ * for loading into `axil -m <modulePath>`. Returns null when unavailable (e.g. browser).
+ *
+ * @returns {string | null}
+ */
+export function getModulePath() {
+  if (typeof process === "undefined" || !process.versions?.node) {
+    return null;
+  }
+  const getModule = globalThis.process?.getBuiltinModule;
+  if (!getModule) return null;
+  const fs = getModule("fs");
+  const path = getModule("path");
+  const url = getModule("url");
+  const pkgRoot = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), "..");
+  const keys = getPlatformPrebuildKeys();
+  const dirs = [
+    ...keys.map((k) => path.join(pkgRoot, "prebuilds", k)),
+    path.join(pkgRoot, "build", "Release"),
+    path.resolve(pkgRoot, "..", "lib"),
+  ];
+  for (const d of dirs) {
+    const stem = path.join(d, "libaxil-auren");
+    if (
+      fs.existsSync(`${stem}.so`) ||
+      fs.existsSync(`${stem}.dylib`) ||
+      fs.existsSync(`${stem}.dll`)
+    ) {
+      return stem;
+    }
+  }
+  return null;
+}
+

@@ -63,6 +63,7 @@ CFLAGS-Darwin := -I${omp}/include
 ggmlp := ${llamacpp}/ggml/src
 
 LDFLAGS-libaxil-auren := -L${llamacpp}/src -L${ggmlp}
+LDFLAGS-libaxil-auren-Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN'
 LDFLAGS-Linux := -L${ggmlp}/ggml-vulkan -L${vulkan}/lib
 LDFLAGS-Darwin := -L${ggmlp}/ggml-metal -L${ggmlp}/ggml-blas -L${omp}/lib
 

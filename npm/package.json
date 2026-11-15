@@ -1,12 +1,13 @@
 {
   "name": "@tty-pt/auren",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "type": "module",
   "description": "Universal Isomorphic WebAssembly, WebGPU, and Node SDK for Auren local LLM inference, embeddings, and client-side SmolLM2",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist",
+    "prebuilds",
     "include",
     "README.md",
     "LICENSE"
@@ -15,11 +16,15 @@
     "build:wasm": "make -C .. wasm",
     "test": "node --test tests/auren-client.test.mjs"
   },
+  "dependencies": {
+    "@tty-pt/axil": "^1.8.0",
+    "@tty-pt/stele": "^1.8.0"
+  },
   "peerDependencies": {
     "@tty-pt/stele": ">=1.6.2"
   },
   "devDependencies": {
-    "@tty-pt/stele": "^1.6.2"
+    "@tty-pt/stele": "^1.8.0"
   },
   "keywords": [
     "auren",
@@ -31,7 +36,8 @@
     "wasm",
     "embeddings",
     "semantic-search",
-    "streaming"
+    "streaming",
+    "napi"
   ],
   "author": "Paulo Quirino <q@qnixsoft.com>",
   "license": "BSD-2-Clause"

@@ -4,15 +4,19 @@ import http from "node:http";
 import {
   AurenClient,
   createAurenClient,
-  cosineSimilarity
+  cosineSimilarity,
+  getModulePath
 } from "../dist/index.js";
 
-test("cosineSimilarity: mathematical properties", () => {
+test("cosineSimilarity: mathematical properties and getModulePath", () => {
   assert.equal(cosineSimilarity([1, 0, 0], [1, 0, 0]), 1);
   assert.equal(cosineSimilarity([1, 0, 0], [0, 1, 0]), 0);
   assert.equal(cosineSimilarity([1, 0], [-1, 0]), -1);
+  assert.equal(cosineSimilarity(new Float32Array([1, 0, 0]), new Float32Array([1, 0, 0])), 1);
   assert.equal(cosineSimilarity([], []), 0);
   assert.equal(cosineSimilarity([1, 2], [1]), 0);
+  const modPath = getModulePath();
+  assert.ok(modPath && modPath.includes("libaxil-auren"), `expected libaxil-auren module path, got ${modPath}`);
 });
 
 test("AurenClient: end-to-end mocked HTTP protocol", async (t) => {

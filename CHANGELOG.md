@@ -1,7 +1,9 @@
 ## [1.5.2] - 2026-11-16
 
-- **Arch Linux (`pacman`) Packaging (`.github/workflows/ci.yml`)**:
+- **Arch Linux (`pacman`) Packaging & Toolchain Fallbacks (`.github/workflows/ci.yml`, `Makefile`)**:
   - Added `pacman` to `publish_to` (`deb,rpm,pacman,brew`) and removed `wget` from `deps_pacman` to avoid partial-upgrading `nettle` inside the Arch builder container.
+  - Added `curl -fsSL` primary download with `wget` fallback when fetching the LunarG Vulkan SDK tarball in `Makefile`.
+  - Checked `clang --version` / `clang++ --version` instead of `command -v clang` in `Makefile` so containers where `clang` has a broken `GLIBC_2.44` linkage automatically fall back to GCC (`${CC}` / `${CXX}`).
 
 ## [1.5.1] - 2026-11-15
 

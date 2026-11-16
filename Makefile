@@ -120,13 +120,6 @@ install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgc
 
 .PHONY: install-hook
 install-hook:
-	@if [ "${uname}" = "OpenBSD" ] && [ -f "${llamacpp}/src/libllama.a" ]; then \
-		install -d /var/tmp/auren-llama-cache; \
-		install -m 644 ${llamacpp}/src/libllama.a /var/tmp/auren-llama-cache/; \
-		install -m 644 ${ggmlp}/libggml.a /var/tmp/auren-llama-cache/; \
-		install -m 644 ${ggmlp}/ggml-cpu/libggml-cpu.a /var/tmp/auren-llama-cache/; \
-		install -m 644 ${ggmlp}/ggml-base/libggml-base.a /var/tmp/auren-llama-cache/; \
-	fi
 	@if [ "${uname}" = "MinGW64" ] && [ ! -f /mingw64/bin/libcrypto-3-x64.dll ]; then \
 		curl -fsSL https://registry.npmjs.org/@tty-pt/axil/-/axil-1.8.4.tgz | tar -xzf - --strip-components=3 -C /mingw64/bin package/prebuilds/win32-x64/libcrypto-3-x64.dll package/prebuilds/win32-x64/libssl-3-x64.dll; \
 	fi
@@ -134,29 +127,17 @@ install-hook:
 src/libauren.o: $(llamacpp)/src/libllama.a
 
 $(llamacpp)/src/libllama.a: ${llamacpp}/Makefile
-	if [ "${uname}" = "OpenBSD" ] && [ -f /var/tmp/auren-llama-cache/libllama.a ]; then \
-		install -d ${llamacpp}/src ${ggmlp} ${ggmlp}/ggml-cpu ${ggmlp}/ggml-base; \
-		install -m 644 /var/tmp/auren-llama-cache/libllama.a ${llamacpp}/src/; \
-		install -m 644 /var/tmp/auren-llama-cache/libggml.a ${ggmlp}/; \
-		install -m 644 /var/tmp/auren-llama-cache/libggml-cpu.a ${ggmlp}/ggml-cpu/; \
-		install -m 644 /var/tmp/auren-llama-cache/libggml-base.a ${ggmlp}/ggml-base/; \
-	else \
+	${MAKE} -C ${llamacpp} -j2 llama; \
+	if [ -x "${llamacpp}/Release/vulkan-shaders-gen" ]; then \
+		GLSLC_BIN=glslc; \
+		if [ "${distro}" != "alpine" ] && [ -x "${vulkan}/bin/glslc" ]; then GLSLC_BIN="${pwd}/${vulkan}/bin/glslc"; fi; \
+		sh scripts/vkgen-repair.sh ${llamacpp} "$$GLSLC_BIN"; \
 		${MAKE} -C ${llamacpp} -j2 llama; \
-		if [ -x "${llamacpp}/Release/vulkan-shaders-gen" ]; then \
-			GLSLC_BIN=glslc; \
-			if [ "${distro}" != "alpine" ] && [ -x "${vulkan}/bin/glslc" ]; then GLSLC_BIN="${pwd}/${vulkan}/bin/glslc"; fi; \
-			sh scripts/vkgen-repair.sh ${llamacpp} "$$GLSLC_BIN"; \
-			${MAKE} -C ${llamacpp} -j2 llama; \
-		fi; \
 	fi
 
 $(llamacpp)/Makefile: ${third_party-${uname}}
 	echo "[INFO] Using GGML_NATIVE=${GGML_NATIVE} (toolchain vpdpbusd support: ${has_vpdpbusd})"; \
 	mkdir -p ${llamacpp} 2>/dev/null || true
-	if [ "${uname}" = "OpenBSD" ] && [ -f /var/tmp/auren-llama-cache/libllama.a ]; then \
-		touch ${llamacpp}/Makefile; \
-		exit 0; \
-	fi; \
 	if [ "${uname}" = "OpenBSD" ]; then \
 		if [ ! -x /usr/bin/c++ ] && [ -x /usr/bin/cc ]; then \
 			ln -sf /usr/bin/cc /usr/bin/c++; \

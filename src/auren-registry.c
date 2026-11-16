@@ -486,7 +486,12 @@ qllm_registry_init(const char *legacy_fallback_path)
 		expand_path(chat_path, exp_chat, sizeof(exp_chat));
 		expand_path(judge_path, exp_judge, sizeof(exp_judge));
 
+#ifdef _WIN32
+		if (_fullpath(real_chat, exp_chat, PATH_MAX) &&
+		    _fullpath(real_judge, exp_judge, PATH_MAX)) {
+#else
 		if (realpath(exp_chat, real_chat) && realpath(exp_judge, real_judge)) {
+#endif
 			if (strcmp(real_chat, real_judge) == 0)
 				same_chat_judge = 1;
 		} else {

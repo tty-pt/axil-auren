@@ -25,6 +25,12 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <direct.h>
+#define auren_mkdir(p) _mkdir(p)
+#else
+#define auren_mkdir(p) mkdir(p, 0755)
+#endif
 
 #define MAX_COLLECTIONS 64
 #define MAX_NAME_LEN 64
@@ -77,8 +83,8 @@ collections_respond_error(socket_t fd, int code, const char *msg)
 static void
 ensure_collections_dir(void)
 {
-	(void)mkdir("var", 0755);
-	(void)mkdir("var/collections", 0755);
+	(void)auren_mkdir("var");
+	(void)auren_mkdir("var/collections");
 }
 
 static struct collection *
@@ -108,7 +114,7 @@ get_or_open_collection(const char *name)
 	ensure_collections_dir();
 	char dir_path[256];
 	snprintf(dir_path, sizeof(dir_path), "var/collections/%s", name);
-	(void)mkdir(dir_path, 0755);
+	(void)auren_mkdir(dir_path);
 
 	char sepal_path[512];
 	char corm_path[512];

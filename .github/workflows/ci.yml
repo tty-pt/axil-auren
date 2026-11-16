@@ -12,9 +12,12 @@ jobs:
       name: axil-auren
       deps: "axil,libxylem,libstele,libcorm,libsepal,libvulkan-dev,vulkan-tools,glslang-tools,cmake,wget,libjson-c-dev"
       deps_pacman: "axil,libxylem,libstele,libcorm,libsepal,vulkan-headers,vulkan-icd-loader,vulkan-tools,glslang,cmake,json-c"
-      deps_apk: "axil,libxylem,libstele,libcorm,libsepal,vulkan-loader,vulkan-loader-dev,vulkan-headers,vulkan-tools,cmake,xz,wget,json-c-dev"
+      deps_apk: "axil,libxylem,libstele,libcorm,libsepal,vulkan-loader,vulkan-loader-dev,vulkan-headers,vulkan-tools,shaderc,glslang,openmp-dev,linux-headers,cmake,xz,wget,json-c-dev,xxhash-dev,libbsd-dev"
       deps_rpm: "axil,libxylem,libstele,libcorm,libsepal,vulkan-headers,vulkan-loader,vulkan-loader-devel,vulkan-tools,glslang,cmake,wget,g++,json-c-devel"
       deps_brew: "axil,libxylem,libstele,libcorm,libsepal,cmake,libomp,json-c"
-      publish_to: "deb,rpm,pacman,brew"
+      deps_openbsd: "axil,libxylem,libstele,libcorm,libsepal,cmake,json-c,xxhash"
+      deps_winget: "mingw-w64-x86_64-cmake,mingw-w64-x86_64-json-c,mingw-w64-x86_64-xxhash,mingw-w64-x86_64-mman-win32,mingw-w64-x86_64-openssl,mingw-w64-x86_64-libiconv"
+      deps_winget_tty: "libstele,libcorm,libsepal,libxylem,axil"
+      publish_to: "deb,apk,rpm,pacman,brew,openbsd,winget"
       test_build: "true"
     secrets: inherit

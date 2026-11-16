@@ -1,6 +1,13 @@
 #include <ttypt/axil.h>
 #include <ttypt/stele.h>
+#ifdef _WIN32
+#pragma push_macro("weak")
+#define weak
 #include <ttypt/xy-mod.h>
+#pragma pop_macro("weak")
+#else
+#include <ttypt/xy-mod.h>
+#endif
 
 #include "openai_chat.h"
 #include "openai_embed.h"
@@ -14,6 +21,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifdef _WIN32
+static char *
+auren_strndup(const char *s, size_t n)
+{
+	size_t len = 0;
+	while (len < n && s[len])
+		len++;
+	char *out = malloc(len + 1);
+	if (!out)
+		return NULL;
+	memcpy(out, s, len);
+	out[len] = '\0';
+	return out;
+}
+#define strndup auren_strndup
+#endif
 
 #define REC_END "\r\n.\r\n"
 
@@ -79,7 +103,7 @@ line_reset(fdi_t *fdi)
 
 static void
 cmd_cb(
-	int fd,
+	socket_t fd,
 	char *buf,
 	size_t len,
 	int ofd __attribute__((unused)))
@@ -89,7 +113,7 @@ cmd_cb(
 }
 
 static inline void
-cmd_exec(int fd, fdi_t *fdi)
+cmd_exec(socket_t fd, fdi_t *fdi)
 {
 	char argsbuf[BUFSIZ], *space;
 	int argc = 0;
@@ -126,7 +150,7 @@ cmd_exec(int fd, fdi_t *fdi)
 }
 
 static void
-do_ASK(int fd, int argc, char *argv[])
+do_ASK(socket_t fd, int argc, char *argv[])
 {
 	fdi_t *fdi = &fdis[fd];
 	char *user;
@@ -156,7 +180,7 @@ do_ASK(int fd, int argc, char *argv[])
 
 	fdi->busy = 1;
 	{
-		pending_t *p = make_pending(NULL, 0, fd);
+		pending_t *p = make_pending(NULL, 0, (int)fd);
 
 		if (!p) {
 			fdi->busy = 0;
@@ -165,7 +189,7 @@ do_ASK(int fd, int argc, char *argv[])
 			return;
 		}
 		p->epoch = fdi->epoch;
-		if (qllm_engine_chat(fd, user, p, NULL) != 0) {
+		if (qllm_engine_chat((int)fd, user, p, NULL) != 0) {
 			free(p);
 			fdi->busy = 0;
 			axil_writef(fd, "Engine busy\n");
@@ -175,17 +199,17 @@ do_ASK(int fd, int argc, char *argv[])
 }
 
 static void
-do_CHAT(int fd, int argc __attribute__((unused)),
+do_CHAT(socket_t fd, int argc __attribute__((unused)),
     char *argv[] __attribute__((unused)))
 {
 	/* Clear the connection's session history + KV in the engine. */
-	if (qllm_engine_session_reset(fd, NULL, NULL) != 0)
+	if (qllm_engine_session_reset((int)fd, NULL, NULL) != 0)
 		stl_syslog(STL_LOG_ERR, "chat reset queue full\n");
 }
 
 /* Feed a streamed chunk's newlines through "$ " command execution. */
 static void
-chat_handle_chunk(int fd, const char *chunk, size_t len)
+chat_handle_chunk(socket_t fd, const char *chunk, size_t len)
 {
 	fdi_t *fdi = &fdis[fd];
 	size_t i;
@@ -221,7 +245,7 @@ drain(void *cbud __attribute__((unused)),
 	}
 
 	if (r->kind == QE_JOB_CHAT) {
-		int fd = p->sid;
+		socket_t fd = (socket_t)p->sid;
 
 		/* The connection moved on (closed and its fd reused): these
 		 * results belong to a dead generation — drop them entirely. */
@@ -234,7 +258,7 @@ drain(void *cbud __attribute__((unused)),
 			size_t len = r->payload ? strlen(r->payload) : 0;
 
 			if (len)
-				axil_write(fd, r->payload, len);
+				axil_write(fd, (char *)r->payload, len);
 			chat_handle_chunk(fd, r->payload ? r->payload : "", len);
 			return;   /* keep pending until the final result */
 		}
@@ -308,7 +332,7 @@ XY_IMPL(int, on_axil_disconnect, socket_t, fd)
 	fdi_t *fdi = &fdis[fd];
 
 	/* Release the engine session; the worker frees ctx/history. */
-	if (qllm_engine_session_close(fd, NULL, NULL) != 0)
+	if (qllm_engine_session_close((int)fd, NULL, NULL) != 0)
 		stl_syslog(STL_LOG_ERR, "session close queue full\n");
 
 	fdi->busy = 0;
@@ -319,6 +343,13 @@ XY_IMPL(int, on_axil_disconnect, socket_t, fd)
 XY_IMPL(int, on_axil_tick, socket_t, fd)
 {
 	(void)fd;
+	qllm_engine_poll(drain, NULL);
+	return 0;
+}
+
+XY_IMPL(int, on_axil_update, unsigned long long, dt)
+{
+	(void)dt;
 	qllm_engine_poll(drain, NULL);
 	return 0;
 }
@@ -388,7 +419,9 @@ auren_init(void)
 
 	auren_engine_set_system(crb_system);
 
+#ifndef _WIN32
 	axil_fd_watch(auren_engine_wake_fd());
+#endif
 
 	openai_embed_init(auren_model_path);
 	openai_chat_init(auren_model_path);

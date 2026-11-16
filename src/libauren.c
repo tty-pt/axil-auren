@@ -232,6 +232,25 @@ qllm_backend_mem_check(int gpu, size_t *free_b, size_t *total_b);
 extern int
 qllm_backend_get_vram(size_t *free_b, size_t *total_b, int max_devices);
 
+#if !defined(MOCK_BUILD) && !defined(__linux__) && !defined(__APPLE__)
+void
+qllm_backend_mem_check(int gpu, size_t *free_b, size_t *total_b)
+{
+	(void)gpu;
+	if (free_b) *free_b = 0;
+	if (total_b) *total_b = 0;
+}
+
+int
+qllm_backend_get_vram(size_t *free_b, size_t *total_b, int max_devices)
+{
+	(void)free_b;
+	(void)total_b;
+	(void)max_devices;
+	return 0;
+}
+#endif
+
 /* Read model geometry directly from the GGUF metadata without loading the
  * model. Used to pick a sane default context size (cfg->n_ctx == 0). All
  * outputs start at 0 and stay 0 when the metadata is absent. */
@@ -955,7 +974,11 @@ qllm_create(const struct qllm_config *cfg)
 		ctx_params.pooling_type = LLAMA_POOLING_TYPE_MEAN;
 	}
 
+#ifdef _WIN32
+	long ncpu = 4;
+#else
 	long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
 	if (cfg->n_threads > 0) {
 		n_threads = cfg->n_threads;
 	} else {

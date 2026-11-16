@@ -1,3 +1,10 @@
+## [1.5.3] - 2026-11-16
+
+- **7-OS Native Packaging & 4-Platform Node-API Prebuilds (`Makefile`, `.github/workflows/ci.yml`, `scripts/vkgen-repair.sh`, `src/*.c`)**:
+  - Added Alpine Linux (`apk`), OpenBSD (`openbsd`), and Windows (`winget`) to `publish_to` (`deb,apk,rpm,pacman,brew,openbsd,winget`), enabling full 4-platform Node-API prebuild bundling (`linux-x64`, `darwin-arm64`, `darwin-x64`, `win32-x64`).
+  - Made `Makefile` compatible with BSD `make` (OpenBSD) and MSYS2/MinGW-w64 (`MinGW64`), using system `glslc`/`shaderc` on Alpine Linux (`musl`) instead of the glibc LunarG SDK tarball.
+  - Added CPU-only backend fallbacks (`qllm_backend_mem_check`, `qllm_backend_get_vram`) and Windows (`_WIN32`) portability across `libauren.c`, `auren-engine.c` (condition-variable wake when `pipe`/`poll` are absent), `libaxil-auren.c` (`socket_t` callback signatures and `on_axil_update` completion drain), `auren-collections.c`, `auren-registry.c`, and `auren-chat.c`.
+
 ## [1.5.2] - 2026-11-16
 
 - **Arch Linux (`pacman`) Packaging & Toolchain Fallbacks (`.github/workflows/ci.yml`, `Makefile`)**:

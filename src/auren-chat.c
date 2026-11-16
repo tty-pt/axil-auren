@@ -2,21 +2,41 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#endif
 
 #define PORT      4242
 #define REC_END   "\r\n.\r\n"   /* daemon record terminator */
 #define REC_END_LEN 6
 
 int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused))) {
+#ifdef _WIN32
+	WSADATA wsa;
+	SOCKET sock;
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+		fprintf(stderr, "WSAStartup failed\n");
+		return 1;
+	}
+#else
 	int sock;
+#endif
 	struct sockaddr_in server_addr;
 	char buf[BUFSIZ];
 	char msg[BUFSIZ];
 
 	sock = socket(AF_INET, SOCK_STREAM, 0);
+#ifdef _WIN32
+	if (sock == INVALID_SOCKET) {
+#else
 	if (sock < 0) {
+#endif
 		perror("socket");
 		return 1;
 	}
@@ -33,7 +53,12 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 
 	if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
 		perror("connect");
+#ifdef _WIN32
+		closesocket(sock);
+		WSACleanup();
+#else
 		close(sock);
+#endif
 		return 1;
 	}
 
@@ -73,7 +98,7 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 		}
 
 		while (!done) {
-			ssize_t cn = read(sock, buf, sizeof(buf));
+			ssize_t cn = recv(sock, buf, sizeof(buf), 0);
 
 			if (cn <= 0)
 				break;
@@ -112,7 +137,12 @@ int main(int argc __attribute__((unused)), char *argv[] __attribute__((unused)))
 		}
 	}
 
+#ifdef _WIN32
+	closesocket(sock);
+	WSACleanup();
+#else
 	close(sock);
+#endif
 	printf("Session closed.\n");
 	return 0;
 }

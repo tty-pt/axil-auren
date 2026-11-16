@@ -26,7 +26,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <poll.h>
+#endif
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,6 +37,23 @@
 #include <time.h>
 #include <unistd.h>
 #include <math.h>
+
+#ifdef _WIN32
+static char *
+auren_strndup(const char *s, size_t n)
+{
+	size_t len = 0;
+	while (len < n && s[len])
+		len++;
+	char *out = malloc(len + 1);
+	if (!out)
+		return NULL;
+	memcpy(out, s, len);
+	out[len] = '\0';
+	return out;
+}
+#define strndup auren_strndup
+#endif
 
 #define QE_JOB_MAX  64
 #define QE_VEC_MAX  4096
@@ -125,10 +144,12 @@ struct stream_st {
 static void
 engine_drain_pipe(void)
 {
+#ifndef _WIN32
 	char b[64];
 
 	while (read(g_engine.pipe_r, b, sizeof(b)) > 0)
 		;
+#endif
 }
 
 static int
@@ -148,12 +169,15 @@ completion_push(const struct qllm_engine_result *r)
 	g_engine.comp_tail = (g_engine.comp_tail + 1) % QE_JOB_MAX;
 	g_engine.comp[i] = *r;
 	++g_engine.comp_count;
+	pthread_cond_broadcast(&g_engine.comp_cond);
 	pthread_mutex_unlock(&g_engine.comp_mutex);
 
+#ifndef _WIN32
 	/* Wake hint only; EAGAIN is fine (a byte is already buffered and the
 	 * completion queue holds the data). */
 	if (write(g_engine.pipe_w, "\0", 1) < 0 && errno != EAGAIN)
 		return -1;
+#endif
 	return 0;
 }
 
@@ -1879,8 +1903,11 @@ worker_main(void *arg)
 	}
 
 	pthread_mutex_lock(&g_engine.comp_mutex);
+	pthread_cond_broadcast(&g_engine.comp_cond);
+#ifndef _WIN32
 	/* ensure any final wake is delivered even if quitting with pending results */
 	(void)write(g_engine.pipe_w, "\0", 1);
+#endif
 	pthread_mutex_unlock(&g_engine.comp_mutex);
 
 	return NULL;
@@ -1927,6 +1954,10 @@ qllm_engine_init(const char *model_path)
 		return -1;
 	}
 
+#ifdef _WIN32
+	g_engine.pipe_r = -1;
+	g_engine.pipe_w = -1;
+#else
 	{
 		int pfd[2];
 
@@ -1943,10 +1974,13 @@ qllm_engine_init(const char *model_path)
 	}
 	fcntl(g_engine.pipe_w, F_SETFL, O_NONBLOCK);
 	fcntl(g_engine.pipe_r, F_SETFL, O_NONBLOCK);
+#endif
 
 	if (pthread_create(&g_engine.worker, NULL, worker_main, NULL) != 0) {
+#ifndef _WIN32
 		close(g_engine.pipe_r);
 		close(g_engine.pipe_w);
+#endif
 		pthread_mutex_destroy(&g_engine.sess_mutex);
 		pthread_cond_destroy(&g_engine.comp_cond);
 		pthread_mutex_destroy(&g_engine.comp_mutex);
@@ -2002,8 +2036,10 @@ qllm_engine_shutdown(void)
 	}
 	engine_drain_pipe();
 
+#ifndef _WIN32
 	close(g_engine.pipe_r);
 	close(g_engine.pipe_w);
+#endif
 
 	pthread_mutex_destroy(&g_engine.sess_mutex);
 	pthread_cond_destroy(&g_engine.comp_cond);
@@ -2204,11 +2240,36 @@ qllm_engine_wake_fd(void)
 int
 qllm_engine_wait(int timeout_ms)
 {
-	struct pollfd pfd;
-	int r;
-
 	if (!g_engine.running)
 		return -1;
+
+#ifdef _WIN32
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	if (timeout_ms >= 0) {
+		ts.tv_sec += timeout_ms / 1000;
+		ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+		if (ts.tv_nsec >= 1000000000L) {
+			ts.tv_sec += 1;
+			ts.tv_nsec -= 1000000000L;
+		}
+	}
+	pthread_mutex_lock(&g_engine.comp_mutex);
+	while (g_engine.comp_count == 0 && !g_engine.quit) {
+		int rc;
+		if (timeout_ms < 0)
+			rc = pthread_cond_wait(&g_engine.comp_cond, &g_engine.comp_mutex);
+		else
+			rc = pthread_cond_timedwait(&g_engine.comp_cond, &g_engine.comp_mutex, &ts);
+		if (rc != 0)
+			break;
+	}
+	int ready = (g_engine.comp_count > 0) ? 0 : -1;
+	pthread_mutex_unlock(&g_engine.comp_mutex);
+	return ready;
+#else
+	struct pollfd pfd;
+	int r;
 
 	pfd.fd = g_engine.pipe_r;
 	pfd.events = POLLIN;
@@ -2222,4 +2283,5 @@ qllm_engine_wait(int timeout_ms)
 	 * select/poll on the same fd won't see stale readiness. */
 	engine_drain_pipe();
 	return 0;
+#endif
 }

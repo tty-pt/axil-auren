@@ -5,6 +5,6 @@ includedir=${prefix}/include
 
 Name: axil-auren
 Description: Local LLM inference and embeddings via llama.cpp (axil module)
-Version: 1.5.2
+Version: 1.5.3
 Libs: -L${libdir} -laxil-auren -laxil -lxylem -lcorm -lsepal -lstele -ljson-c
 Cflags: -I${includedir}

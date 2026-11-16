@@ -101,14 +101,12 @@ extra-bin-${uname} ?= bin/auren-path bin/auren-list
 all: ${extra-bin-${uname}}
 
 bin/auren-path: scripts/auren-path
-	@mkdir -p bin
-	cp scripts/auren-path $@
-	chmod 755 $@
+	install -d bin
+	install -m 755 scripts/auren-path $@
 
 bin/auren-list: scripts/auren-list
-	@mkdir -p bin
-	cp scripts/auren-list $@
-	chmod 755 $@
+	install -d bin
+	install -m 755 scripts/auren-list $@
 
 ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc: auren.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
@@ -118,13 +116,16 @@ ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc: axil-auren.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
 	install -m 644 axil-auren.pc $@
 
-install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc
+install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc install-hook
+
+.PHONY: install-hook
+install-hook:
 	@if [ "${uname}" = "OpenBSD" ] && [ -f "${llamacpp}/src/libllama.a" ]; then \
-		mkdir -p /var/tmp/auren-llama-cache; \
-		cp -f ${llamacpp}/src/libllama.a /var/tmp/auren-llama-cache/; \
-		cp -f ${ggmlp}/libggml.a /var/tmp/auren-llama-cache/; \
-		cp -f ${ggmlp}/ggml-cpu/libggml-cpu.a /var/tmp/auren-llama-cache/; \
-		cp -f ${ggmlp}/ggml-base/libggml-base.a /var/tmp/auren-llama-cache/; \
+		install -d /var/tmp/auren-llama-cache; \
+		install -m 644 ${llamacpp}/src/libllama.a /var/tmp/auren-llama-cache/; \
+		install -m 644 ${ggmlp}/libggml.a /var/tmp/auren-llama-cache/; \
+		install -m 644 ${ggmlp}/ggml-cpu/libggml-cpu.a /var/tmp/auren-llama-cache/; \
+		install -m 644 ${ggmlp}/ggml-base/libggml-base.a /var/tmp/auren-llama-cache/; \
 	fi
 	@if [ "${uname}" = "MinGW64" ] && [ ! -f /mingw64/bin/libcrypto-3-x64.dll ]; then \
 		curl -fsSL https://registry.npmjs.org/@tty-pt/axil/-/axil-1.8.4.tgz | tar -xzf - --strip-components=3 -C /mingw64/bin package/prebuilds/win32-x64/libcrypto-3-x64.dll package/prebuilds/win32-x64/libssl-3-x64.dll; \
@@ -134,11 +135,11 @@ src/libauren.o: $(llamacpp)/src/libllama.a
 
 $(llamacpp)/src/libllama.a: ${llamacpp}/Makefile
 	if [ "${uname}" = "OpenBSD" ] && [ -f /var/tmp/auren-llama-cache/libllama.a ]; then \
-		mkdir -p ${llamacpp}/src ${ggmlp} ${ggmlp}/ggml-cpu ${ggmlp}/ggml-base; \
-		cp -f /var/tmp/auren-llama-cache/libllama.a ${llamacpp}/src/; \
-		cp -f /var/tmp/auren-llama-cache/libggml.a ${ggmlp}/; \
-		cp -f /var/tmp/auren-llama-cache/libggml-cpu.a ${ggmlp}/ggml-cpu/; \
-		cp -f /var/tmp/auren-llama-cache/libggml-base.a ${ggmlp}/ggml-base/; \
+		install -d ${llamacpp}/src ${ggmlp} ${ggmlp}/ggml-cpu ${ggmlp}/ggml-base; \
+		install -m 644 /var/tmp/auren-llama-cache/libllama.a ${llamacpp}/src/; \
+		install -m 644 /var/tmp/auren-llama-cache/libggml.a ${ggmlp}/; \
+		install -m 644 /var/tmp/auren-llama-cache/libggml-cpu.a ${ggmlp}/ggml-cpu/; \
+		install -m 644 /var/tmp/auren-llama-cache/libggml-base.a ${ggmlp}/ggml-base/; \
 	else \
 		${MAKE} -C ${llamacpp} -j2 llama; \
 		if [ -x "${llamacpp}/Release/vulkan-shaders-gen" ]; then \

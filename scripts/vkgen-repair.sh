@@ -15,8 +15,6 @@ set -eu
 build=${1:?usage: vkgen-repair.sh BUILD_DIR GLSLC}
 glslc=${2:?usage:  vkgen-repair.sh BUILD_DIR GLSLC}
 
-ulimit -s 512 2>/dev/null || true
-
 llamacpp=$(cd "$(dirname "$build")" && pwd)
 build=$(cd "$build" && pwd)
 

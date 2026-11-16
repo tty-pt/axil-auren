@@ -1,3 +1,8 @@
+## [1.5.2] - 2026-11-16
+
+- **Arch Linux (`pacman`) Packaging (`.github/workflows/ci.yml`)**:
+  - Added `pacman` to `publish_to` (`deb,rpm,pacman,brew`) and removed `wget` from `deps_pacman` to avoid partial-upgrading `nettle` inside the Arch builder container.
+
 ## [1.5.1] - 2026-11-15
 
 - **Prebuilt `libaxil-auren` Packaging & Node-API Addon (`npm/native/auren_napi.c`, `npm/native/LIBS`, `Makefile`)**:

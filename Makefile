@@ -29,8 +29,8 @@ uname != uname
 arch := $(shell uname -m)
 arch != uname -m
 
-COMPILER_C   := $(shell command -v clang  >/dev/null 2>&1 && echo clang  || echo ${CC})
-COMPILER_CXX := $(shell command -v clang++ >/dev/null 2>&1 && echo clang++ || echo ${CXX})
+COMPILER_C   := $(shell clang --version >/dev/null 2>&1 && echo clang  || echo ${CC})
+COMPILER_CXX := $(shell clang++ --version >/dev/null 2>&1 && echo clang++ || echo ${CXX})
 
 ifeq ($(arch),x86_64)
   has_vpdpbusd := $(shell echo 'void test(void){ __asm__("{vex} vpdpbusd %ymm0, %ymm1, %ymm2"); }' | $(COMPILER_C) -c -x c - -o /dev/null 2>/dev/null && echo 1 || echo 0)
@@ -134,7 +134,7 @@ $(llamacpp)/Makefile: ${third_party-${uname}}
 
 $(vulkan)/include/shaderc/shaderc.h:
 	mkdir third_party || true
-	wget -qO third_party/vulkan-sdk.tar.xz "$(SDK_URL)"
+	(curl -fsSL "$(SDK_URL)" -o third_party/vulkan-sdk.tar.xz || wget -qO third_party/vulkan-sdk.tar.xz "$(SDK_URL)")
 	tar -xf third_party/vulkan-sdk.tar.xz -C third_party
 
 .PHONY: test npm-build npm-test

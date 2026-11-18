@@ -1925,8 +1925,21 @@ qllm_engine_init(const char *model_path)
 			model_path);
 
 	if (qllm_registry_init(g_engine.model_path) != 0) {
-		fprintf(stderr, "Failed to initialize model registry\n");
-		return -1;
+		const char *home = getenv("HOME");
+		char auth_path[512] = {0};
+		const char *env_auth = getenv("AUREN_AUTH_PATH");
+		int has_upstream = 0;
+		if (env_auth && env_auth[0] && access(env_auth, R_OK) == 0)
+			has_upstream = 1;
+		else if (home && home[0]) {
+			snprintf(auth_path, sizeof(auth_path), "%s/.pi/agent/auth.json", home);
+			if (access(auth_path, R_OK) == 0)
+				has_upstream = 1;
+		}
+		if (!has_upstream) {
+			fprintf(stderr, "Failed to initialize model registry\n");
+			return -1;
+		}
 	}
 
 	if (pthread_mutex_init(&g_engine.job_mutex, NULL) != 0)
@@ -2285,3 +2298,24 @@ qllm_engine_wait(int timeout_ms)
 	return 0;
 #endif
 }
+
+int
+auren_engine_next_job_id(void)
+{
+	int id;
+	if (!engine_running())
+		return -1;
+	pthread_mutex_lock(&g_engine.job_mutex);
+	id = g_engine.next_job_id++;
+	pthread_mutex_unlock(&g_engine.job_mutex);
+	return id;
+}
+
+int
+auren_engine_push_external_result(const struct auren_engine_result *r)
+{
+	if (!r || !engine_running())
+		return -1;
+	return completion_push(r);
+}
+

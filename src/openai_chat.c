@@ -10,6 +10,7 @@
 #include "auren-engine.h"
 #include "auren-registry.h"
 #include "auren-pending.h"
+#include "auren-upstream.h"
 
 #include <ttypt/axil.h>
 
@@ -101,6 +102,32 @@ handler_chat_completions(socket_t cfd, char *body)
 
 	struct json_object *mo = json_object_object_get(req, "model");
 	const char *model_id = mo && json_object_is_type(mo, json_type_string) ? json_object_get_string(mo) : NULL;
+
+	/* 1. Check if model routes to upstream cloud backend (Antigravity, Kilo, Copilot, or Aliases) */
+	struct auren_upstream_route upstream_route;
+	enum auren_upstream_provider prov = auren_upstream_resolve_model(model_id, NULL, &upstream_route);
+	if (prov != AUREN_UPSTREAM_NONE) {
+		if (stream) {
+			axil_header_set(cfd, "Content-Type", "text/event-stream");
+			axil_header_set(cfd, "Cache-Control", "no-cache");
+		} else {
+			axil_header_set(cfd, "Content-Type", "application/json");
+		}
+		handle = axil_respond_defer(cfd, 200);
+		if (!handle) {
+			chat_respond_error(cfd, 503, "unavailable");
+			goto out;
+		}
+
+		if (auren_upstream_submit_chat(&upstream_route, body, stream, make_pending(handle, stream, 0)) != 0) {
+			axil_respond_defer_abort(handle);
+			chat_respond_error(cfd, 503, "upstream submit failed");
+			goto out;
+		}
+		goto out;
+	}
+
+	/* 2. Otherwise route to local GGUF engine */
 	if (model_id && model_id[0] && strcmp(model_id, "default") != 0) {
 		const struct qllm_model_entry *me = qllm_registry_find_for_cap(QLLM_CAP_CHAT, model_id);
 		if (!me) {
@@ -155,6 +182,14 @@ static int
 handler_models(socket_t cfd, char *body __attribute__((unused)))
 {
 	struct json_object *resp = qllm_registry_models_json();
+	if (!resp) {
+		resp = json_object_new_object();
+		json_object_object_add(resp, "object", json_object_new_string("list"));
+		json_object_object_add(resp, "data", json_object_new_array());
+	}
+	struct json_object *data = json_object_object_get(resp, "data");
+	if (data)
+		auren_upstream_append_models_json(data);
 	const char *s = json_object_to_json_string(resp);
 	axil_header_set(cfd, "Content-Type", "application/json");
 	axil_respond(cfd, 200, s);

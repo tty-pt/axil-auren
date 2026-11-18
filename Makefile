@@ -15,11 +15,11 @@ LDFLAGS-engine-test-Linux = -Wl,-rpath,${pwd}/lib
 
 LDLIBS-auren-chat-Windows := -lws2_32
 
-libaxil-auren-obj-y := src/libauren.o src/auren-engine.o src/auren-registry.o src/openai_embed.o src/openai_chat.o src/auren-collections.o src/systemone.o src/systemone-choice.o
+libaxil-auren-obj-y := src/libauren.o src/auren-engine.o src/auren-registry.o src/openai_embed.o src/openai_chat.o src/auren-collections.o src/systemone.o src/systemone-choice.o src/auren-upstream.o
 libaxil-auren-obj-y-Linux := src/vulkan.o
 libaxil-auren-obj-y-Darwin := src/metal.o
 
-LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lstele -ljson-c \
+LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lstele -ljson-c -lcurl \
 	-lllama -lpthread -lm
 LDLIBS-libaxil-auren-Unix := -lggml -lggml-cpu -lggml-base
 LDLIBS-libaxil-auren-Linux := -ldl -lstdc++ -lgomp -lvulkan -lggml-vulkan

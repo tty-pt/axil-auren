@@ -125,6 +125,13 @@ int auren_engine_wake_fd(void);
  */
 int auren_engine_wait(int timeout_ms);
 
+/*
+ * Allocate a unique job ID (thread-safe) and push an external completion result
+ * (e.g. from an upstream cloud worker thread) into the engine's completion queue.
+ */
+int auren_engine_next_job_id(void);
+int auren_engine_push_external_result(const struct auren_engine_result *r);
+
 /* Compatibility aliases */
 #define qllm_engine_init auren_engine_init
 #define qllm_engine_shutdown auren_engine_shutdown

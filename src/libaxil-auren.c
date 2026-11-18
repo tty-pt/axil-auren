@@ -15,6 +15,7 @@
 #include "systemone.h"
 #include "auren-engine.h"
 #include "auren-pending.h"
+#include "auren-upstream.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -395,7 +396,8 @@ auren_init(void)
 	                 (access("auren.json", R_OK) == 0) ||
 	                 (home_auren[0] && access(home_auren, R_OK) == 0) ||
 	                 (home_dot_auren[0] && access(home_dot_auren, R_OK) == 0) ||
-	                 (home_config_auren[0] && access(home_config_auren, R_OK) == 0);
+	                 (home_config_auren[0] && access(home_config_auren, R_OK) == 0) ||
+	                 auren_upstream_has_credentials();
 
 	if (!has_models) {
 		stl_syslog(STL_LOG_ERR, "No model configuration set; auren engine disabled\n");
@@ -423,6 +425,7 @@ auren_init(void)
 	axil_fd_watch(auren_engine_wake_fd());
 #endif
 
+	auren_upstream_init();
 	openai_embed_init(auren_model_path);
 	openai_chat_init(auren_model_path);
 	auren_collections_init();
@@ -441,6 +444,7 @@ xy_install(void)
 XY_MODULE_API void
 xy_shutdown(void)
 {
+	auren_upstream_shutdown();
 	auren_engine_shutdown();
 	openai_embed_shutdown();
 	openai_chat_shutdown();

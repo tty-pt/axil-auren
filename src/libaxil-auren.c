@@ -294,7 +294,7 @@ drain(void *cbud __attribute__((unused)),
 				axil_write(fd, r->payload, strlen(r->payload));
 				axil_write(fd, "\n\n", 2);
 			}
-			axil_write(fd, "data: [DONE]\n\n", 15);
+			axil_write(fd, "data: [DONE]\n\n", 14);
 			axil_respond_defer_done(p->handle);
 		} else if (r->err) {
 			axil_respond_defer_abort(p->handle);

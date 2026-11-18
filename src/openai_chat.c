@@ -100,12 +100,17 @@ handler_chat_completions(socket_t cfd, char *body)
 	if (sm)
 		stream = json_object_get_boolean(sm) != 0;
 
+	/* Extract reasoning_effort from request for upstream routing */
+	struct json_object *re_obj = json_object_object_get(req, "reasoning_effort");
+	const char *requested_effort = (re_obj && json_object_is_type(re_obj, json_type_string))
+		? json_object_get_string(re_obj) : NULL;
+
 	struct json_object *mo = json_object_object_get(req, "model");
 	const char *model_id = mo && json_object_is_type(mo, json_type_string) ? json_object_get_string(mo) : NULL;
 
 	/* 1. Check if model routes to upstream cloud backend (Antigravity, Kilo, Copilot, or Aliases) */
 	struct auren_upstream_route upstream_route;
-	enum auren_upstream_provider prov = auren_upstream_resolve_model(model_id, NULL, &upstream_route);
+	enum auren_upstream_provider prov = auren_upstream_resolve_model(model_id, requested_effort, &upstream_route);
 	if (prov != AUREN_UPSTREAM_NONE) {
 		if (stream) {
 			axil_header_set(cfd, "Content-Type", "text/event-stream");

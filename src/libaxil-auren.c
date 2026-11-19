@@ -67,10 +67,11 @@ make_pending(void *handle, int mode, int sid)
 	pending_t *p = malloc(sizeof(*p));
 
 	if (p) {
+		socket_t fd = handle ? (socket_t)(intptr_t)handle : (socket_t)sid;
 		p->handle = handle;
 		p->mode = mode;
 		p->sid = sid;
-		p->epoch = 0;
+		p->epoch = (fd >= 0 && fd < FD_SETSIZE) ? fdis[fd].epoch : 0;
 	}
 	return p;
 }
@@ -237,6 +238,11 @@ drain(void *cbud __attribute__((unused)),
 		return;
 
 	if (r->kind == QE_JOB_EMBED) {
+		socket_t fd = (socket_t)(intptr_t)p->handle;
+		if (fd < 0 || fd >= FD_SETSIZE || fdis[fd].epoch != p->epoch) {
+			free(p);
+			return;
+		}
 		if (r->err)
 			axil_respond_defer_abort(p->handle);
 		else
@@ -274,6 +280,11 @@ drain(void *cbud __attribute__((unused)),
 	if (r->kind == QE_JOB_CHAT_ONESHOT) {
 		socket_t fd = (socket_t)(intptr_t)p->handle;
 
+		if (fd < 0 || fd >= FD_SETSIZE || fdis[fd].epoch != p->epoch) {
+			free(p);
+			return;
+		}
+
 		if (p->mode && r->more) {
 			axil_write(fd, "data: ", 6);
 			if (r->payload)
@@ -306,6 +317,11 @@ drain(void *cbud __attribute__((unused)),
 	}
 
 	if (r->kind == QE_JOB_SYSTEMONE) {
+		socket_t fd = (socket_t)(intptr_t)p->handle;
+		if (fd < 0 || fd >= FD_SETSIZE || fdis[fd].epoch != p->epoch) {
+			free(p);
+			return;
+		}
 		if (r->err)
 			axil_respond_defer_abort(p->handle);
 		else
@@ -337,6 +353,7 @@ XY_IMPL(int, on_axil_disconnect, socket_t, fd)
 		stl_syslog(STL_LOG_ERR, "session close queue full\n");
 
 	fdi->busy = 0;
+	fdi->epoch++;
 	line_reset(fdi);
 	return 0;
 }

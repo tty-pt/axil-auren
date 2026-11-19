@@ -112,6 +112,11 @@ handler_chat_completions(socket_t cfd, char *body)
 	struct auren_upstream_route upstream_route;
 	enum auren_upstream_provider prov = auren_upstream_resolve_model(model_id, requested_effort, &upstream_route);
 	if (prov != AUREN_UPSTREAM_NONE) {
+		char *body_copy = strdup(body);
+		if (!body_copy) {
+			chat_respond_error(cfd, 503, "out of memory");
+			goto out;
+		}
 		if (stream) {
 			axil_header_set(cfd, "Content-Type", "text/event-stream");
 			axil_header_set(cfd, "Cache-Control", "no-cache");
@@ -120,15 +125,20 @@ handler_chat_completions(socket_t cfd, char *body)
 		}
 		handle = axil_respond_defer(cfd, 200);
 		if (!handle) {
+			free(body_copy);
 			chat_respond_error(cfd, 503, "unavailable");
 			goto out;
 		}
 
-		if (auren_upstream_submit_chat(&upstream_route, body, stream, make_pending(handle, stream, 0)) != 0) {
+		pending_t *p = make_pending(handle, stream, 0);
+		if (!p || auren_upstream_submit_chat(&upstream_route, body_copy, stream, p) != 0) {
+			free(p);
+			free(body_copy);
 			axil_respond_defer_abort(handle);
 			chat_respond_error(cfd, 503, "upstream submit failed");
 			goto out;
 		}
+		free(body_copy);
 		goto out;
 	}
 
@@ -159,6 +169,11 @@ handler_chat_completions(socket_t cfd, char *body)
 
 	/* Send status + headers now, stream/complete the body later from the
 	 * loop thread when the engine's worker finishes (`drain` in qllmd.c). */
+	char *body_copy = strdup(body);
+	if (!body_copy) {
+		chat_respond_error(cfd, 503, "out of memory");
+		goto out;
+	}
 	if (stream) {
 		axil_header_set(cfd, "Content-Type", "text/event-stream");
 		axil_header_set(cfd, "Cache-Control", "no-cache");
@@ -167,15 +182,20 @@ handler_chat_completions(socket_t cfd, char *body)
 	}
 	handle = axil_respond_defer(cfd, 200);
 	if (!handle) {
+		free(body_copy);
 		chat_respond_error(cfd, 503, "unavailable");
 		goto out;
 	}
 
-	if (qllm_engine_chat_oneshot_model_session(model_id, sess_id[0] ? sess_id : NULL, body, make_pending(handle, stream, 0), NULL) != 0) {
+	pending_t *p = make_pending(handle, stream, 0);
+	if (!p || qllm_engine_chat_oneshot_model_session(model_id, sess_id[0] ? sess_id : NULL, body_copy, p, NULL) != 0) {
+		free(p);
+		free(body_copy);
 		axil_respond_defer_abort(handle);
 		chat_respond_error(cfd, 503, "engine busy");
 		goto out;
 	}
+	free(body_copy);
 
 out:
 	if (req)

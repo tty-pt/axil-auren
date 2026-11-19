@@ -39,16 +39,17 @@
 #define COPILOT_USER_AGENT "GitHubCopilotChat/0.35.0"
 
 /* Ring cache for tool_call_id -> thoughtSignature */
-#define SIG_CACHE_SIZE 512
+#define SIG_CACHE_SIZE 4096
 
 struct sig_cache_entry {
 	char call_id[128];
-	char sig[512];
+	char sig[2048];
 };
 
 static struct sig_cache_entry g_sig_cache[SIG_CACHE_SIZE];
 static int g_sig_cache_idx = 0;
 static pthread_mutex_t g_sig_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_tool_call_seq = 0;
 
 /* In-memory auth cache */
 struct auth_state {
@@ -115,6 +116,13 @@ auren_upstream_cache_thought_sig(const char *tool_call_id, const char *sig)
 		return;
 
 	pthread_mutex_lock(&g_sig_lock);
+	for (int i = 0; i < SIG_CACHE_SIZE; ++i) {
+		if (g_sig_cache[i].call_id[0] && strcmp(g_sig_cache[i].call_id, tool_call_id) == 0) {
+			snprintf(g_sig_cache[i].sig, sizeof(g_sig_cache[i].sig), "%s", sig);
+			pthread_mutex_unlock(&g_sig_lock);
+			return;
+		}
+	}
 	int idx = g_sig_cache_idx % SIG_CACHE_SIZE;
 	snprintf(g_sig_cache[idx].call_id, sizeof(g_sig_cache[idx].call_id), "%s", tool_call_id);
 	snprintf(g_sig_cache[idx].sig, sizeof(g_sig_cache[idx].sig), "%s", sig);
@@ -902,11 +910,12 @@ auren_upstream_build_antigravity_request(
 	struct json_object *messages = json_object_object_get(openai_req, "messages");
 	struct json_object *contents = json_object_new_array();
 	/* Pre-scan tool_calls to resolve tool_call_id -> tool_name for tool responses */
-	struct {
+	struct tool_id_entry {
 		char id[128];
 		char name[128];
-	} tool_id_map[64];
+	} *tool_id_map = NULL;
 	int tool_id_map_count = 0;
+	int tool_id_map_cap = 0;
 
 	if (messages && json_object_is_type(messages, json_type_array)) {
 		size_t n_msgs = json_object_array_length(messages);
@@ -915,12 +924,20 @@ auren_upstream_build_antigravity_request(
 			struct json_object *tc_arr = m ? json_object_object_get(m, "tool_calls") : NULL;
 			if (tc_arr && json_object_is_type(tc_arr, json_type_array)) {
 				size_t n_tc = json_object_array_length(tc_arr);
-				for (size_t j = 0; j < n_tc && tool_id_map_count < 64; ++j) {
+				for (size_t j = 0; j < n_tc; ++j) {
 					struct json_object *tc = json_object_array_get_idx(tc_arr, j);
 					struct json_object *id_o = tc ? json_object_object_get(tc, "id") : NULL;
 					struct json_object *fn = tc ? json_object_object_get(tc, "function") : NULL;
 					struct json_object *fn_name = fn ? json_object_object_get(fn, "name") : NULL;
 					if (id_o && fn_name) {
+						if (tool_id_map_count >= tool_id_map_cap) {
+							int ncap = tool_id_map_cap == 0 ? 64 : tool_id_map_cap * 2;
+							struct tool_id_entry *nmap = realloc(tool_id_map, (size_t)ncap * sizeof(*tool_id_map));
+							if (!nmap)
+								break;
+							tool_id_map = nmap;
+							tool_id_map_cap = ncap;
+						}
 						snprintf(tool_id_map[tool_id_map_count].id, sizeof(tool_id_map[0].id), "%s", json_object_get_string(id_o));
 						snprintf(tool_id_map[tool_id_map_count].name, sizeof(tool_id_map[0].name), "%s", json_object_get_string(fn_name));
 						tool_id_map_count++;
@@ -930,7 +947,7 @@ auren_upstream_build_antigravity_request(
 		}
 	}
 
-	char system_acc[16384] = {0};
+	struct mem_buf system_acc = {0};
 	if (messages && json_object_is_type(messages, json_type_array)) {
 		size_t n_msgs = json_object_array_length(messages);
 		for (size_t i = 0; i < n_msgs; ++i) {
@@ -943,10 +960,25 @@ auren_upstream_build_antigravity_request(
 			struct json_object *c_obj = json_object_object_get(msg, "content");
 
 			if (strcmp(role, "system") == 0 || strcmp(role, "developer") == 0) {
-				const char *text = c_obj ? json_object_get_string(c_obj) : "";
-				if (text && text[0]) {
-					if (system_acc[0]) strncat(system_acc, "\n\n", sizeof(system_acc) - strlen(system_acc) - 1);
-					strncat(system_acc, text, sizeof(system_acc) - strlen(system_acc) - 1);
+				if (c_obj && json_object_is_type(c_obj, json_type_string)) {
+					const char *text = json_object_get_string(c_obj);
+					if (text && text[0]) {
+						if (system_acc.len > 0)
+							curl_write_mem("\n\n", 1, 2, &system_acc);
+						curl_write_mem((void *)text, 1, strlen(text), &system_acc);
+					}
+				} else if (c_obj && json_object_is_type(c_obj, json_type_array)) {
+					size_t n_parts = json_object_array_length(c_obj);
+					for (size_t p_i = 0; p_i < n_parts; ++p_i) {
+						struct json_object *elem = json_object_array_get_idx(c_obj, p_i);
+						struct json_object *to = elem ? json_object_object_get(elem, "text") : NULL;
+						const char *text = to ? json_object_get_string(to) : NULL;
+						if (text && text[0]) {
+							if (system_acc.len > 0)
+								curl_write_mem("\n\n", 1, 2, &system_acc);
+							curl_write_mem((void *)text, 1, strlen(text), &system_acc);
+						}
+					}
 				}
 				continue;
 			}
@@ -982,7 +1014,7 @@ auren_upstream_build_antigravity_request(
 						const char *id_str = fn_id ? json_object_get_string(fn_id) : "";
 
 						/* Gemini 3/4 requires thoughtSignature. Check if cached */
-						char sig_buf[512] = {0};
+						char sig_buf[2048] = {0};
 						int has_sig = auren_upstream_lookup_thought_sig(id_str, sig_buf, sizeof(sig_buf));
 
 						struct json_object *part = json_object_new_object();
@@ -1097,21 +1129,23 @@ auren_upstream_build_antigravity_request(
 			}
 		}
 	}
+	free(tool_id_map);
 	json_object_object_add(req, "contents", contents);
 
 	/* System Instruction */
-	if (system_acc[0]) {
-		char *sanitized = auren_upstream_sanitize_system_prompt(system_acc);
+	if (system_acc.data && system_acc.len > 0) {
+		char *sanitized = auren_upstream_sanitize_system_prompt(system_acc.data);
 		struct json_object *sys_inst = json_object_new_object();
 		json_object_object_add(sys_inst, "role", json_object_new_string("user"));
 		struct json_object *sparts = json_object_new_array();
 		struct json_object *sp = json_object_new_object();
-		json_object_object_add(sp, "text", json_object_new_string(sanitized ? sanitized : system_acc));
+		json_object_object_add(sp, "text", json_object_new_string(sanitized ? sanitized : system_acc.data));
 		json_object_array_add(sparts, sp);
 		json_object_object_add(sys_inst, "parts", sparts);
 		json_object_object_add(req, "systemInstruction", sys_inst);
 		free(sanitized);
 	}
+	free(system_acc.data);
 
 	/* Tools declarations */
 	struct json_object *openai_tools = json_object_object_get(openai_req, "tools");
@@ -1183,6 +1217,7 @@ struct upstream_worker_job {
 	int stream;
 	void *ud;
 	int job_id;
+	int emitted_any;
 };
 
 /* State for processing streamed Cloud Code SSE */
@@ -1191,10 +1226,8 @@ struct agy_stream_parser {
 	int job_id;
 	void *ud;
 	const char *model_id;
-	char line_buf[65536];
-	size_t line_len;
-	char full_content[131072];
-	size_t full_content_len;
+	struct mem_buf line_buf;
+	struct mem_buf full_content;
 	int tc_index;
 	int emitted_any_chunk;
 	int has_tool_calls;
@@ -1206,12 +1239,7 @@ agy_emit_chunk(struct agy_stream_parser *p, const char *delta_key, const char *d
 {
 	if (!p->stream) {
 		if (strcmp(delta_key, "content") == 0 && delta_val) {
-			size_t vlen = strlen(delta_val);
-			if (p->full_content_len + vlen < sizeof(p->full_content) - 1) {
-				memcpy(p->full_content + p->full_content_len, delta_val, vlen);
-				p->full_content_len += vlen;
-				p->full_content[p->full_content_len] = '\0';
-			}
+			curl_write_mem((void *)delta_val, 1, strlen(delta_val), &p->full_content);
 		}
 		return;
 	}
@@ -1372,11 +1400,14 @@ agy_parse_sse_line(struct agy_stream_parser *p, const char *line)
 
 					const char *fn_name = name_o ? json_object_get_string(name_o) : "tool";
 					const char *fn_args = args_o ? json_object_to_json_string(args_o) : "{}";
-					char call_id[64];
-					if (id_o && json_object_is_type(id_o, json_type_string))
+					char call_id[128];
+					if (id_o && json_object_is_type(id_o, json_type_string) && json_object_get_string(id_o)[0]) {
 						snprintf(call_id, sizeof(call_id), "%s", json_object_get_string(id_o));
-					else
-						snprintf(call_id, sizeof(call_id), "call_%s_%d", fn_name, p->tc_index + 1);
+					} else {
+						uint64_t seq = __sync_add_and_fetch(&g_tool_call_seq, 1);
+						snprintf(call_id, sizeof(call_id), "call_%d_%llu_%s_%d",
+							p->job_id, (unsigned long long)seq, fn_name, p->tc_index + 1);
+					}
 
 					if (tsig_o && json_object_is_type(tsig_o, json_type_string))
 						auren_upstream_cache_thought_sig(call_id, json_object_get_string(tsig_o));
@@ -1394,18 +1425,23 @@ curl_write_agy_stream(void *ptr, size_t size, size_t nmemb, void *userdata)
 {
 	size_t total = size * nmemb;
 	struct agy_stream_parser *p = userdata;
+	pending_t *pend = p->ud;
+	if (pend && __sync_fetch_and_add(&pend->cancelled, 0))
+		return 0;
+
 	const char *src = ptr;
 
 	for (size_t i = 0; i < total; ++i) {
 		char c = src[i];
 		if (c == '\n') {
-			p->line_buf[p->line_len] = '\0';
-			if (p->line_len > 0)
-				agy_parse_sse_line(p, p->line_buf);
-			p->line_len = 0;
+			if (p->line_buf.data && p->line_buf.len > 0) {
+				p->line_buf.data[p->line_buf.len] = '\0';
+				agy_parse_sse_line(p, p->line_buf.data);
+			}
+			p->line_buf.len = 0;
 		} else if (c != '\r') {
-			if (p->line_len < sizeof(p->line_buf) - 1)
-				p->line_buf[p->line_len++] = c;
+			if (curl_write_mem(&c, 1, 1, &p->line_buf) != 1)
+				return 0;
 		}
 	}
 	return total;
@@ -1416,8 +1452,7 @@ struct openai_stream_parser {
 	int stream;
 	int job_id;
 	void *ud;
-	char line_buf[65536];
-	size_t line_len;
+	struct mem_buf line_buf;
 	struct mem_buf full_body;
 	int emitted_any;
 };
@@ -1449,6 +1484,9 @@ curl_write_openai_stream(void *ptr, size_t size, size_t nmemb, void *userdata)
 {
 	size_t total = size * nmemb;
 	struct openai_stream_parser *p = userdata;
+	pending_t *pend = p->ud;
+	if (pend && __sync_fetch_and_add(&pend->cancelled, 0))
+		return 0;
 
 	if (!p->stream) {
 		curl_write_mem(ptr, size, nmemb, &p->full_body);
@@ -1459,13 +1497,14 @@ curl_write_openai_stream(void *ptr, size_t size, size_t nmemb, void *userdata)
 	for (size_t i = 0; i < total; ++i) {
 		char c = src[i];
 		if (c == '\n') {
-			p->line_buf[p->line_len] = '\0';
-			if (p->line_len > 0)
-				openai_parse_sse_line(p, p->line_buf);
-			p->line_len = 0;
+			if (p->line_buf.data && p->line_buf.len > 0) {
+				p->line_buf.data[p->line_buf.len] = '\0';
+				openai_parse_sse_line(p, p->line_buf.data);
+			}
+			p->line_buf.len = 0;
 		} else if (c != '\r') {
-			if (p->line_len < sizeof(p->line_buf) - 1)
-				p->line_buf[p->line_len++] = c;
+			if (curl_write_mem(&c, 1, 1, &p->line_buf) != 1)
+				return 0;
 		}
 	}
 	return total;
@@ -1530,8 +1569,13 @@ execute_antigravity_request(struct upstream_worker_job *job)
 	long http_code = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
+	pending_t *pend = job->ud;
+	int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+
 	/* If daily endpoint failed with 404 or connection error, try fallback endpoint */
-	if ((res != CURLE_OK || http_code != 200) && !parser.emitted_any_chunk) {
+	if ((res != CURLE_OK || http_code != 200) && !parser.emitted_any_chunk && !is_cancelled) {
+		parser.line_buf.len = 0;
+		parser.full_content.len = 0;
 		snprintf(endpoint_url, sizeof(endpoint_url), "%s/v1internal:streamGenerateContent?alt=sse", AGY_FALLBACK_ENDPOINT);
 		curl_easy_setopt(curl, CURLOPT_URL, endpoint_url);
 		res = curl_easy_perform(curl);
@@ -1541,14 +1585,23 @@ execute_antigravity_request(struct upstream_worker_job *job)
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	json_object_put(agy_req);
+	free(parser.line_buf.data);
 
-	if (res != CURLE_OK || http_code != 200)
+	if (parser.emitted_any_chunk)
+		job->emitted_any = 1;
+
+	if (res != CURLE_OK || http_code != 200) {
+		if (parser.tool_calls_arr)
+			json_object_put(parser.tool_calls_arr);
+		free(parser.full_content.data);
 		return -1;
+	}
 
 	/* Finish response */
 	if (job->stream) {
 		if (parser.tool_calls_arr)
 			json_object_put(parser.tool_calls_arr);
+		free(parser.full_content.data);
 		struct auren_engine_result fin = {
 			.job_id = job->job_id,
 			.kind = AUREN_JOB_CHAT_ONESHOT,
@@ -1572,9 +1625,10 @@ execute_antigravity_request(struct upstream_worker_job *job)
 		struct json_object *choice = json_object_new_object();
 		struct json_object *message = json_object_new_object();
 
+		const char *fc_str = parser.full_content.data ? parser.full_content.data : "";
 		json_object_object_add(message, "role", json_object_new_string("assistant"));
-		if (parser.full_content[0] || !parser.has_tool_calls)
-			json_object_object_add(message, "content", json_object_new_string(parser.full_content));
+		if (fc_str[0] || !parser.has_tool_calls)
+			json_object_object_add(message, "content", json_object_new_string(fc_str));
 		else
 			json_object_object_add(message, "content", NULL);
 
@@ -1598,6 +1652,7 @@ execute_antigravity_request(struct upstream_worker_job *job)
 			.ud = job->ud,
 		};
 		json_object_put(resp);
+		free(parser.full_content.data);
 		auren_engine_push_external_result(&fin);
 	}
 	return 0;
@@ -1651,7 +1706,11 @@ execute_kilo_request(struct upstream_worker_job *job)
 	long http_code = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
-	if ((res != CURLE_OK || http_code != 200) && !parser.emitted_any) {
+	pending_t *pend = job->ud;
+	int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+
+	if ((res != CURLE_OK || http_code != 200) && !parser.emitted_any && !is_cancelled) {
+		parser.line_buf.len = 0;
 		curl_easy_setopt(curl, CURLOPT_URL, KILO_FALLBACK_GATEWAY);
 		res = curl_easy_perform(curl);
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -1660,6 +1719,10 @@ execute_kilo_request(struct upstream_worker_job *job)
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	json_object_put(req_obj);
+	free(parser.line_buf.data);
+
+	if (parser.emitted_any)
+		job->emitted_any = 1;
 
 	if (res != CURLE_OK || http_code != 200) {
 		free(parser.full_body.data);
@@ -1747,6 +1810,10 @@ execute_copilot_request(struct upstream_worker_job *job)
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	json_object_put(req_obj);
+	free(parser.line_buf.data);
+
+	if (parser.emitted_any)
+		job->emitted_any = 1;
 
 	if (res != CURLE_OK || http_code != 200) {
 		free(parser.full_body.data);
@@ -1782,6 +1849,7 @@ upstream_worker_thread(void *arg)
 {
 	struct upstream_worker_job *job = arg;
 	int ok = -1;
+	pending_t *pend = job->ud;
 
 	if (job->route.provider == AUREN_UPSTREAM_ANTIGRAVITY) {
 		ok = execute_antigravity_request(job);
@@ -1793,8 +1861,9 @@ upstream_worker_thread(void *arg)
 		/* Try Antigravity first */
 		job->route.provider = AUREN_UPSTREAM_ANTIGRAVITY;
 		ok = execute_antigravity_request(job);
-		if (ok != 0) {
-			/* Fallback to Kilo free */
+		int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+		if (ok != 0 && !is_cancelled && !job->emitted_any) {
+			/* Fallback to Kilo free only if not cancelled and no partial stream emitted */
 			job->route.provider = AUREN_UPSTREAM_KILO;
 			snprintf(job->route.canonical_id, sizeof(job->route.canonical_id), "kilo-auto/free");
 			ok = execute_kilo_request(job);

@@ -56,6 +56,7 @@ struct qllm_context {
 	int32_t			 current_block_idx;
 	/* Per-call generation cap; 0 = bounded only by max_tokens (n_ctx). */
 	int32_t			 gen_limit;
+	pthread_mutex_t		 lock;
 };
 
 #define QLLM_MAGIC 0x514C4C4D
@@ -1010,6 +1011,7 @@ qllm_create(const struct qllm_config *cfg)
 
 	qctx->magic = QLLM_MAGIC;
 	qctx->current_seq = 0;
+	pthread_mutex_init(&qctx->lock, NULL);
 
 	qctx->model_path = strdup(cfg->model_path);
 
@@ -1111,6 +1113,7 @@ qllm_free(struct qllm_context *qctx)
 	free(qctx->token_buf);
 	free(qctx->cached_tokens);
 	free(qctx->seq_ids);
+	pthread_mutex_destroy(&qctx->lock);
 
 #if defined(MOCK_BUILD)
 	qllm_record_freed(qctx);
@@ -1457,14 +1460,17 @@ qllm_embed(struct qllm_context *qctx,
 	int32_t n_tokens;
 	const float *embd;
 	int32_t i;
+	int ret = -1;
 
 	if (!QLLM_VALID(qctx) || !text || !out)
 		return -1;
 
+	pthread_mutex_lock(&qctx->lock);
+
 	if (!qctx->ctx) {
 		qctx->ctx = llama_init_from_model(qctx->model, qctx->params);
 		if (!qctx->ctx)
-			return -1;
+			goto out_unlock;
 	} else {
 		llama_memory_t mem = llama_get_memory(qctx->ctx);
 		if (mem)
@@ -1484,26 +1490,27 @@ qllm_embed(struct qllm_context *qctx,
 				  qctx->max_tokens,
 				  true,
 				  true);
-	if (n_tokens < 0)
-		return -1;
-
-	if (n_tokens == 0)
-		return -1;
+	if (n_tokens <= 0)
+		goto out_unlock;
 
 	if (qllm_decode_tokens(qctx, qctx->token_buf, n_tokens, 1) != 0)
-		return -1;
+		goto out_unlock;
 
 	embd = llama_get_embeddings_seq(qctx->ctx, 0);
 	if (!embd)
-		return -1;
+		goto out_unlock;
 
 	if (out_dim < (size_t) qctx->n_embd)
-		return -1;
+		goto out_unlock;
 
 	for (i = 0; i < qctx->n_embd; ++i)
 		out[i] = embd[i];
 
-	return qctx->n_embd;
+	ret = qctx->n_embd;
+
+out_unlock:
+	pthread_mutex_unlock(&qctx->lock);
+	return ret;
 }
 
 int

@@ -13,6 +13,7 @@ struct pending {
 	int   		mode;
 	int   		sid;
 	unsigned long	epoch;
+	volatile int	cancelled;
 };
 typedef struct pending pending_t;
 

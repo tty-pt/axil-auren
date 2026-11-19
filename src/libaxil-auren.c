@@ -50,6 +50,7 @@ typedef struct fd_info {
 	char			line_buf[BUFSIZ * 4];
 	unsigned		line_pos;
 	unsigned		busy;
+	unsigned		has_session;
 	unsigned long		epoch;	/* bumps on each accept; guards stale jobs */
 } fdi_t;
 
@@ -72,6 +73,7 @@ make_pending(void *handle, int mode, int sid)
 		p->mode = mode;
 		p->sid = sid;
 		p->epoch = (fd >= 0 && fd < FD_SETSIZE) ? fdis[fd].epoch : 0;
+		p->cancelled = 0;
 	}
 	return p;
 }
@@ -181,6 +183,7 @@ do_ASK(socket_t fd, int argc, char *argv[])
 	}
 
 	fdi->busy = 1;
+	fdi->has_session = 1;
 	{
 		pending_t *p = make_pending(NULL, 0, (int)fd);
 
@@ -204,6 +207,8 @@ static void
 do_CHAT(socket_t fd, int argc __attribute__((unused)),
     char *argv[] __attribute__((unused)))
 {
+	if (fd >= 0 && fd < FD_SETSIZE)
+		fdis[fd].has_session = 1;
 	/* Clear the connection's session history + KV in the engine. */
 	if (qllm_engine_session_reset((int)fd, NULL, NULL) != 0)
 		stl_syslog(STL_LOG_ERR, "chat reset queue full\n");
@@ -255,9 +260,12 @@ drain(void *cbud __attribute__((unused)),
 		socket_t fd = (socket_t)p->sid;
 
 		/* The connection moved on (closed and its fd reused): these
-		 * results belong to a dead generation — drop them entirely. */
-		if (fdis[fd].epoch != p->epoch) {
-			free(p);
+		 * results belong to a dead generation — mark cancelled and
+		 * only free p on the terminal result (!r->more). */
+		if (fd < 0 || fd >= FD_SETSIZE || fdis[fd].epoch != p->epoch) {
+			__sync_lock_test_and_set(&p->cancelled, 1);
+			if (!r->more)
+				free(p);
 			return;
 		}
 
@@ -281,7 +289,9 @@ drain(void *cbud __attribute__((unused)),
 		socket_t fd = (socket_t)(intptr_t)p->handle;
 
 		if (fd < 0 || fd >= FD_SETSIZE || fdis[fd].epoch != p->epoch) {
-			free(p);
+			__sync_lock_test_and_set(&p->cancelled, 1);
+			if (!r->more)
+				free(p);
 			return;
 		}
 
@@ -330,7 +340,8 @@ drain(void *cbud __attribute__((unused)),
 		return;
 	}
 
-	free(p);
+	if (!r->more)
+		free(p);
 }
 
 /* The library's terms (this module) implement the axil host hooks. The engine
@@ -339,6 +350,7 @@ drain(void *cbud __attribute__((unused)),
 XY_IMPL(int, on_axil_connect, socket_t, fd)
 {
 	fdis[fd].busy = 0;
+	fdis[fd].has_session = 0;
 	fdis[fd].epoch++;
 	line_reset(&fdis[fd]);
 	return 0;
@@ -348,9 +360,12 @@ XY_IMPL(int, on_axil_disconnect, socket_t, fd)
 {
 	fdi_t *fdi = &fdis[fd];
 
-	/* Release the engine session; the worker frees ctx/history. */
-	if (qllm_engine_session_close((int)fd, NULL, NULL) != 0)
-		stl_syslog(STL_LOG_ERR, "session close queue full\n");
+	/* Release the engine session only if this connection opened one. */
+	if (fdi->has_session) {
+		if (qllm_engine_session_close((int)fd, NULL, NULL) != 0)
+			stl_syslog(STL_LOG_ERR, "session close queue full\n");
+		fdi->has_session = 0;
+	}
 
 	fdi->busy = 0;
 	fdi->epoch++;

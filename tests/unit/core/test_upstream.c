@@ -162,3 +162,76 @@ TEST(upstream_append_models_list)
 
 	json_object_put(data);
 }
+
+TEST(upstream_large_system_prompt_and_many_tool_calls)
+{
+	struct auren_upstream_route r;
+	auren_upstream_resolve_model("smart", NULL, &r);
+
+	/* 1. Build a 40 KB system prompt (exceeds old 16 KB fixed buffer) */
+	size_t sys_len = 40000;
+	char *big_sys = malloc(sys_len + 32);
+	ASSERT_NOT_NULL(big_sys);
+	memset(big_sys, 'A', sys_len);
+	memcpy(big_sys + sys_len, "_TAIL_MARKER", 13);
+
+	/* 2. Cache a 1200-byte thought signature (exceeds old 512B buffer) */
+	char big_sig[1201];
+	memset(big_sig, 'S', 1200);
+	big_sig[1200] = '\0';
+	auren_upstream_cache_thought_sig("call_77_80_read_1", big_sig);
+
+	struct json_object *openai_req = json_object_new_object();
+	json_object_object_add(openai_req, "model", json_object_new_string("smart"));
+	struct json_object *msgs = json_object_new_array();
+
+	struct json_object *sys_msg = json_object_new_object();
+	json_object_object_add(sys_msg, "role", json_object_new_string("system"));
+	json_object_object_add(sys_msg, "content", json_object_new_string(big_sys));
+	json_object_array_add(msgs, sys_msg);
+
+	/* Add 80 tool call / tool response turns (exceeds old 64-entry tool_id_map) */
+	for (int i = 1; i <= 80; ++i) {
+		char cid[64], tname[64];
+		snprintf(cid, sizeof(cid), "call_77_%d_read_1", i);
+		snprintf(tname, sizeof(tname), "tool_num_%d", i);
+
+		struct json_object *asst = json_object_new_object();
+		json_object_object_add(asst, "role", json_object_new_string("assistant"));
+		struct json_object *tcs = json_object_new_array();
+		struct json_object *tc = json_object_new_object();
+		json_object_object_add(tc, "id", json_object_new_string(cid));
+		json_object_object_add(tc, "type", json_object_new_string("function"));
+		struct json_object *fn = json_object_new_object();
+		json_object_object_add(fn, "name", json_object_new_string(tname));
+		json_object_object_add(fn, "arguments", json_object_new_string("{\"p\":1}"));
+		json_object_object_add(tc, "function", fn);
+		json_object_array_add(tcs, tc);
+		json_object_object_add(asst, "tool_calls", tcs);
+		json_object_array_add(msgs, asst);
+
+		struct json_object *tool_res = json_object_new_object();
+		json_object_object_add(tool_res, "role", json_object_new_string("tool"));
+		json_object_object_add(tool_res, "tool_call_id", json_object_new_string(cid));
+		json_object_object_add(tool_res, "content", json_object_new_string("ok"));
+		json_object_array_add(msgs, tool_res);
+	}
+
+	json_object_object_add(openai_req, "messages", msgs);
+
+	struct json_object *agy_req = auren_upstream_build_antigravity_request(openai_req, &r, "aicode-consumers");
+	ASSERT_NOT_NULL(agy_req);
+
+	const char *full_json = json_object_to_json_string(agy_req);
+	ASSERT_NOT_NULL(full_json);
+	/* Verify 40KB system prompt tail marker was not truncated */
+	ASSERT_NOT_NULL(strstr(full_json, "_TAIL_MARKER"));
+	/* Verify 80th tool response mapped its name and 1200B thoughtSignature was preserved */
+	ASSERT_NOT_NULL(strstr(full_json, "tool_num_80"));
+	ASSERT_NOT_NULL(strstr(full_json, big_sig));
+
+	free(big_sys);
+	json_object_put(openai_req);
+	json_object_put(agy_req);
+}
+

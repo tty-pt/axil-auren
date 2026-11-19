@@ -55,7 +55,7 @@ auren_strndup(const char *s, size_t n)
 #define strndup auren_strndup
 #endif
 
-#define QE_JOB_MAX  64
+#define QE_JOB_MAX  1024
 #define QE_VEC_MAX  4096
 #define QE_SESSIONS 16
 #define QE_MAX_MSGS 256

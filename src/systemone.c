@@ -60,18 +60,29 @@ handler_systemone(socket_t cfd, char *body)
 		model_id = me->id;
 	}
 
+	char *body_copy = strdup(body);
+	if (!body_copy) {
+		systemone_respond_error(cfd, 503, "out of memory");
+		goto out;
+	}
+
 	axil_header_set(cfd, "Content-Type", "application/json");
 	handle = axil_respond_defer(cfd, 200);
 	if (!handle) {
+		free(body_copy);
 		systemone_respond_error(cfd, 503, "service unavailable");
 		goto out;
 	}
 
-	if (qllm_engine_systemone_model(model_id, body, make_pending(handle, 0, 0), NULL) != 0) {
+	pending_t *p = make_pending(handle, 0, 0);
+	if (!p || qllm_engine_systemone_model(model_id, body_copy, p, NULL) != 0) {
+		free(p);
+		free(body_copy);
 		axil_respond_defer_abort(handle);
 		systemone_respond_error(cfd, 503, "engine busy");
 		goto out;
 	}
+	free(body_copy);
 
 out:
 	if (req)

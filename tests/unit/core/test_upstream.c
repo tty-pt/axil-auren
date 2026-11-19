@@ -82,11 +82,15 @@ TEST(upstream_resolve_kilo_models)
 
 TEST(upstream_sanitize_system_prompt)
 {
-	const char *orig = "You are an assistant running inside pi, a coding agent harness. Be practical, and tool-aware.";
+	const char *orig = "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code. Also supports codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md). Be practical, and tool-aware.";
 	char *clean = auren_upstream_sanitize_system_prompt(orig);
 	ASSERT_NOT_NULL(clean);
 	ASSERT_NULL(strstr(clean, "inside pi"));
-	ASSERT_NOT_NULL(strstr(clean, "running inside your development environment"));
+	ASSERT_NULL(strstr(clean, "and modify code."));
+	ASSERT_NULL(strstr(clean, "codemode scripts"));
+	ASSERT_NOT_NULL(strstr(clean, "running in your development environment"));
+	ASSERT_NOT_NULL(strstr(clean, "Help users inspect files, run commands, and edit code."));
+	ASSERT_NOT_NULL(strstr(clean, "scripted workflows and auxiliary models (docs/codemode.md)"));
 	ASSERT_NOT_NULL(strstr(clean, "practical, and tool aware."));
 	free(clean);
 }
@@ -175,7 +179,7 @@ TEST(upstream_large_system_prompt_and_many_tool_calls)
 	memset(big_sys, 'A', sys_len);
 	memcpy(big_sys + sys_len, "_TAIL_MARKER", 13);
 
-	/* 2. Cache a 1200-byte thought signature (exceeds old 512B buffer) */
+	/* 2. Cache a 1200-byte thought signature on the 80th tool call */
 	char big_sig[1201];
 	memset(big_sig, 'S', 1200);
 	big_sig[1200] = '\0';
@@ -190,7 +194,8 @@ TEST(upstream_large_system_prompt_and_many_tool_calls)
 	json_object_object_add(sys_msg, "content", json_object_new_string(big_sys));
 	json_object_array_add(msgs, sys_msg);
 
-	/* Add 80 tool call / tool response turns (exceeds old 64-entry tool_id_map) */
+	/* Add 80 tool call / tool response turns: turns 1..79 are unsigned (e.g. from Kilo fallback),
+	 * turn 80 has a cached thoughtSignature from Antigravity. */
 	for (int i = 1; i <= 80; ++i) {
 		char cid[64], tname[64];
 		snprintf(cid, sizeof(cid), "call_77_%d_read_1", i);
@@ -226,7 +231,8 @@ TEST(upstream_large_system_prompt_and_many_tool_calls)
 	ASSERT_NOT_NULL(full_json);
 	/* Verify 40KB system prompt tail marker was not truncated */
 	ASSERT_NOT_NULL(strstr(full_json, "_TAIL_MARKER"));
-	/* Verify 80th tool response mapped its name and 1200B thoughtSignature was preserved */
+	/* Verify unsigned turn 1 was degraded into a text observation while signed turn 80 kept functionCall + thoughtSignature */
+	ASSERT_NOT_NULL(strstr(full_json, "Observation from `tool_num_1`"));
 	ASSERT_NOT_NULL(strstr(full_json, "tool_num_80"));
 	ASSERT_NOT_NULL(strstr(full_json, big_sig));
 
@@ -234,4 +240,5 @@ TEST(upstream_large_system_prompt_and_many_tool_calls)
 	json_object_put(openai_req);
 	json_object_put(agy_req);
 }
+
 

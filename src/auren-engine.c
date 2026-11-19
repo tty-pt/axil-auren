@@ -92,6 +92,7 @@ struct qllm_engine {
 
 	int   running;
 	int   quit;
+	pid_t worker_pid;
 
 	pthread_t       worker;
 	pthread_mutex_t job_mutex;
@@ -2002,6 +2003,7 @@ qllm_engine_init(const char *model_path)
 		return -1;
 	}
 
+	g_engine.worker_pid = getpid();
 	g_engine.running = 1;
 	g_engine.next_job_id = 1;
 	return 0;
@@ -2026,7 +2028,8 @@ qllm_engine_shutdown(void)
 	pthread_cond_broadcast(&g_engine.comp_cond);
 	pthread_mutex_unlock(&g_engine.comp_mutex);
 
-	pthread_join(g_engine.worker, NULL);
+	if (g_engine.worker_pid == getpid())
+		pthread_join(g_engine.worker, NULL);
 
 	engine_drain_pipe();
 
@@ -2074,6 +2077,13 @@ job_submit_session(int kind, const char *model, const char *session_key, int sid
 		return -1;
 
 	pthread_mutex_lock(&g_engine.job_mutex);
+	if (g_engine.worker_pid != getpid()) {
+		if (pthread_create(&g_engine.worker, NULL, worker_main, NULL) != 0) {
+			pthread_mutex_unlock(&g_engine.job_mutex);
+			return -1;
+		}
+		g_engine.worker_pid = getpid();
+	}
 	if (g_engine.job_count >= QE_JOB_MAX) {
 		pthread_mutex_unlock(&g_engine.job_mutex);
 		return -1;

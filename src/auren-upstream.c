@@ -794,10 +794,13 @@ auren_upstream_sanitize_system_prompt(const char *input)
 		const char *target;
 		const char *repl;
 	} rules[] = {
-		{ "running inside pi, a coding agent harness", "running inside your development environment" },
-		{ "inside pi, a coding agent harness", "inside your development environment" },
-		{ "running inside pi", "running inside your development environment" },
-		{ "inside pi", "inside your development environment" },
+		{ "running inside pi, a coding agent harness", "running in your development environment" },
+		{ "inside pi, a coding agent harness", "in your development environment" },
+		{ "running inside pi", "running in your development environment" },
+		{ "inside pi", "in your development environment" },
+		{ "Help users inspect files, run commands, and modify code.", "Help users inspect files, run commands, and edit code." },
+		{ "codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)", "scripted workflows and auxiliary models (docs/codemode.md)" },
+		{ "codemode scripts and non-LLM models", "scripted workflows and auxiliary models" },
 		{ "practical, and tool-aware.", "practical, and tool aware." },
 		{ NULL, NULL }
 	};
@@ -855,6 +858,47 @@ clean_schema_object(struct json_object *obj)
 	}
 }
 
+/* Append a {role, parts} turn to contents[], merging consecutive turns of the same role */
+static void
+append_content_turn(struct json_object *contents, const char *role, struct json_object *parts)
+{
+	if (!contents || !role || !parts) {
+		if (parts)
+			json_object_put(parts);
+		return;
+	}
+
+	size_t n_parts = json_object_array_length(parts);
+	if (n_parts == 0) {
+		json_object_put(parts);
+		return;
+	}
+
+	size_t n_contents = json_object_array_length(contents);
+	if (n_contents > 0) {
+		struct json_object *last = json_object_array_get_idx(contents, n_contents - 1);
+		struct json_object *last_role_o = last ? json_object_object_get(last, "role") : NULL;
+		const char *last_role = last_role_o ? json_object_get_string(last_role_o) : "";
+		if (strcmp(last_role, role) == 0) {
+			struct json_object *last_parts = json_object_object_get(last, "parts");
+			if (last_parts && json_object_is_type(last_parts, json_type_array)) {
+				for (size_t i = 0; i < n_parts; ++i) {
+					struct json_object *p = json_object_array_get_idx(parts, i);
+					if (p)
+						json_object_array_add(last_parts, json_object_get(p));
+				}
+				json_object_put(parts);
+				return;
+			}
+		}
+	}
+
+	struct json_object *content_turn = json_object_new_object();
+	json_object_object_add(content_turn, "role", json_object_new_string(role));
+	json_object_object_add(content_turn, "parts", parts);
+	json_object_array_add(contents, content_turn);
+}
+
 struct json_object *
 auren_upstream_build_antigravity_request(
 	struct json_object *openai_req,
@@ -909,10 +953,14 @@ auren_upstream_build_antigravity_request(
 	/* Parse Messages */
 	struct json_object *messages = json_object_object_get(openai_req, "messages");
 	struct json_object *contents = json_object_new_array();
-	/* Pre-scan tool_calls to resolve tool_call_id -> tool_name for tool responses */
+	int requires_sig = (!route->is_claude && !route->is_gpt_oss);
+
+	/* Pre-scan tool_calls to resolve tool_call_id -> tool_name, args, and whether signed */
 	struct tool_id_entry {
 		char id[128];
 		char name[128];
+		char *args;
+		int dropped;
 	} *tool_id_map = NULL;
 	int tool_id_map_count = 0;
 	int tool_id_map_cap = 0;
@@ -924,11 +972,21 @@ auren_upstream_build_antigravity_request(
 			struct json_object *tc_arr = m ? json_object_object_get(m, "tool_calls") : NULL;
 			if (tc_arr && json_object_is_type(tc_arr, json_type_array)) {
 				size_t n_tc = json_object_array_length(tc_arr);
+				int turn_dropped = 0;
+				if (requires_sig && n_tc > 0) {
+					struct json_object *first_tc = json_object_array_get_idx(tc_arr, 0);
+					struct json_object *first_id_o = first_tc ? json_object_object_get(first_tc, "id") : NULL;
+					const char *first_id = first_id_o ? json_object_get_string(first_id_o) : "";
+					char sig_probe[2048] = {0};
+					if (!auren_upstream_lookup_thought_sig(first_id, sig_probe, sizeof(sig_probe)))
+						turn_dropped = 1;
+				}
 				for (size_t j = 0; j < n_tc; ++j) {
 					struct json_object *tc = json_object_array_get_idx(tc_arr, j);
 					struct json_object *id_o = tc ? json_object_object_get(tc, "id") : NULL;
 					struct json_object *fn = tc ? json_object_object_get(tc, "function") : NULL;
 					struct json_object *fn_name = fn ? json_object_object_get(fn, "name") : NULL;
+					struct json_object *fn_args = fn ? json_object_object_get(fn, "arguments") : NULL;
 					if (id_o && fn_name) {
 						if (tool_id_map_count >= tool_id_map_cap) {
 							int ncap = tool_id_map_cap == 0 ? 64 : tool_id_map_cap * 2;
@@ -940,6 +998,9 @@ auren_upstream_build_antigravity_request(
 						}
 						snprintf(tool_id_map[tool_id_map_count].id, sizeof(tool_id_map[0].id), "%s", json_object_get_string(id_o));
 						snprintf(tool_id_map[tool_id_map_count].name, sizeof(tool_id_map[0].name), "%s", json_object_get_string(fn_name));
+						const char *args_s = fn_args ? json_object_get_string(fn_args) : "{}";
+						tool_id_map[tool_id_map_count].args = strdup(args_s ? args_s : "{}");
+						tool_id_map[tool_id_map_count].dropped = turn_dropped;
 						tool_id_map_count++;
 					}
 				}
@@ -984,11 +1045,11 @@ auren_upstream_build_antigravity_request(
 			}
 
 			/* Non-system message -> contents */
-			struct json_object *content_turn = json_object_new_object();
+			const char *turn_role = "user";
 			struct json_object *parts = json_object_new_array();
 
 			if (strcmp(role, "assistant") == 0) {
-				json_object_object_add(content_turn, "role", json_object_new_string("model"));
+				turn_role = "model";
 				/* Check text */
 				if (c_obj && json_object_is_type(c_obj, json_type_string)) {
 					const char *txt = json_object_get_string(c_obj);
@@ -997,85 +1058,137 @@ auren_upstream_build_antigravity_request(
 						json_object_object_add(p, "text", json_object_new_string(txt));
 						json_object_array_add(parts, p);
 					}
+				} else if (c_obj && json_object_is_type(c_obj, json_type_array)) {
+					size_t n_cparts = json_object_array_length(c_obj);
+					for (size_t cp_i = 0; cp_i < n_cparts; ++cp_i) {
+						struct json_object *elem = json_object_array_get_idx(c_obj, cp_i);
+						struct json_object *to = elem ? json_object_object_get(elem, "text") : NULL;
+						const char *txt = to ? json_object_get_string(to) : NULL;
+						if (txt && txt[0]) {
+							struct json_object *p = json_object_new_object();
+							json_object_object_add(p, "text", json_object_new_string(txt));
+							json_object_array_add(parts, p);
+						}
+					}
 				}
 				/* Check tool_calls */
 				struct json_object *tc_arr = json_object_object_get(msg, "tool_calls");
 				if (tc_arr && json_object_is_type(tc_arr, json_type_array)) {
 					size_t num_tc = json_object_array_length(tc_arr);
-					for (size_t tc_i = 0; tc_i < num_tc; ++tc_i) {
-						struct json_object *tc = json_object_array_get_idx(tc_arr, tc_i);
-						struct json_object *fn = tc ? json_object_object_get(tc, "function") : NULL;
-						struct json_object *fn_name = fn ? json_object_object_get(fn, "name") : NULL;
-						struct json_object *fn_args = fn ? json_object_object_get(fn, "arguments") : NULL;
-						struct json_object *fn_id = tc ? json_object_object_get(tc, "id") : NULL;
+					int turn_dropped = 0;
+					if (requires_sig && num_tc > 0) {
+						struct json_object *first_tc = json_object_array_get_idx(tc_arr, 0);
+						struct json_object *first_id_o = first_tc ? json_object_object_get(first_tc, "id") : NULL;
+						const char *first_id = first_id_o ? json_object_get_string(first_id_o) : "";
+						char sig_probe[2048] = {0};
+						if (!auren_upstream_lookup_thought_sig(first_id, sig_probe, sizeof(sig_probe)))
+							turn_dropped = 1;
+					}
 
-						const char *name_str = fn_name ? json_object_get_string(fn_name) : "tool";
-						const char *args_str = fn_args ? json_object_get_string(fn_args) : "{}";
-						const char *id_str = fn_id ? json_object_get_string(fn_id) : "";
+					if (turn_dropped) {
+						/* Gemini 3/4 rejects functionCall parts without a thoughtSignature on the first call.
+						 * Degrade unsigned historical tool calls into a placeholder text part if needed. */
+						if (json_object_array_length(parts) == 0) {
+							struct json_object *p = json_object_new_object();
+							json_object_object_add(p, "text", json_object_new_string("[Earlier tool call omitted because its signature is unavailable.]"));
+							json_object_array_add(parts, p);
+						}
+					} else {
+						for (size_t tc_i = 0; tc_i < num_tc; ++tc_i) {
+							struct json_object *tc = json_object_array_get_idx(tc_arr, tc_i);
+							struct json_object *fn = tc ? json_object_object_get(tc, "function") : NULL;
+							struct json_object *fn_name = fn ? json_object_object_get(fn, "name") : NULL;
+							struct json_object *fn_args = fn ? json_object_object_get(fn, "arguments") : NULL;
+							struct json_object *fn_id = tc ? json_object_object_get(tc, "id") : NULL;
 
-						/* Gemini 3/4 requires thoughtSignature. Check if cached */
-						char sig_buf[2048] = {0};
-						int has_sig = auren_upstream_lookup_thought_sig(id_str, sig_buf, sizeof(sig_buf));
+							const char *name_str = fn_name ? json_object_get_string(fn_name) : "tool";
+							const char *args_str = fn_args ? json_object_get_string(fn_args) : "{}";
+							const char *id_str = fn_id ? json_object_get_string(fn_id) : "";
 
-						struct json_object *part = json_object_new_object();
-						struct json_object *fc = json_object_new_object();
-						json_object_object_add(fc, "name", json_object_new_string(name_str));
-						struct json_object *parsed_args = json_tokener_parse(args_str);
-						if (!parsed_args) parsed_args = json_object_new_object();
-						json_object_object_add(fc, "args", parsed_args);
-						if (id_str[0])
-							json_object_object_add(fc, "id", json_object_new_string(id_str));
+							char sig_buf[2048] = {0};
+							int has_sig = auren_upstream_lookup_thought_sig(id_str, sig_buf, sizeof(sig_buf));
 
-						json_object_object_add(part, "functionCall", fc);
-						if (has_sig)
-							json_object_object_add(part, "thoughtSignature", json_object_new_string(sig_buf));
+							struct json_object *part = json_object_new_object();
+							struct json_object *fc = json_object_new_object();
+							json_object_object_add(fc, "name", json_object_new_string(name_str));
+							struct json_object *parsed_args = json_tokener_parse(args_str);
+							if (!parsed_args) parsed_args = json_object_new_object();
+							json_object_object_add(fc, "args", parsed_args);
+							if (id_str[0])
+								json_object_object_add(fc, "id", json_object_new_string(id_str));
 
-						json_object_array_add(parts, part);
+							json_object_object_add(part, "functionCall", fc);
+							if (has_sig)
+								json_object_object_add(part, "thoughtSignature", json_object_new_string(sig_buf));
+
+							json_object_array_add(parts, part);
+						}
 					}
 				}
 			} else if (strcmp(role, "tool") == 0) {
-				json_object_object_add(content_turn, "role", json_object_new_string("user"));
+				turn_role = "user";
 				struct json_object *tid = json_object_object_get(msg, "tool_call_id");
 				const char *tid_str = tid ? json_object_get_string(tid) : "";
 				const char *raw_res = c_obj ? json_object_get_string(c_obj) : "";
 				struct json_object *name_obj = json_object_object_get(msg, "name");
 				const char *tool_name = name_obj ? json_object_get_string(name_obj) : NULL;
-				if (!tool_name && tid_str && tid_str[0]) {
+				const char *tool_args = "{}";
+				int is_dropped = requires_sig ? 1 : 0;
+
+				if (tid_str && tid_str[0]) {
 					for (int m = 0; m < tool_id_map_count; ++m) {
 						if (strcmp(tool_id_map[m].id, tid_str) == 0) {
-							tool_name = tool_id_map[m].name;
+							if (!tool_name)
+								tool_name = tool_id_map[m].name;
+							if (tool_id_map[m].args)
+								tool_args = tool_id_map[m].args;
+							is_dropped = tool_id_map[m].dropped;
 							break;
 						}
 					}
 				}
 				if (!tool_name) tool_name = "tool";
 
-				struct json_object *part = json_object_new_object();
-				struct json_object *fr = json_object_new_object();
-				json_object_object_add(fr, "name", json_object_new_string(tool_name));
-				if (route->is_claude || route->is_gpt_oss) {
-					if (tid_str && tid_str[0])
-						json_object_object_add(fr, "id", json_object_new_string(tid_str));
-				}
-
-				struct json_object *resp_obj = NULL;
-				if (raw_res && raw_res[0] == '{') {
-					resp_obj = json_tokener_parse(raw_res);
-					if (resp_obj && !json_object_is_type(resp_obj, json_type_object)) {
-						json_object_put(resp_obj);
-						resp_obj = NULL;
+				if (is_dropped) {
+					/* Degrade tool response corresponding to an unsigned historical tool call into a text observation */
+					size_t obs_len = strlen(tool_name) + strlen(tool_args) + (raw_res ? strlen(raw_res) : 0) + 64;
+					char *obs_buf = malloc(obs_len);
+					if (obs_buf) {
+						snprintf(obs_buf, obs_len, "[Observation from `%s` (%s):\n%s]",
+							tool_name, tool_args, raw_res ? raw_res : "");
+						struct json_object *part = json_object_new_object();
+						json_object_object_add(part, "text", json_object_new_string(obs_buf));
+						json_object_array_add(parts, part);
+						free(obs_buf);
 					}
+				} else {
+					struct json_object *part = json_object_new_object();
+					struct json_object *fr = json_object_new_object();
+					json_object_object_add(fr, "name", json_object_new_string(tool_name));
+					if (route->is_claude || route->is_gpt_oss) {
+						if (tid_str && tid_str[0])
+							json_object_object_add(fr, "id", json_object_new_string(tid_str));
+					}
+
+					struct json_object *resp_obj = NULL;
+					if (raw_res && raw_res[0] == '{') {
+						resp_obj = json_tokener_parse(raw_res);
+						if (resp_obj && !json_object_is_type(resp_obj, json_type_object)) {
+							json_object_put(resp_obj);
+							resp_obj = NULL;
+						}
+					}
+					if (!resp_obj) {
+						resp_obj = json_object_new_object();
+						json_object_object_add(resp_obj, "output", json_object_new_string(raw_res ? raw_res : ""));
+					}
+					json_object_object_add(fr, "response", resp_obj);
+					json_object_object_add(part, "functionResponse", fr);
+					json_object_array_add(parts, part);
 				}
-				if (!resp_obj) {
-					resp_obj = json_object_new_object();
-					json_object_object_add(resp_obj, "output", json_object_new_string(raw_res ? raw_res : ""));
-				}
-				json_object_object_add(fr, "response", resp_obj);
-				json_object_object_add(part, "functionResponse", fr);
-				json_object_array_add(parts, part);
 			} else {
 				/* user */
-				json_object_object_add(content_turn, "role", json_object_new_string("user"));
+				turn_role = "user";
 				if (c_obj && json_object_is_type(c_obj, json_type_string)) {
 					struct json_object *p = json_object_new_object();
 					json_object_object_add(p, "text", json_object_new_string(json_object_get_string(c_obj)));
@@ -1120,16 +1233,27 @@ auren_upstream_build_antigravity_request(
 				}
 			}
 
-			if (json_object_array_length(parts) > 0) {
-				json_object_object_add(content_turn, "parts", parts);
-				json_object_array_add(contents, content_turn);
-			} else {
-				json_object_put(parts);
-				json_object_put(content_turn);
-			}
+			append_content_turn(contents, turn_role, parts);
 		}
 	}
+	for (int m = 0; m < tool_id_map_count; ++m)
+		free(tool_id_map[m].args);
 	free(tool_id_map);
+
+	/* Ensure contents does not end on a model turn */
+	size_t final_n = json_object_array_length(contents);
+	if (final_n > 0) {
+		struct json_object *last = json_object_array_get_idx(contents, final_n - 1);
+		struct json_object *last_role_o = last ? json_object_object_get(last, "role") : NULL;
+		const char *last_role = last_role_o ? json_object_get_string(last_role_o) : "";
+		if (strcmp(last_role, "model") == 0) {
+			struct json_object *cont_parts = json_object_new_array();
+			struct json_object *cont_p = json_object_new_object();
+			json_object_object_add(cont_p, "text", json_object_new_string("Continue."));
+			json_object_array_add(cont_parts, cont_p);
+			append_content_turn(contents, "user", cont_parts);
+		}
+	}
 	json_object_object_add(req, "contents", contents);
 
 	/* System Instruction */
@@ -1196,11 +1320,24 @@ auren_upstream_build_antigravity_request(
 
 	if (route->is_thinking) {
 		struct json_object *tc = json_object_new_object();
-		json_object_object_add(tc, "includeThoughts", json_object_new_boolean(1));
 		int budget = -1;
-		if (strcmp(route->effort, "low") == 0) budget = 1000;
+		if (strcmp(route->effort, "extra-low") == 0) budget = 128;
+		else if (strcmp(route->effort, "low") == 0) budget = 1000;
 		else if (strcmp(route->effort, "medium") == 0) budget = 4000;
 		else if (strcmp(route->effort, "high") == 0 || strcmp(route->effort, "xhigh") == 0) budget = -1;
+
+		/* If caller explicitly requests <= 1024 max_tokens with no tool definitions
+		 * on a low-effort flash route (e.g. Jarvis voice agent), cap thinkingBudget
+		 * at 128 tokens so it routes directly to Gemini 3.8 Flash low without thinking overhead.
+		 */
+		struct json_object *req_mt = json_object_object_get(openai_req, "max_tokens");
+		if (req_mt && json_object_is_type(req_mt, json_type_int)) {
+			int mt_val = json_object_get_int(req_mt);
+			if (mt_val > 0 && mt_val <= 1024 && budget == 1000 && !openai_tools)
+				budget = 128;
+		}
+
+		json_object_object_add(tc, "includeThoughts", json_object_new_boolean(1));
 		json_object_object_add(tc, "thinkingBudget", json_object_new_int(budget));
 		json_object_object_add(gen_cfg, "thinkingConfig", tc);
 	}
@@ -1228,6 +1365,7 @@ struct agy_stream_parser {
 	const char *model_id;
 	struct mem_buf line_buf;
 	struct mem_buf full_content;
+	struct mem_buf err_buf;
 	int tc_index;
 	int emitted_any_chunk;
 	int has_tool_calls;
@@ -1260,6 +1398,47 @@ agy_emit_chunk(struct agy_stream_parser *p, const char *delta_key, const char *d
 	json_object_object_add(choice, "delta", delta);
 	json_object_object_add(choice, "index", json_object_new_int(0));
 	json_object_object_add(choice, "finish_reason", NULL);
+	json_object_array_add(choices, choice);
+	json_object_object_add(obj, "choices", choices);
+
+	const char *s = json_object_to_json_string(obj);
+	if (s) {
+		struct auren_engine_result r = {
+			.job_id = p->job_id,
+			.kind = AUREN_JOB_CHAT_ONESHOT,
+			.err = 0,
+			.more = 1,
+			.payload = strdup(s),
+			.ud = p->ud,
+		};
+		auren_engine_push_external_result(&r);
+		p->emitted_any_chunk = 1;
+	}
+	json_object_put(obj);
+}
+
+static void
+agy_emit_finish_chunk(struct agy_stream_parser *p)
+{
+	if (!p->stream)
+		return;
+
+	struct json_object *obj = json_object_new_object();
+	char id[64];
+	snprintf(id, sizeof(id), "chatcmpl-%d", p->job_id);
+	json_object_object_add(obj, "id", json_object_new_string(id));
+	json_object_object_add(obj, "object", json_object_new_string("chat.completion.chunk"));
+	json_object_object_add(obj, "created", json_object_new_int64((int64_t)time(NULL)));
+	json_object_object_add(obj, "model", json_object_new_string(p->model_id ? p->model_id : "gemini"));
+
+	struct json_object *choices = json_object_new_array();
+	struct json_object *choice = json_object_new_object();
+	struct json_object *delta = json_object_new_object();
+
+	json_object_object_add(choice, "delta", delta);
+	json_object_object_add(choice, "index", json_object_new_int(0));
+	json_object_object_add(choice, "finish_reason",
+		json_object_new_string(p->has_tool_calls ? "tool_calls" : "stop"));
 	json_object_array_add(choices, choice);
 	json_object_object_add(obj, "choices", choices);
 
@@ -1429,6 +1608,13 @@ curl_write_agy_stream(void *ptr, size_t size, size_t nmemb, void *userdata)
 	if (pend && __sync_fetch_and_add(&pend->cancelled, 0))
 		return 0;
 
+	/* Capture first 2KB of raw response in case of non-200 HTTP error */
+	if (!p->emitted_any_chunk && p->err_buf.len < 2048) {
+		size_t rem = 2048 - p->err_buf.len;
+		size_t to_copy = total < rem ? total : rem;
+		curl_write_mem(ptr, 1, to_copy, &p->err_buf);
+	}
+
 	const char *src = ptr;
 
 	for (size_t i = 0; i < total; ++i) {
@@ -1454,6 +1640,7 @@ struct openai_stream_parser {
 	void *ud;
 	struct mem_buf line_buf;
 	struct mem_buf full_body;
+	struct mem_buf err_buf;
 	int emitted_any;
 };
 
@@ -1488,6 +1675,12 @@ curl_write_openai_stream(void *ptr, size_t size, size_t nmemb, void *userdata)
 	if (pend && __sync_fetch_and_add(&pend->cancelled, 0))
 		return 0;
 
+	if (!p->emitted_any && p->err_buf.len < 2048) {
+		size_t rem = 2048 - p->err_buf.len;
+		size_t to_copy = total < rem ? total : rem;
+		curl_write_mem(ptr, 1, to_copy, &p->err_buf);
+	}
+
 	if (!p->stream) {
 		curl_write_mem(ptr, size, nmemb, &p->full_body);
 		return total;
@@ -1511,11 +1704,29 @@ curl_write_openai_stream(void *ptr, size_t size, size_t nmemb, void *userdata)
 }
 
 static int
+is_transient_curl_or_http_error(CURLcode res, long http_code)
+{
+	if (res == CURLE_COULDNT_RESOLVE_HOST ||
+	    res == CURLE_COULDNT_RESOLVE_PROXY ||
+	    res == CURLE_COULDNT_CONNECT ||
+	    res == CURLE_OPERATION_TIMEDOUT ||
+	    res == CURLE_GOT_NOTHING ||
+	    res == CURLE_RECV_ERROR ||
+	    res == CURLE_SEND_ERROR ||
+	    res == CURLE_SSL_CONNECT_ERROR)
+		return 1;
+	if (res == CURLE_OK && (http_code == 502 || http_code == 503 || http_code == 504))
+		return 1;
+	return 0;
+}
+
+static int
 execute_antigravity_request(struct upstream_worker_job *job)
 {
 	pthread_mutex_lock(&g_auth.lock);
 	if (antigravity_refresh_token_locked() != 0) {
 		pthread_mutex_unlock(&g_auth.lock);
+		stl_syslog(STL_LOG_ERR, "auren-upstream: antigravity token refresh failed for job %d", job->job_id);
 		return -1;
 	}
 	char access_token[1024];
@@ -1563,19 +1774,60 @@ execute_antigravity_request(struct upstream_worker_job *job)
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str);
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_agy_stream);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &parser);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 
-	CURLcode res = curl_easy_perform(curl);
+	CURLcode res = CURLE_OK;
 	long http_code = 0;
-	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
 	pending_t *pend = job->ud;
-	int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+	int is_cancelled = 0;
 
-	/* If daily endpoint failed with 404 or connection error, try fallback endpoint */
-	if ((res != CURLE_OK || http_code != 200) && !parser.emitted_any_chunk && !is_cancelled) {
+	/* Retry transient DNS/network/502-504 errors up to 3 attempts */
+	for (int attempt = 0; attempt < 3; ++attempt) {
+		if (attempt > 0) {
+			sleep((unsigned int)attempt);
+			is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+			if (is_cancelled)
+				break;
+			parser.line_buf.len = 0;
+			parser.full_content.len = 0;
+			parser.err_buf.len = 0;
+		}
+		res = curl_easy_perform(curl);
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+		is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+		if (is_cancelled || parser.emitted_any_chunk)
+			break;
+		if (res == CURLE_OK && http_code == 200)
+			break;
+		if (res == CURLE_OK && http_code == 401 && attempt == 0) {
+			/* Force OAuth refresh on 401 and retry once */
+			pthread_mutex_lock(&g_auth.lock);
+			g_auth.agy_expires_ms = 0;
+			int ref_ok = antigravity_refresh_token_locked();
+			if (ref_ok == 0)
+				snprintf(access_token, sizeof(access_token), "%s", g_auth.agy_access);
+			pthread_mutex_unlock(&g_auth.lock);
+			if (ref_ok == 0) {
+				curl_slist_free_all(headers);
+				headers = NULL;
+				snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", access_token);
+				headers = curl_slist_append(headers, auth_hdr);
+				headers = curl_slist_append(headers, "Content-Type: application/json");
+				headers = curl_slist_append(headers, "User-Agent: " AGY_USER_AGENT);
+				curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+				continue;
+			}
+		}
+		if (!is_transient_curl_or_http_error(res, http_code))
+			break;
+	}
+
+	/* If daily endpoint failed with 404 or transient error, try prod fallback endpoint */
+	if ((res != CURLE_OK || http_code == 404 || http_code >= 500) && !parser.emitted_any_chunk && !is_cancelled) {
 		parser.line_buf.len = 0;
 		parser.full_content.len = 0;
+		parser.err_buf.len = 0;
 		snprintf(endpoint_url, sizeof(endpoint_url), "%s/v1internal:streamGenerateContent?alt=sse", AGY_FALLBACK_ENDPOINT);
 		curl_easy_setopt(curl, CURLOPT_URL, endpoint_url);
 		res = curl_easy_perform(curl);
@@ -1591,14 +1843,21 @@ execute_antigravity_request(struct upstream_worker_job *job)
 		job->emitted_any = 1;
 
 	if (res != CURLE_OK || http_code != 200) {
+		stl_syslog(STL_LOG_ERR,
+			"auren-upstream: antigravity request failed (job=%d model=%s curl=%d http=%ld err=%s)",
+			job->job_id, job->route.runtime_model, (int)res, http_code,
+			parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res));
 		if (parser.tool_calls_arr)
 			json_object_put(parser.tool_calls_arr);
 		free(parser.full_content.data);
+		free(parser.err_buf.data);
 		return -1;
 	}
+	free(parser.err_buf.data);
 
 	/* Finish response */
 	if (job->stream) {
+		agy_emit_finish_chunk(&parser);
 		if (parser.tool_calls_arr)
 			json_object_put(parser.tool_calls_arr);
 		free(parser.full_content.data);
@@ -1700,17 +1959,39 @@ execute_kilo_request(struct upstream_worker_job *job)
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str);
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_openai_stream);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &parser);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 
-	CURLcode res = curl_easy_perform(curl);
+	CURLcode res = CURLE_OK;
 	long http_code = 0;
-	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
 	pending_t *pend = job->ud;
-	int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+	int is_cancelled = 0;
+
+	for (int attempt = 0; attempt < 3; ++attempt) {
+		if (attempt > 0) {
+			sleep((unsigned int)attempt);
+			is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+			if (is_cancelled)
+				break;
+			parser.line_buf.len = 0;
+			parser.full_body.len = 0;
+			parser.err_buf.len = 0;
+		}
+		res = curl_easy_perform(curl);
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+		is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+		if (is_cancelled || parser.emitted_any)
+			break;
+		if (res == CURLE_OK && http_code == 200)
+			break;
+		if (!is_transient_curl_or_http_error(res, http_code))
+			break;
+	}
 
 	if ((res != CURLE_OK || http_code != 200) && !parser.emitted_any && !is_cancelled) {
 		parser.line_buf.len = 0;
+		parser.full_body.len = 0;
+		parser.err_buf.len = 0;
 		curl_easy_setopt(curl, CURLOPT_URL, KILO_FALLBACK_GATEWAY);
 		res = curl_easy_perform(curl);
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -1725,9 +2006,15 @@ execute_kilo_request(struct upstream_worker_job *job)
 		job->emitted_any = 1;
 
 	if (res != CURLE_OK || http_code != 200) {
+		stl_syslog(STL_LOG_ERR,
+			"auren-upstream: kilo request failed (job=%d model=%s curl=%d http=%ld err=%s)",
+			job->job_id, job->route.canonical_id, (int)res, http_code,
+			parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res));
 		free(parser.full_body.data);
+		free(parser.err_buf.data);
 		return -1;
 	}
+	free(parser.err_buf.data);
 
 	if (job->stream) {
 		struct auren_engine_result fin = {
@@ -1759,6 +2046,7 @@ execute_copilot_request(struct upstream_worker_job *job)
 	pthread_mutex_lock(&g_auth.lock);
 	if (copilot_refresh_token_locked() != 0) {
 		pthread_mutex_unlock(&g_auth.lock);
+		stl_syslog(STL_LOG_ERR, "auren-upstream: copilot token refresh failed for job %d", job->job_id);
 		return -1;
 	}
 	char access_token[2048];
@@ -1801,11 +2089,34 @@ execute_copilot_request(struct upstream_worker_job *job)
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str);
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_openai_stream);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &parser);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 
-	CURLcode res = curl_easy_perform(curl);
+	CURLcode res = CURLE_OK;
 	long http_code = 0;
-	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+	pending_t *pend = job->ud;
+	int is_cancelled = 0;
+
+	for (int attempt = 0; attempt < 3; ++attempt) {
+		if (attempt > 0) {
+			sleep((unsigned int)attempt);
+			is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+			if (is_cancelled)
+				break;
+			parser.line_buf.len = 0;
+			parser.full_body.len = 0;
+			parser.err_buf.len = 0;
+		}
+		res = curl_easy_perform(curl);
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+		is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+		if (is_cancelled || parser.emitted_any)
+			break;
+		if (res == CURLE_OK && http_code == 200)
+			break;
+		if (!is_transient_curl_or_http_error(res, http_code))
+			break;
+	}
 
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
@@ -1816,9 +2127,15 @@ execute_copilot_request(struct upstream_worker_job *job)
 		job->emitted_any = 1;
 
 	if (res != CURLE_OK || http_code != 200) {
+		stl_syslog(STL_LOG_ERR,
+			"auren-upstream: copilot request failed (job=%d model=%s curl=%d http=%ld err=%s)",
+			job->job_id, job->route.canonical_id, (int)res, http_code,
+			parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res));
 		free(parser.full_body.data);
+		free(parser.err_buf.data);
 		return -1;
 	}
+	free(parser.err_buf.data);
 
 	if (job->stream) {
 		struct auren_engine_result fin = {
@@ -1864,6 +2181,9 @@ upstream_worker_thread(void *arg)
 		int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
 		if (ok != 0 && !is_cancelled && !job->emitted_any) {
 			/* Fallback to Kilo free only if not cancelled and no partial stream emitted */
+			stl_syslog(STL_LOG_WARNING,
+				"auren-upstream: falling back to kilo-auto/free for job %d (requested=%s)",
+				job->job_id, job->route.requested_model);
 			job->route.provider = AUREN_UPSTREAM_KILO;
 			snprintf(job->route.canonical_id, sizeof(job->route.canonical_id), "kilo-auto/free");
 			ok = execute_kilo_request(job);

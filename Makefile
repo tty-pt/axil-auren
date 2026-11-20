@@ -2,11 +2,11 @@ uname := $(shell test "${cross}" = "" && uname || echo ${cross})
 uname != test "${cross}" = "" && uname || echo ${cross}
 
 all-MinGW64 := libaxil-auren
-all-${uname} ?= libaxil-auren auren-chat
+all-${uname} ?= libaxil-auren libren ren
 all := ${all-${uname}}
 
 INSTALL_BIN-MinGW64 :=
-INSTALL_BIN-${uname} ?= auren-chat auren-path auren-list
+INSTALL_BIN-${uname} ?= ren auren-path auren-list
 INSTALL_BIN := ${INSTALL_BIN-${uname}}
 
 engine-test-obj-y :=
@@ -16,11 +16,15 @@ LDFLAGS-engine-test-Linux = -Wl,-rpath,${pwd}/lib
 LDLIBS-auren-chat-Windows := -lws2_32
 
 libaxil-auren-obj-y := src/libauren.o src/auren-engine.o src/auren-registry.o src/openai_embed.o src/openai_chat.o src/auren-collections.o src/systemone.o src/systemone-choice.o src/auren-upstream.o
+libren-obj-y :=
+ren-obj-y :=
 libaxil-auren-obj-y-Linux := src/vulkan.o
 libaxil-auren-obj-y-Darwin := src/metal.o
 
 LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lstele -ljson-c -lcurl \
 	-lllama -lpthread -lm
+LDLIBS-libren := -lxylem -lstele -lcorm -ldl -lmm -lm
+LDLIBS-ren := -Llib -lren -lxylem -lstele -lcorm -ldl -lmm -lm
 LDLIBS-libaxil-auren-Unix := -lggml -lggml-cpu -lggml-base
 LDLIBS-libaxil-auren-Linux := -ldl -lstdc++ -lgomp -lvulkan -lggml-vulkan
 LDLIBS-libaxil-auren-Darwin := -ldl -lc++ -lggml-metal -lggml-blas -lomp \
@@ -68,7 +72,7 @@ omp-version := $(shell ls ${omp} 2>/dev/null | head -n 1)
 omp-version != ls ${omp} 2>/dev/null | head -n 1 || true
 omp := ${omp}/${omp-version}
 
-CFLAGS := -g -I${llamacpp}/../include -I${llamacpp}/../ggml/include -I${vulkan}/include
+CFLAGS := -g -I${llamacpp}/../include -I${llamacpp}/../ggml/include -I${vulkan}/include -I../libxylem/include -I../libstele/include -I../libcorm/include -I../libmm/include -I../libjarvis/include -Iinclude
 CFLAGS-Darwin := -I${omp}/include
 
 ggmlp := ${llamacpp}/ggml/src
@@ -77,6 +81,10 @@ LDFLAGS-libaxil-auren := -L${llamacpp}/src -L${ggmlp} -L${ggmlp}/ggml-cpu -L${gg
 LDFLAGS-libaxil-auren-Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN'
 LDFLAGS-libaxil-auren-Windows := -Wl,--export-all-symbols
 LDFLAGS-Linux := -L${ggmlp}/ggml-vulkan -L${vulkan}/lib
+LDFLAGS-libren := -L${CURDIR}/../libmm/lib -L${CURDIR}/../libxylem/lib -L${CURDIR}/../libstele/lib -L${CURDIR}/../libcorm/lib
+LDFLAGS-libren-Linux := -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/../libxylem/lib -Wl,-rpath,${CURDIR}/../libstele/lib -Wl,-rpath,${CURDIR}/../libcorm/lib
+LDFLAGS-ren := -L${CURDIR}/../libmm/lib -L${CURDIR}/../libxylem/lib -L${CURDIR}/../libstele/lib -L${CURDIR}/../libcorm/lib
+LDFLAGS-ren-Linux := $(LDFLAGS-libren-Linux)
 LDFLAGS-Darwin := -L${ggmlp}/ggml-metal -L${ggmlp}/ggml-blas -L${omp}/lib
 
 CMAKE_FLAGS-Linux := -DGGML_VULKAN=ON
@@ -194,3 +202,33 @@ npm-build:
 
 npm-test: npm-build
 	@node --test npm/tests/auren-client.test.mjs
+
+# ren modules
+mods/fs/mod_fs.so: mods/fs/mod_fs.c include/ttypt/libren.h lib/libren.so
+	@mkdir -p mods/fs
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/fs/mod_fs.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libmm/lib
+
+mods/bash/mod_bash.so: mods/bash/mod_bash.c include/ttypt/libren.h lib/libren.so
+	@mkdir -p mods/bash
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/mod_bash.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libmm/lib
+
+mods/mm/mod_mm.so: mods/mm/mod_mm.c include/ttypt/libren.h lib/libren.so
+	@mkdir -p mods/mm
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/mm/mod_mm.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libmm/lib
+
+mods/jarvis/mod_jarvis.so: mods/jarvis/mod_jarvis.c include/ttypt/libren.h lib/libren.so
+	@mkdir -p mods/jarvis
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/jarvis/mod_jarvis.c $(LDFLAGS) -Llib -lren -ljarvis -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libjarvis/lib -L${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libjarvis/lib -Wl,-rpath,${CURDIR}/../libmm/lib
+
+all: mods/fs/mod_fs.so mods/bash/mod_bash.so mods/mm/mod_mm.so mods/jarvis/mod_jarvis.so
+
+install: install-ren-mods
+.PHONY: install-ren-mods
+install-ren-mods: lib/libren.so mods/fs/mod_fs.so mods/bash/mod_bash.so mods/mm/mod_mm.so mods/jarvis/mod_jarvis.so
+	mkdir -p $(DESTDIR)$(PREFIX)/lib/ren
+	install -m 755 mods/fs/mod_fs.so $(DESTDIR)$(PREFIX)/lib/ren/mod_fs.so
+	install -m 755 mods/bash/mod_bash.so $(DESTDIR)$(PREFIX)/lib/ren/mod_bash.so
+	install -m 755 mods/mm/mod_mm.so $(DESTDIR)$(PREFIX)/lib/ren/mod_mm.so
+	install -m 755 mods/jarvis/mod_jarvis.so $(DESTDIR)$(PREFIX)/lib/ren/mod_jarvis.so
+
+bin/ren: lib/libren.so

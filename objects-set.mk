@@ -1,4 +1,5 @@
 CFLAGS-libaxil-auren-o := -fPIC
+CFLAGS-libren-o := -fPIC
 CFLAGS-libauren-o := -fPIC
 CFLAGS-auren-engine-o := -fPIC
 CFLAGS-auren-registry-o := -fPIC
@@ -9,4 +10,4 @@ CFLAGS-systemone-o := -fPIC
 CFLAGS-systemone-choice-o := -fPIC
 CFLAGS-auren-upstream-o := -fPIC
 CFLAGS-vulkan-o := -fPIC
-CFLAGS-auren-chat-o :=
+CFLAGS-ren-o :=

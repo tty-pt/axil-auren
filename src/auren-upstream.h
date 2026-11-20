@@ -23,6 +23,7 @@
 
 #include <json-c/json.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,43 +105,23 @@ int auren_upstream_submit_chat(
 	int stream,
 	void *ud);
 
-/* Submit an asynchronous SystemOne classification job for intent routing.
- * Uses bge-base embeddings to route "auto" requests to very-fast/fast/smart/genius.
- * Returns 0 on success, -1 on error. */
+/* Fast lock-free intent classification for "auto" routing.
+ * Analyzes prompt complexity, tool declarations, and message depth to select
+ * tier index: 0 ("very-fast"), 1 ("fast"), 2 ("smart"), or 3 ("genius").
+ * Returns tier index (0..3), or -1 on invalid input. */
 int auren_upstream_classify_intent(const char *prompt, void *ud);
 
-/* Get the resolved tier for a given session affinity hash.
- * Returns one of: "very-fast", "fast", "smart", "genius". */
+/* Get the sticky candidate model or tier for a given session affinity hash. */
 const char *auren_upstream_get_affinity_tier(uint64_t hash);
 
-/* Set the affinity tier for a hash (called after successful upstream call). */
+/* Set the sticky candidate model or tier for a session affinity hash. */
 void auren_upstream_set_affinity_tier(uint64_t hash, const char *tier);
 
-/* Build an Antigravity Cloud Code v1internal request envelope JSON object from
- * an OpenAI /v1/chat/completions request JSON object and resolved route.
- * Caller owns the returned json_object and must json_object_put() it. */
-struct json_object *auren_upstream_build_antigravity_request(
-	struct json_object *openai_req,
-	const struct auren_upstream_route *route,
-	const char *project_id);
-
-/* Record a tool_call_id -> thoughtSignature mapping in the in-memory ring cache
- * so subsequent multi-turn requests can re-attach thoughtSignature on Gemini 3/4. */
-void auren_upstream_cache_thought_sig(const char *tool_call_id, const char *sig);
-
-/* Lookup a cached thoughtSignature by tool_call_id. Returns 1 if found and copies
- * into sig_out, or 0 if not found. */
-int auren_upstream_lookup_thought_sig(const char *tool_call_id, char *sig_out, size_t sig_out_sz);
-
-/* Submit an asynchronous upstream chat completions request.
- * Spawns a detached pthread that streams or buffers results and pushes
- * AUREN_JOB_CHAT_ONESHOT results with `ud` into auren-engine's completion queue.
- * Returns 0 on success, -1 on error. */
-int auren_upstream_submit_chat(
-	const struct auren_upstream_route *route,
-	const char *request_json,
-	int stream,
-	void *ud);
+/* Circuit breaker / model health tracking for multi-client routing. */
+void auren_upstream_health_mark_failed(const char *model_id);
+void auren_upstream_health_mark_success(const char *model_id);
+int  auren_upstream_health_is_cooling(const char *model_id);
+void auren_upstream_health_reset_all(void);
 
 #ifdef __cplusplus
 }

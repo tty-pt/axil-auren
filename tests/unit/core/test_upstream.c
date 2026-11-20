@@ -78,6 +78,7 @@ TEST(upstream_resolve_antigravity_models)
 	enum auren_upstream_provider p5 = auren_upstream_resolve_model("gpt-oss-120b", NULL, &r);
 	ASSERT_EQ(p5, AUREN_UPSTREAM_ANTIGRAVITY);
 	ASSERT_EQ(r.is_gpt_oss, 1);
+	ASSERT_STR_EQ(r.runtime_model, "gpt-oss-120b-medium");
 
 	/* New models: Claude 5.5 */
 	enum auren_upstream_provider p6 = auren_upstream_resolve_model("claude-sonnet-5-5", NULL, &r);
@@ -94,8 +95,6 @@ TEST(upstream_resolve_antigravity_models)
 
 	enum auren_upstream_provider p9 = auren_upstream_resolve_model("gemini-2.5-pro", NULL, &r);
 	ASSERT_EQ(p9, AUREN_UPSTREAM_ANTIGRAVITY);
-}
-	ASSERT_STR_EQ(r.runtime_model, "gpt-oss-120b-medium");
 }
 
 TEST(upstream_resolve_kilo_models)
@@ -181,7 +180,10 @@ TEST(upstream_append_models_list)
 
 	int found_flash = 0;
 	int found_kilo = 0;
+	int found_very_fast = 0;
 	int found_fast = 0;
+	int found_smart = 0;
+	int found_genius = 0;
 
 	for (size_t i = 0; i < len; ++i) {
 		struct json_object *item = json_object_array_get_idx(data, i);
@@ -190,14 +192,69 @@ TEST(upstream_append_models_list)
 			const char *id_s = json_object_get_string(id_o);
 			if (strcmp(id_s, "gemini-3.8-flash") == 0) found_flash = 1;
 			if (strcmp(id_s, "kilo-auto/free") == 0) found_kilo = 1;
+			if (strcmp(id_s, "very-fast") == 0) found_very_fast = 1;
 			if (strcmp(id_s, "fast") == 0) found_fast = 1;
+			if (strcmp(id_s, "smart") == 0) found_smart = 1;
+			if (strcmp(id_s, "genius") == 0) found_genius = 1;
 		}
 	}
 	ASSERT_EQ(found_flash, 1);
 	ASSERT_EQ(found_kilo, 1);
+	ASSERT_EQ(found_very_fast, 1);
 	ASSERT_EQ(found_fast, 1);
+	ASSERT_EQ(found_smart, 1);
+	ASSERT_EQ(found_genius, 1);
 
 	json_object_put(data);
+}
+
+TEST(upstream_circuit_breaker_and_session_affinity)
+{
+	auren_upstream_health_reset_all();
+	ASSERT_EQ(auren_upstream_health_is_cooling("gemini-4-hydrogen-low"), 0);
+
+	/* Mark failed -> circuit breaker trips immediately */
+	auren_upstream_health_mark_failed("gemini-4-hydrogen-low");
+	ASSERT_EQ(auren_upstream_health_is_cooling("gemini-4-hydrogen-low"), 1);
+	ASSERT_EQ(auren_upstream_health_is_cooling("gemini-4-hydrogen-high"), 0);
+
+	/* Mark success -> circuit breaker closes immediately */
+	auren_upstream_health_mark_success("gemini-4-hydrogen-low");
+	ASSERT_EQ(auren_upstream_health_is_cooling("gemini-4-hydrogen-low"), 0);
+
+	/* Session affinity ring stores & retrieves sticky models per hash */
+	uint64_t h1 = 0x1122334455667788ULL;
+	uint64_t h2 = 0x8877665544332211ULL;
+	ASSERT_NULL(auren_upstream_get_affinity_tier(h1));
+
+	auren_upstream_set_affinity_tier(h1, "gemini-4-hydrogen-low");
+	auren_upstream_set_affinity_tier(h2, "claude-sonnet-4-6");
+
+	ASSERT_STR_EQ(auren_upstream_get_affinity_tier(h1), "gemini-4-hydrogen-low");
+	ASSERT_STR_EQ(auren_upstream_get_affinity_tier(h2), "claude-sonnet-4-6");
+
+	/* Update existing hash in place */
+	auren_upstream_set_affinity_tier(h1, "copilot/mai-code-2");
+	ASSERT_STR_EQ(auren_upstream_get_affinity_tier(h1), "copilot/mai-code-2");
+}
+
+TEST(upstream_intent_classification)
+{
+	/* Invalid / empty input */
+	ASSERT_EQ(auren_upstream_classify_intent(NULL, NULL), -1);
+	ASSERT_EQ(auren_upstream_classify_intent("", NULL), -1);
+
+	/* Short conversational / command lookup -> very-fast (0) */
+	ASSERT_EQ(auren_upstream_classify_intent("What time is it?", NULL), 0);
+
+	/* Standard coding prompt -> fast (1) */
+	ASSERT_EQ(auren_upstream_classify_intent("Please implement a function to parse the HTTP header in C.", NULL), 1);
+
+	/* Multi-file refactor / debug -> smart (2) */
+	ASSERT_EQ(auren_upstream_classify_intent("Can you refactor the multi-file module loader and debug the memory leak?", NULL), 2);
+
+	/* Complex architecture / race condition / invariant -> genius (3) */
+	ASSERT_EQ(auren_upstream_classify_intent("Analyze the lock-free deadlock and race condition invariant in our engine architecture.", NULL), 3);
 }
 
 TEST(upstream_large_system_prompt_and_many_tool_calls)
@@ -273,5 +330,4 @@ TEST(upstream_large_system_prompt_and_many_tool_calls)
 	json_object_put(openai_req);
 	json_object_put(agy_req);
 }
-
 

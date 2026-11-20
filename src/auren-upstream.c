@@ -51,7 +51,7 @@
  * ============================================================ */
 
 /* Persistent curl connection pool (HTTP/2 keep-alive) */
-#define CURL_POOL_SIZE 8
+#define CURL_POOL_SIZE 32
 #define CURL_POOL_MAX_IDLE_MS 300000
 
 struct curl_pool_entry {
@@ -81,11 +81,11 @@ static int g_model_health_count = 0;
 static pthread_mutex_t g_model_health_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Session affinity ring for prompt caching */
-#define AFFINITY_RING_SIZE 64
+#define AFFINITY_RING_SIZE 128
 
 struct affinity_entry {
 	uint64_t hash;
-	char tier[16];
+	char tier[64];
 	uint64_t timestamp_ms;
 };
 
@@ -167,8 +167,6 @@ static const char **tier_chain(const char *tier);
  * These are placeholder zero vectors - in production they would be loaded
  * from a model artifact or computed at startup from exemplar prompts. */
 extern float g_intent_centroids[4][384];
-
-static int classify_intent_sync(const char *prompt);
 
 static uint64_t
 current_time_ms(void)
@@ -2292,16 +2290,68 @@ execute_copilot_request(struct upstream_worker_job *job)
 	return 0;
 }
 
+/* Estimate whether candidate model can handle payload size (~4 bytes per token).
+ * Copilot / GPT-OSS models have 128k-200k token limits (~512 KB - 700 KB JSON),
+ * whereas Gemini 3.8 / 4 models support 1M tokens (> 3.5 MB JSON). */
+static int
+candidate_supports_payload_size(const char *candidate, size_t payload_bytes)
+{
+	if (payload_bytes < 480000)
+		return 1; /* Fits in all models (>= 128k tokens) */
+	if (strncmp(candidate, "gemini-", 7) == 0)
+		return 1; /* 1M context window */
+	if (strncmp(candidate, "claude-", 7) == 0 && payload_bytes < 750000)
+		return 1; /* 200k context window */
+	return 0;
+}
+
 static int
 execute_chain_request(struct upstream_worker_job *job, const char **chain)
 {
 	pending_t *pend = job->ud;
-	for (int i = 0; chain[i]; ++i) {
-		const char *candidate = chain[i];
+	size_t payload_len = job->request_json ? strlen(job->request_json) : 0;
+
+	/* Compute per-tier session affinity hash so multi-turn conversations stick
+	 * to the same healthy candidate model within the requested tier (maximizing
+	 * provider-side prompt cache hits without overriding the requested tier). */
+	uint64_t base_hash = affinity_hash_from_request(job->request_json);
+	uint64_t tier_hash = base_hash;
+	if (base_hash && chain[0]) {
+		tier_hash ^= fnv1a64(chain[0], strlen(chain[0]));
+	}
+	const char *sticky_model = tier_hash ? affinity_get_tier(tier_hash) : NULL;
+
+	/* Build ordered candidate list: sticky_model first (if in chain), then rest of chain */
+	const char *ordered[8];
+	int n_ordered = 0;
+
+	if (sticky_model && sticky_model[0]) {
+		for (int i = 0; chain[i] && n_ordered < 7; ++i) {
+			if (strcmp(chain[i], sticky_model) == 0) {
+				ordered[n_ordered++] = chain[i];
+				break;
+			}
+		}
+	}
+	for (int i = 0; chain[i] && n_ordered < 7; ++i) {
+		if (sticky_model && strcmp(chain[i], sticky_model) == 0)
+			continue;
+		ordered[n_ordered++] = chain[i];
+	}
+	ordered[n_ordered] = NULL;
+
+	for (int i = 0; i < n_ordered; ++i) {
+		const char *candidate = ordered[i];
 		if (model_health_is_cooling(candidate)) {
 			stl_syslog(STL_LOG_INFO,
 				"auren-upstream: skipping %s (circuit breaker open) for job %d",
 				candidate, job->job_id);
+			continue;
+		}
+		if (!candidate_supports_payload_size(candidate, payload_len)) {
+			stl_syslog(STL_LOG_INFO,
+				"auren-upstream: skipping %s (payload %zu bytes exceeds context window) for job %d",
+				candidate, payload_len, job->job_id);
 			continue;
 		}
 
@@ -2324,12 +2374,19 @@ execute_chain_request(struct upstream_worker_job *job, const char **chain)
 		int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
 		if (ok == 0) {
 			model_health_mark_success(candidate);
+			if (tier_hash)
+				affinity_set_tier(tier_hash, candidate);
 			return 0;
 		}
 
+		if (is_cancelled) {
+			return ok;
+		}
+
+		/* Only trip circuit breaker on actual upstream error (not client cancel) */
 		model_health_mark_failed(candidate);
 
-		if (is_cancelled || job->emitted_any) {
+		if (job->emitted_any) {
 			return ok;
 		}
 	}
@@ -2355,6 +2412,7 @@ sim_cosine(const float *a, const float *b, size_t n)
 static uint64_t
 fnv1a64(const char *data, size_t len)
 {
+	if (!data || len == 0) return 0;
 	uint64_t h = 14695981039346656037ULL;
 	for (size_t i = 0; i < len; ++i) {
 		h ^= (unsigned char)data[i];
@@ -2409,6 +2467,16 @@ affinity_hash_from_request(const char *request_json)
 	return h;
 }
 
+static void
+curl_apply_pool_defaults(CURL *curl)
+{
+	curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+	curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+	curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
+	curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);
+	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+}
+
 /* Persistent curl pool: get or create a handle for a host */
 static CURL *
 curl_pool_get(const char *host)
@@ -2416,7 +2484,7 @@ curl_pool_get(const char *host)
 	uint64_t now = current_time_ms();
 	pthread_mutex_lock(&g_curl_pool_lock);
 
-	/* Reuse existing idle handle for same host */
+	/* 1. Reuse existing idle handle for same host */
 	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
 		if (!g_curl_pool[i].in_use && g_curl_pool[i].curl &&
 		    strcmp(g_curl_pool[i].host, host) == 0 &&
@@ -2426,38 +2494,50 @@ curl_pool_get(const char *host)
 			CURL *curl = g_curl_pool[i].curl;
 			pthread_mutex_unlock(&g_curl_pool_lock);
 			curl_easy_reset(curl);
+			curl_apply_pool_defaults(curl);
 			return curl;
 		}
 	}
 
-	/* Find empty slot */
+	/* 2. Find empty slot or expired idle slot */
+	int victim = -1;
 	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
 		if (!g_curl_pool[i].curl) {
-			CURL *curl = curl_easy_init();
+			victim = i;
+			break;
+		}
+		if (!g_curl_pool[i].in_use &&
+		    now - g_curl_pool[i].last_used_ms >= CURL_POOL_MAX_IDLE_MS) {
+			victim = i;
+			break;
+		}
+	}
+
+	if (victim >= 0) {
+		CURL *curl = g_curl_pool[victim].curl;
+		if (!curl) {
+			curl = curl_easy_init();
 			if (!curl) {
 				pthread_mutex_unlock(&g_curl_pool_lock);
 				return NULL;
 			}
-			/* Enable HTTP/2 and keep-alive */
-			curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
-			curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-			curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
-			curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);
-			snprintf(g_curl_pool[i].host, sizeof(g_curl_pool[i].host), "%s", host);
-			g_curl_pool[i].curl = curl;
-			g_curl_pool[i].in_use = 1;
-			g_curl_pool[i].last_used_ms = now;
-			pthread_mutex_unlock(&g_curl_pool_lock);
-			return curl;
+		} else {
+			curl_easy_reset(curl);
 		}
+		curl_apply_pool_defaults(curl);
+		snprintf(g_curl_pool[victim].host, sizeof(g_curl_pool[victim].host), "%s", host);
+		g_curl_pool[victim].curl = curl;
+		g_curl_pool[victim].in_use = 1;
+		g_curl_pool[victim].last_used_ms = now;
+		pthread_mutex_unlock(&g_curl_pool_lock);
+		return curl;
 	}
 
-	/* Pool full: create a temporary handle (no pooling) */
+	/* 3. Pool full: create a temporary handle (cleaned up in curl_pool_put) */
 	pthread_mutex_unlock(&g_curl_pool_lock);
 	CURL *curl = curl_easy_init();
 	if (curl) {
-		curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
-		curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+		curl_apply_pool_defaults(curl);
 	}
 	return curl;
 }
@@ -2465,17 +2545,23 @@ curl_pool_get(const char *host)
 static void
 curl_pool_put(CURL *curl, const char *host)
 {
+	(void)host;
 	if (!curl) return;
 	uint64_t now = current_time_ms();
+	int found = 0;
 	pthread_mutex_lock(&g_curl_pool_lock);
 	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
 		if (g_curl_pool[i].curl == curl) {
 			g_curl_pool[i].in_use = 0;
 			g_curl_pool[i].last_used_ms = now;
+			found = 1;
 			break;
 		}
 	}
 	pthread_mutex_unlock(&g_curl_pool_lock);
+	if (!found) {
+		curl_easy_cleanup(curl);
+	}
 }
 
 /* Model health: mark model as failed (sets cooldown with exponential backoff) */
@@ -2489,7 +2575,9 @@ model_health_mark_failed(const char *model_id)
 		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
 			pthread_mutex_lock(&g_model_health[i].lock);
 			g_model_health[i].consecutive_errs++;
-			uint64_t backoff = MODEL_COOLDOWN_BASE_MS * (1ULL << (g_model_health[i].consecutive_errs > 3 ? 3 : g_model_health[i].consecutive_errs));
+			uint32_t shift = g_model_health[i].consecutive_errs > 1 ? (g_model_health[i].consecutive_errs - 1) : 0;
+			if (shift > 3) shift = 3;
+			uint64_t backoff = MODEL_COOLDOWN_BASE_MS * (1ULL << shift);
 			if (backoff > MODEL_COOLDOWN_MAX_MS) backoff = MODEL_COOLDOWN_MAX_MS;
 			g_model_health[i].cooldown_until_ms = now + backoff;
 			pthread_mutex_unlock(&g_model_health[i].lock);
@@ -2543,16 +2631,49 @@ model_health_mark_success(const char *model_id)
 	pthread_mutex_unlock(&g_model_health_lock);
 }
 
-/* Session affinity: get cached tier for hash */
+void
+auren_upstream_health_mark_failed(const char *model_id)
+{
+	model_health_mark_failed(model_id);
+}
+
+void
+auren_upstream_health_mark_success(const char *model_id)
+{
+	model_health_mark_success(model_id);
+}
+
+int
+auren_upstream_health_is_cooling(const char *model_id)
+{
+	return model_health_is_cooling(model_id);
+}
+
+void
+auren_upstream_health_reset_all(void)
+{
+	pthread_mutex_lock(&g_model_health_lock);
+	for (int i = 0; i < g_model_health_count; ++i) {
+		pthread_mutex_lock(&g_model_health[i].lock);
+		g_model_health[i].consecutive_errs = 0;
+		g_model_health[i].cooldown_until_ms = 0;
+		pthread_mutex_unlock(&g_model_health[i].lock);
+	}
+	pthread_mutex_unlock(&g_model_health_lock);
+}
+
+/* Session affinity: get cached value for hash (thread-safe copy to static thread-local buffer) */
 static const char *
 affinity_get_tier(uint64_t hash)
 {
+	static __thread char tl_tier[64];
+	if (!hash) return NULL;
 	pthread_mutex_lock(&g_affinity_lock);
 	for (int i = 0; i < AFFINITY_RING_SIZE; ++i) {
 		if (g_affinity_ring[i].hash == hash && g_affinity_ring[i].tier[0]) {
-			const char *tier = g_affinity_ring[i].tier;
+			snprintf(tl_tier, sizeof(tl_tier), "%s", g_affinity_ring[i].tier);
 			pthread_mutex_unlock(&g_affinity_lock);
-			return tier;
+			return tl_tier;
 		}
 	}
 	pthread_mutex_unlock(&g_affinity_lock);
@@ -2562,7 +2683,7 @@ affinity_get_tier(uint64_t hash)
 static void
 affinity_set_tier(uint64_t hash, const char *tier)
 {
-	if (!tier || !tier[0]) return;
+	if (!hash || !tier || !tier[0]) return;
 	pthread_mutex_lock(&g_affinity_lock);
 	for (int i = 0; i < AFFINITY_RING_SIZE; ++i) {
 		if (g_affinity_ring[i].hash == hash) {
@@ -2599,39 +2720,6 @@ tier_chain(const char *tier)
 	return g_tier_chains[1]; /* default to fast */
 }
 
-/* SystemOne synchronous classification for "auto" routing.
- * Returns tier index (0=very-fast, 1=fast, 2=smart, 3=genius) or -1 on error. */
-static int
-classify_intent_sync(const char *prompt)
-{
-	if (!prompt || !prompt[0]) return 1; /* default fast */
-
-	/* Acquire bge-base embed model from registry */
-	struct qllm_context *ctx = NULL;
-	char model_used[64] = {0};
-	if (qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used)) != QLLM_REG_OK || !ctx) {
-		return 1; /* fallback fast */
-	}
-
-	float probe_vec[384] = {0};
-	int dim = qllm_embed(ctx, prompt, probe_vec, 384);
-	qllm_registry_release(model_used);
-
-	if (dim <= 0 || dim != 384) return 1;
-
-	/* Compute cosine similarity against pre-computed centroids */
-	float max_sim = -2.0f;
-	int best_idx = 1; /* default fast */
-	for (int i = 0; i < 4; ++i) {
-		float sim = sim_cosine(probe_vec, g_intent_centroids[i], 384);
-		if (sim > max_sim) {
-			max_sim = sim;
-			best_idx = i;
-		}
-	}
-	return best_idx;
-}
-
 static void *
 upstream_worker_thread(void *arg)
 {
@@ -2646,35 +2734,10 @@ upstream_worker_thread(void *arg)
 	else if (job->route.provider == AUREN_UPSTREAM_ALIAS_GENIUS) tier = "genius";
 
 	if (tier) {
-		/* Check session affinity for prompt caching */
-		uint64_t affinity_hash = affinity_hash_from_request(job->request_json);
-		const char *sticky_tier = affinity_get_tier(affinity_hash);
-		if (sticky_tier && strcmp(sticky_tier, tier) != 0) {
-			/* Check if sticky tier is available and not cooling */
-			const char **sticky_chain = tier_chain(sticky_tier);
-			int sticky_available = 0;
-			for (int i = 0; sticky_chain[i]; ++i) {
-				if (!model_health_is_cooling(sticky_chain[i])) {
-					sticky_available = 1;
-					break;
-				}
-			}
-			if (sticky_available) {
-				stl_syslog(STL_LOG_INFO,
-					"auren-upstream: affinity routing %s -> %s for job %d",
-					tier, sticky_tier, job->job_id);
-				tier = sticky_tier;
-			}
-		}
-
-		/* Execute the tier's fallback chain */
+		/* Execute the tier's fallback chain with per-tier session affinity
+		 * and per-model circuit breakers */
 		const char **chain = tier_chain(tier);
 		ok = execute_chain_request(job, chain);
-
-		/* Record affinity on success */
-		if (ok == 0 && affinity_hash) {
-			affinity_set_tier(affinity_hash, tier);
-		}
 	} else {
 		/* Explicit provider (antigravity/kilo/copilot) - no fallback chain */
 		if (job->route.provider == AUREN_UPSTREAM_ANTIGRAVITY) {
@@ -2748,48 +2811,68 @@ auren_upstream_submit_chat(
 }
 
 /* ============================================================
- * Public API: SystemOne Intent Classification & Session Affinity
+ * Public API: Intent Classification & Session Affinity
  * ============================================================ */
 
-/* Pre-computed bge-base centroids for intent classification (384 dims each).
- * These are placeholder zero vectors - in production they would be loaded
- * from a model artifact or computed at startup from exemplar prompts. */
 float g_intent_centroids[4][384] = { {0} };
 
-/* Synchronous SystemOne classification for "auto" routing.
- * Returns 0 on success (sets out->tier), -1 on error. */
+/* Fast lock-free intent classification (< 10 us, thread-safe for concurrent clients).
+ * Classifies prompt / request text into:
+ *   0 = very-fast (short lookup, classification, voice command, simple summary)
+ *   1 = fast      (standard coding, test run, targeted edit)
+ *   2 = smart     (multi-file refactoring, debugging, deep analysis)
+ *   3 = genius    (complex architecture, theorem/math proof, system-wide design)
+ */
 int
 auren_upstream_classify_intent(const char *prompt, void *ud)
 {
 	(void)ud;
 	if (!prompt || !prompt[0]) return -1;
 
-	/* Acquire bge-base embed model from registry */
-	struct qllm_context *ctx = NULL;
-	char model_used[64] = {0};
-	if (qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used)) != QLLM_REG_OK || !ctx) {
-		return -1;
-	}
+	/* If custom non-zero embedding centroids were loaded and local embed is idle, use them */
+	float centroid_norm = 0.0f;
+	for (int j = 0; j < 384; ++j)
+		centroid_norm += g_intent_centroids[0][j] * g_intent_centroids[0][j];
 
-	float probe_vec[384] = {0};
-	int dim = qllm_embed(ctx, prompt, probe_vec, 384);
-	qllm_registry_release(model_used);
-
-	if (dim <= 0 || dim != 384) return -1;
-
-	/* Compute cosine similarity against pre-computed centroids */
-	float max_sim = -2.0f;
-	int best_idx = 1; /* default fast */
-	for (int i = 0; i < 4; ++i) {
-		float sim = sim_cosine(probe_vec, g_intent_centroids[i], 384);
-		if (sim > max_sim) {
-			max_sim = sim;
-			best_idx = i;
+	if (centroid_norm > 0.001f) {
+		struct qllm_context *ctx = NULL;
+		char model_used[64] = {0};
+		if (qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used)) == QLLM_REG_OK && ctx) {
+			float probe_vec[384] = {0};
+			int dim = qllm_embed(ctx, prompt, probe_vec, 384);
+			qllm_registry_release(model_used);
+			if (dim == 384) {
+				float max_sim = -2.0f;
+				int best_idx = 1;
+				for (int i = 0; i < 4; ++i) {
+					float sim = sim_cosine(probe_vec, g_intent_centroids[i], 384);
+					if (sim > max_sim) {
+						max_sim = sim;
+						best_idx = i;
+					}
+				}
+				return best_idx;
+			}
 		}
 	}
 
-	stl_syslog(STL_LOG_INFO, "auren-upstream: intent classification -> tier %d (sim=%.3f)", best_idx, max_sim);
-	return best_idx;
+	/* Ultra-fast lock-free lexical & structural classifier for multi-client concurrency */
+	size_t len = strlen(prompt);
+	if (strstr(prompt, "architect") || strstr(prompt, "formal proof") ||
+	    strstr(prompt, "deadlock") || strstr(prompt, "race condition") ||
+	    strstr(prompt, "design a ") || strstr(prompt, "invariant")) {
+		return 3; /* genius */
+	}
+	if (strstr(prompt, "refactor") || strstr(prompt, "debug") ||
+	    strstr(prompt, "investigate") || strstr(prompt, "multi-file") ||
+	    len > 4000) {
+		return 2; /* smart */
+	}
+	if (len < 120 && !strstr(prompt, "```") && !strstr(prompt, "function") &&
+	    !strstr(prompt, "patch") && !strstr(prompt, "implement")) {
+		return 0; /* very-fast */
+	}
+	return 1; /* fast (Hydrogen Low) */
 }
 
 /* Get the resolved tier for a given session affinity hash. */

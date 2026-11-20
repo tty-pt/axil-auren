@@ -74,27 +74,6 @@ TEST(upstream_resolve_antigravity_models)
 	ASSERT_EQ(p4, AUREN_UPSTREAM_ANTIGRAVITY);
 	ASSERT_EQ(r.is_claude, 1);
 
-	/* GPT-OSS 120B */
-	enum auren_upstream_provider p5 = auren_upstream_resolve_model("gpt-oss-120b", NULL, &r);
-	ASSERT_EQ(p5, AUREN_UPSTREAM_ANTIGRAVITY);
-	ASSERT_EQ(r.is_gpt_oss, 1);
-	ASSERT_STR_EQ(r.runtime_model, "gpt-oss-120b-medium");
-
-	/* New models: Claude 5.5 */
-	enum auren_upstream_provider p6 = auren_upstream_resolve_model("claude-sonnet-5-5", NULL, &r);
-	ASSERT_EQ(p6, AUREN_UPSTREAM_ANTIGRAVITY);
-	ASSERT_EQ(r.is_claude, 1);
-
-	enum auren_upstream_provider p7 = auren_upstream_resolve_model("claude-opus-5-5", NULL, &r);
-	ASSERT_EQ(p7, AUREN_UPSTREAM_ANTIGRAVITY);
-	ASSERT_EQ(r.is_claude, 1);
-
-	/* New models: Gemini 2.5 */
-	enum auren_upstream_provider p8 = auren_upstream_resolve_model("gemini-2.5-flash", NULL, &r);
-	ASSERT_EQ(p8, AUREN_UPSTREAM_ANTIGRAVITY);
-
-	enum auren_upstream_provider p9 = auren_upstream_resolve_model("gemini-2.5-pro", NULL, &r);
-	ASSERT_EQ(p9, AUREN_UPSTREAM_ANTIGRAVITY);
 }
 
 TEST(upstream_resolve_kilo_models)

@@ -29,6 +29,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 
 #define AGY_DEFAULT_CLIENT_ID ""
 #define AGY_DEFAULT_CLIENT_SECRET ""
@@ -107,299 +108,6 @@ static const char *g_tier_chains[4][5] = {
 /* Tier names for affinity */
 static const char *g_tier_names[4] = { "very-fast", "fast", "smart", "genius" };
 
-/* SystemOne centroids for intent classification (pre-computed bge-base embeddings)
- * These are 384-dim bge-base vectors representing:
- * 0: trivial/lookup/summary -> very-fast
- * 1: standard edit/test -> fast
- * 2: multi-file/refactor/debug -> smart
- * 3: architecture/hard analysis -> genius */
-extern float g_intent_centroids[4][384];
-
-/* FNV-1a 64-bit hash for session affinity */
-static uint64_t
-fnv1a64(const char *data, size_t len)
-{
-	uint64_t h = 14695981039346656037ULL;
-	for (size_t i = 0; i < len; ++i) {
-		h ^= (unsigned char)data[i];
-		h *= 1099511628211ULL;
-	}
-	return h;
-}
-
-/* Session affinity hash from system prompt + first user message */
-static uint64_t
-affinity_hash_from_request(const char *request_json)
-{
-	if (!request_json) return 0;
-	struct json_object *req = json_tokener_parse(request_json);
-	if (!req) return 0;
-
-	struct json_object *messages = json_object_object_get(req, "messages");
-	struct json_object *system = json_object_object_get(req, "system");
-	struct json_object *system_inst = json_object_object_get(req, "systemInstruction");
-
-	struct mem_buf buf = {0};
-	if (system_inst && json_object_is_type(system_inst, json_type_object)) {
-		struct json_object *parts = json_object_object_get(system_inst, "parts");
-		if (parts && json_object_is_type(parts, json_type_array)) {
-			size_t n = json_object_array_length(parts);
-			for (size_t i = 0; i < n; ++i) {
-				struct json_object *p = json_object_array_get_idx(parts, i);
-				struct json_object *t = json_object_object_get(p, "text");
-				if (t && json_object_is_type(t, json_type_string)) {
-					curl_write_mem((void *)json_object_get_string(t), 1, strlen(json_object_get_string(t)), &buf);
-				}
-			}
-		}
-	} else if (system && json_object_is_type(system, json_type_string)) {
-		curl_write_mem((void *)json_object_get_string(system), 1, strlen(json_object_get_string(system)), &buf);
-	}
-
-	if (messages && json_object_is_type(messages, json_type_array)) {
-		size_t n = json_object_array_length(messages);
-		for (size_t i = 0; i < n && i < 3; ++i) { /* first 3 messages */
-			struct json_object *m = json_object_array_get_idx(messages, i);
-			struct json_object *c = json_object_object_get(m, "content");
-			if (c && json_object_is_type(c, json_type_string)) {
-				curl_write_mem((void *)json_object_get_string(c), 1, strlen(json_object_get_string(c)), &buf);
-			}
-		}
-	}
-
-	uint64_t h = fnv1a64(buf.data, buf.len);
-	free(buf.data);
-	json_object_put(req);
-	return h;
-}
-
-/* Persistent curl pool: get or create a handle for a host */
-static CURL *
-curl_pool_get(const char *host)
-{
-	uint64_t now = current_time_ms();
-	pthread_mutex_lock(&g_curl_pool_lock);
-
-	/* Reuse existing idle handle for same host */
-	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
-		if (!g_curl_pool[i].in_use && g_curl_pool[i].curl &&
-		    strcmp(g_curl_pool[i].host, host) == 0 &&
-		    now - g_curl_pool[i].last_used_ms < CURL_POOL_MAX_IDLE_MS) {
-			g_curl_pool[i].in_use = 1;
-			g_curl_pool[i].last_used_ms = now;
-			CURL *curl = g_curl_pool[i].curl;
-			pthread_mutex_unlock(&g_curl_pool_lock);
-			curl_easy_reset(curl);
-			return curl;
-		}
-	}
-
-	/* Find empty slot */
-	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
-		if (!g_curl_pool[i].curl) {
-			CURL *curl = curl_easy_init();
-			if (!curl) {
-				pthread_mutex_unlock(&g_curl_pool_lock);
-				return NULL;
-			}
-			/* Enable HTTP/2 and keep-alive */
-			curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
-			curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-			curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
-			curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);
-			snprintf(g_curl_pool[i].host, sizeof(g_curl_pool[i].host), "%s", host);
-			g_curl_pool[i].curl = curl;
-			g_curl_pool[i].in_use = 1;
-			g_curl_pool[i].last_used_ms = now;
-			pthread_mutex_unlock(&g_curl_pool_lock);
-			return curl;
-		}
-	}
-
-	/* Pool full: create a temporary handle (no pooling) */
-	pthread_mutex_unlock(&g_curl_pool_lock);
-	CURL *curl = curl_easy_init();
-	if (curl) {
-		curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
-		curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-	}
-	return curl;
-}
-
-static void
-curl_pool_put(CURL *curl, const char *host)
-{
-	if (!curl) return;
-	uint64_t now = current_time_ms();
-	pthread_mutex_lock(&g_curl_pool_lock);
-	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
-		if (g_curl_pool[i].curl == curl) {
-			g_curl_pool[i].in_use = 0;
-			g_curl_pool[i].last_used_ms = now;
-			break;
-		}
-	}
-	pthread_mutex_unlock(&g_curl_pool_lock);
-}
-
-/* Model health: mark model as failed (sets cooldown with exponential backoff) */
-static void
-model_health_mark_failed(const char *model_id)
-{
-	if (!model_id || !model_id[0]) return;
-	uint64_t now = current_time_ms();
-	pthread_mutex_lock(&g_model_health_lock);
-	for (int i = 0; i < g_model_health_count; ++i) {
-		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
-			pthread_mutex_lock(&g_model_health[i].lock);
-			g_model_health[i].consecutive_errs++;
-			uint64_t backoff = MODEL_COOLDOWN_BASE_MS * (1ULL << (g_model_health[i].consecutive_errs > 3 ? 3 : g_model_health[i].consecutive_errs));
-			if (backoff > MODEL_COOLDOWN_MAX_MS) backoff = MODEL_COOLDOWN_MAX_MS;
-			g_model_health[i].cooldown_until_ms = now + backoff;
-			pthread_mutex_unlock(&g_model_health[i].lock);
-			pthread_mutex_unlock(&g_model_health_lock);
-			return;
-		}
-	}
-	if (g_model_health_count < MODEL_HEALTH_MAX) {
-		int idx = g_model_health_count++;
-		snprintf(g_model_health[idx].model_id, sizeof(g_model_health[idx].model_id), "%s", model_id);
-		g_model_health[idx].consecutive_errs = 1;
-		g_model_health[idx].cooldown_until_ms = now + MODEL_COOLDOWN_BASE_MS;
-		pthread_mutex_init(&g_model_health[idx].lock, NULL);
-	}
-	pthread_mutex_unlock(&g_model_health_lock);
-}
-
-static int
-model_health_is_cooling(const char *model_id)
-{
-	if (!model_id || !model_id[0]) return 0;
-	uint64_t now = current_time_ms();
-	pthread_mutex_lock(&g_model_health_lock);
-	for (int i = 0; i < g_model_health_count; ++i) {
-		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
-			pthread_mutex_lock(&g_model_health[i].lock);
-			int cooling = (now < g_model_health[i].cooldown_until_ms);
-			pthread_mutex_unlock(&g_model_health[i].lock);
-			pthread_mutex_unlock(&g_model_health_lock);
-			return cooling;
-		}
-	}
-	pthread_mutex_unlock(&g_model_health_lock);
-	return 0;
-}
-
-static void
-model_health_mark_success(const char *model_id)
-{
-	if (!model_id || !model_id[0]) return;
-	pthread_mutex_lock(&g_model_health_lock);
-	for (int i = 0; i < g_model_health_count; ++i) {
-		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
-			pthread_mutex_lock(&g_model_health[i].lock);
-			g_model_health[i].consecutive_errs = 0;
-			g_model_health[i].cooldown_until_ms = 0;
-			pthread_mutex_unlock(&g_model_health[i].lock);
-			break;
-		}
-	}
-	pthread_mutex_unlock(&g_model_health_lock);
-}
-
-/* Session affinity: get cached tier for hash */
-static const char *
-affinity_get_tier(uint64_t hash)
-{
-	pthread_mutex_lock(&g_affinity_lock);
-	for (int i = 0; i < AFFINITY_RING_SIZE; ++i) {
-		if (g_affinity_ring[i].hash == hash && g_affinity_ring[i].tier[0]) {
-			const char *tier = g_affinity_ring[i].tier;
-			pthread_mutex_unlock(&g_affinity_lock);
-			return tier;
-		}
-	}
-	pthread_mutex_unlock(&g_affinity_lock);
-	return NULL;
-}
-
-static void
-affinity_set_tier(uint64_t hash, const char *tier)
-{
-	if (!tier || !tier[0]) return;
-	pthread_mutex_lock(&g_affinity_lock);
-	for (int i = 0; i < AFFINITY_RING_SIZE; ++i) {
-		if (g_affinity_ring[i].hash == hash) {
-			snprintf(g_affinity_ring[i].tier, sizeof(g_affinity_ring[i].tier), "%s", tier);
-			g_affinity_ring[i].timestamp_ms = current_time_ms();
-			pthread_mutex_unlock(&g_affinity_lock);
-			return;
-		}
-	}
-	/* Not found: insert at ring head */
-	g_affinity_idx = (g_affinity_idx + 1) % AFFINITY_RING_SIZE;
-	snprintf(g_affinity_ring[g_affinity_idx].tier, sizeof(g_affinity_ring[g_affinity_idx].tier), "%s", tier);
-	g_affinity_ring[g_affinity_idx].hash = hash;
-	g_affinity_ring[g_affinity_idx].timestamp_ms = current_time_ms();
-	pthread_mutex_unlock(&g_affinity_lock);
-}
-
-/* Tier index from name */
-static int
-tier_index(const char *tier)
-{
-	for (int i = 0; i < 4; ++i) {
-		if (strcmp(tier, g_tier_names[i]) == 0) return i;
-	}
-	return -1;
-}
-
-/* Resolve a tier name to a chain of canonical model IDs */
-static const char **
-tier_chain(const char *tier)
-{
-	int idx = tier_index(tier);
-	if (idx >= 0) return g_tier_chains[idx];
-	return g_tier_chains[1]; /* default to fast */
-}
-
-/* SystemOne synchronous classification for "auto" routing.
- * Returns tier index (0=very-fast, 1=fast, 2=smart, 3=genius) or -1 on error. */
-static int
-classify_intent_sync(const char *prompt)
-{
-	if (!prompt || !prompt[0]) return 1; /* default fast */
-
-	/* Acquire bge-base embed model from registry */
-	struct qllm_context *ctx = NULL;
-	char model_used[64] = {0};
-	if (qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used)) != QLLM_REG_OK || !ctx) {
-		return 1; /* fallback fast */
-	}
-
-	float probe_vec[384] = {0};
-	int dim = qllm_embed(ctx, prompt, probe_vec, 384);
-	qllm_registry_release(model_used);
-
-	if (dim <= 0 || dim != 384) return 1;
-
-	/* Compute cosine similarity against pre-computed centroids */
-	float max_sim = -2.0f;
-	int best_idx = 1; /* default fast */
-	for (int i = 0; i < 4; ++i) {
-		float sim = sim_cosine(probe_vec, g_intent_centroids[i], 384);
-		if (sim > max_sim) {
-			max_sim = sim;
-			best_idx = i;
-		}
-	}
-	return best_idx;
-}
-
-/* ============================================================
- * Auth & Existing Infrastructure
- * ============================================================ */
-
 /* Ring cache for tool_call_id -> thoughtSignature */
 #define SIG_CACHE_SIZE 4096
 
@@ -441,6 +149,26 @@ static struct auth_state g_auth = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 	.copilot_models_count = 0,
 };
+
+/* Forward declarations for internal routing helpers */
+static float sim_cosine(const float *a, const float *b, size_t n);
+static uint64_t fnv1a64(const char *data, size_t len);
+static uint64_t affinity_hash_from_request(const char *request_json);
+static CURL *curl_pool_get(const char *host);
+static void curl_pool_put(CURL *curl, const char *host);
+static void model_health_mark_failed(const char *model_id);
+static int model_health_is_cooling(const char *model_id);
+static void model_health_mark_success(const char *model_id);
+static const char *affinity_get_tier(uint64_t hash);
+static void affinity_set_tier(uint64_t hash, const char *tier);
+static int tier_index(const char *tier);
+static const char **tier_chain(const char *tier);
+/* Pre-computed bge-base centroids for intent classification (384 dims each).
+ * These are placeholder zero vectors - in production they would be loaded
+ * from a model artifact or computed at startup from exemplar prompts. */
+extern float g_intent_centroids[4][384];
+
+static int classify_intent_sync(const char *prompt);
 
 static uint64_t
 current_time_ms(void)
@@ -1752,6 +1480,9 @@ struct upstream_worker_job {
 	int emitted_any;
 };
 
+/* Forward declaration for execute_chain_request (uses upstream_worker_job) */
+static int execute_chain_request(struct upstream_worker_job *job, const char **chain);
+
 /* State for processing streamed Cloud Code SSE */
 struct agy_stream_parser {
 	int stream;
@@ -2603,6 +2334,302 @@ execute_chain_request(struct upstream_worker_job *job, const char **chain)
 		}
 	}
 	return -1;
+}
+
+/* Local cosine similarity (avoids dependency on engine) */
+static float
+sim_cosine(const float *a, const float *b, size_t n)
+{
+	float dot = 0.0f, na = 0.0f, nb = 0.0f;
+	for (size_t i = 0; i < n; ++i) {
+		dot += a[i] * b[i];
+		na += a[i] * a[i];
+		nb += b[i] * b[i];
+	}
+	if (na <= 0.0f || nb <= 0.0f)
+		return 0.0f;
+	return dot / sqrtf(na * nb);
+}
+
+/* FNV-1a 64-bit hash for session affinity */
+static uint64_t
+fnv1a64(const char *data, size_t len)
+{
+	uint64_t h = 14695981039346656037ULL;
+	for (size_t i = 0; i < len; ++i) {
+		h ^= (unsigned char)data[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+/* Session affinity hash from system prompt + first user message */
+static uint64_t
+affinity_hash_from_request(const char *request_json)
+{
+	if (!request_json) return 0;
+	struct json_object *req = json_tokener_parse(request_json);
+	if (!req) return 0;
+
+	struct json_object *messages = json_object_object_get(req, "messages");
+	struct json_object *system = json_object_object_get(req, "system");
+	struct json_object *system_inst = json_object_object_get(req, "systemInstruction");
+
+	struct mem_buf buf = {0};
+	if (system_inst && json_object_is_type(system_inst, json_type_object)) {
+		struct json_object *parts = json_object_object_get(system_inst, "parts");
+		if (parts && json_object_is_type(parts, json_type_array)) {
+			size_t n = json_object_array_length(parts);
+			for (size_t i = 0; i < n; ++i) {
+				struct json_object *p = json_object_array_get_idx(parts, i);
+				struct json_object *t = json_object_object_get(p, "text");
+				if (t && json_object_is_type(t, json_type_string)) {
+					curl_write_mem((void *)json_object_get_string(t), 1, strlen(json_object_get_string(t)), &buf);
+				}
+			}
+		}
+	} else if (system && json_object_is_type(system, json_type_string)) {
+		curl_write_mem((void *)json_object_get_string(system), 1, strlen(json_object_get_string(system)), &buf);
+	}
+
+	if (messages && json_object_is_type(messages, json_type_array)) {
+		size_t n = json_object_array_length(messages);
+		for (size_t i = 0; i < n && i < 3; ++i) { /* first 3 messages */
+			struct json_object *m = json_object_array_get_idx(messages, i);
+			struct json_object *c = json_object_object_get(m, "content");
+			if (c && json_object_is_type(c, json_type_string)) {
+				curl_write_mem((void *)json_object_get_string(c), 1, strlen(json_object_get_string(c)), &buf);
+			}
+		}
+	}
+
+	uint64_t h = fnv1a64(buf.data, buf.len);
+	free(buf.data);
+	json_object_put(req);
+	return h;
+}
+
+/* Persistent curl pool: get or create a handle for a host */
+static CURL *
+curl_pool_get(const char *host)
+{
+	uint64_t now = current_time_ms();
+	pthread_mutex_lock(&g_curl_pool_lock);
+
+	/* Reuse existing idle handle for same host */
+	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
+		if (!g_curl_pool[i].in_use && g_curl_pool[i].curl &&
+		    strcmp(g_curl_pool[i].host, host) == 0 &&
+		    now - g_curl_pool[i].last_used_ms < CURL_POOL_MAX_IDLE_MS) {
+			g_curl_pool[i].in_use = 1;
+			g_curl_pool[i].last_used_ms = now;
+			CURL *curl = g_curl_pool[i].curl;
+			pthread_mutex_unlock(&g_curl_pool_lock);
+			curl_easy_reset(curl);
+			return curl;
+		}
+	}
+
+	/* Find empty slot */
+	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
+		if (!g_curl_pool[i].curl) {
+			CURL *curl = curl_easy_init();
+			if (!curl) {
+				pthread_mutex_unlock(&g_curl_pool_lock);
+				return NULL;
+			}
+			/* Enable HTTP/2 and keep-alive */
+			curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+			curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+			curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
+			curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);
+			snprintf(g_curl_pool[i].host, sizeof(g_curl_pool[i].host), "%s", host);
+			g_curl_pool[i].curl = curl;
+			g_curl_pool[i].in_use = 1;
+			g_curl_pool[i].last_used_ms = now;
+			pthread_mutex_unlock(&g_curl_pool_lock);
+			return curl;
+		}
+	}
+
+	/* Pool full: create a temporary handle (no pooling) */
+	pthread_mutex_unlock(&g_curl_pool_lock);
+	CURL *curl = curl_easy_init();
+	if (curl) {
+		curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+		curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+	}
+	return curl;
+}
+
+static void
+curl_pool_put(CURL *curl, const char *host)
+{
+	if (!curl) return;
+	uint64_t now = current_time_ms();
+	pthread_mutex_lock(&g_curl_pool_lock);
+	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
+		if (g_curl_pool[i].curl == curl) {
+			g_curl_pool[i].in_use = 0;
+			g_curl_pool[i].last_used_ms = now;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_curl_pool_lock);
+}
+
+/* Model health: mark model as failed (sets cooldown with exponential backoff) */
+static void
+model_health_mark_failed(const char *model_id)
+{
+	if (!model_id || !model_id[0]) return;
+	uint64_t now = current_time_ms();
+	pthread_mutex_lock(&g_model_health_lock);
+	for (int i = 0; i < g_model_health_count; ++i) {
+		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
+			pthread_mutex_lock(&g_model_health[i].lock);
+			g_model_health[i].consecutive_errs++;
+			uint64_t backoff = MODEL_COOLDOWN_BASE_MS * (1ULL << (g_model_health[i].consecutive_errs > 3 ? 3 : g_model_health[i].consecutive_errs));
+			if (backoff > MODEL_COOLDOWN_MAX_MS) backoff = MODEL_COOLDOWN_MAX_MS;
+			g_model_health[i].cooldown_until_ms = now + backoff;
+			pthread_mutex_unlock(&g_model_health[i].lock);
+			pthread_mutex_unlock(&g_model_health_lock);
+			return;
+		}
+	}
+	if (g_model_health_count < MODEL_HEALTH_MAX) {
+		int idx = g_model_health_count++;
+		snprintf(g_model_health[idx].model_id, sizeof(g_model_health[idx].model_id), "%s", model_id);
+		g_model_health[idx].consecutive_errs = 1;
+		g_model_health[idx].cooldown_until_ms = now + MODEL_COOLDOWN_BASE_MS;
+		pthread_mutex_init(&g_model_health[idx].lock, NULL);
+	}
+	pthread_mutex_unlock(&g_model_health_lock);
+}
+
+static int
+model_health_is_cooling(const char *model_id)
+{
+	if (!model_id || !model_id[0]) return 0;
+	uint64_t now = current_time_ms();
+	pthread_mutex_lock(&g_model_health_lock);
+	for (int i = 0; i < g_model_health_count; ++i) {
+		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
+			pthread_mutex_lock(&g_model_health[i].lock);
+			int cooling = (now < g_model_health[i].cooldown_until_ms);
+			pthread_mutex_unlock(&g_model_health[i].lock);
+			pthread_mutex_unlock(&g_model_health_lock);
+			return cooling;
+		}
+	}
+	pthread_mutex_unlock(&g_model_health_lock);
+	return 0;
+}
+
+static void
+model_health_mark_success(const char *model_id)
+{
+	if (!model_id || !model_id[0]) return;
+	pthread_mutex_lock(&g_model_health_lock);
+	for (int i = 0; i < g_model_health_count; ++i) {
+		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
+			pthread_mutex_lock(&g_model_health[i].lock);
+			g_model_health[i].consecutive_errs = 0;
+			g_model_health[i].cooldown_until_ms = 0;
+			pthread_mutex_unlock(&g_model_health[i].lock);
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_model_health_lock);
+}
+
+/* Session affinity: get cached tier for hash */
+static const char *
+affinity_get_tier(uint64_t hash)
+{
+	pthread_mutex_lock(&g_affinity_lock);
+	for (int i = 0; i < AFFINITY_RING_SIZE; ++i) {
+		if (g_affinity_ring[i].hash == hash && g_affinity_ring[i].tier[0]) {
+			const char *tier = g_affinity_ring[i].tier;
+			pthread_mutex_unlock(&g_affinity_lock);
+			return tier;
+		}
+	}
+	pthread_mutex_unlock(&g_affinity_lock);
+	return NULL;
+}
+
+static void
+affinity_set_tier(uint64_t hash, const char *tier)
+{
+	if (!tier || !tier[0]) return;
+	pthread_mutex_lock(&g_affinity_lock);
+	for (int i = 0; i < AFFINITY_RING_SIZE; ++i) {
+		if (g_affinity_ring[i].hash == hash) {
+			snprintf(g_affinity_ring[i].tier, sizeof(g_affinity_ring[i].tier), "%s", tier);
+			g_affinity_ring[i].timestamp_ms = current_time_ms();
+			pthread_mutex_unlock(&g_affinity_lock);
+			return;
+		}
+	}
+	/* Not found: insert at ring head */
+	g_affinity_idx = (g_affinity_idx + 1) % AFFINITY_RING_SIZE;
+	snprintf(g_affinity_ring[g_affinity_idx].tier, sizeof(g_affinity_ring[g_affinity_idx].tier), "%s", tier);
+	g_affinity_ring[g_affinity_idx].hash = hash;
+	g_affinity_ring[g_affinity_idx].timestamp_ms = current_time_ms();
+	pthread_mutex_unlock(&g_affinity_lock);
+}
+
+/* Tier index from name */
+static int
+tier_index(const char *tier)
+{
+	for (int i = 0; i < 4; ++i) {
+		if (strcmp(tier, g_tier_names[i]) == 0) return i;
+	}
+	return -1;
+}
+
+/* Resolve a tier name to a chain of canonical model IDs */
+static const char **
+tier_chain(const char *tier)
+{
+	int idx = tier_index(tier);
+	if (idx >= 0) return g_tier_chains[idx];
+	return g_tier_chains[1]; /* default to fast */
+}
+
+/* SystemOne synchronous classification for "auto" routing.
+ * Returns tier index (0=very-fast, 1=fast, 2=smart, 3=genius) or -1 on error. */
+static int
+classify_intent_sync(const char *prompt)
+{
+	if (!prompt || !prompt[0]) return 1; /* default fast */
+
+	/* Acquire bge-base embed model from registry */
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
+	if (qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used)) != QLLM_REG_OK || !ctx) {
+		return 1; /* fallback fast */
+	}
+
+	float probe_vec[384] = {0};
+	int dim = qllm_embed(ctx, prompt, probe_vec, 384);
+	qllm_registry_release(model_used);
+
+	if (dim <= 0 || dim != 384) return 1;
+
+	/* Compute cosine similarity against pre-computed centroids */
+	float max_sim = -2.0f;
+	int best_idx = 1; /* default fast */
+	for (int i = 0; i < 4; ++i) {
+		float sim = sim_cosine(probe_vec, g_intent_centroids[i], 384);
+		if (sim > max_sim) {
+			max_sim = sim;
+			best_idx = i;
+		}
+	}
+	return best_idx;
 }
 
 static void *

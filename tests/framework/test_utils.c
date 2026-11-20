@@ -69,6 +69,35 @@ _fail_ne(long long a, long long b, const char *a_str, const char *b_str,
 }
 
 void
+_fail_gt(long long a, long long b, const char *a_str, const char *b_str,
+	const char *file, int line)
+{
+	fprintf(stderr, "  FAIL: %s:%d: %s <= %s (expected greater)\n",
+		file, line, a_str, b_str);
+	fprintf(stderr, "        Expected: %lld > %lld\n", a, b);
+	_current_test_failed = 1;
+	longjmp(_test_jmp_buf, 1);
+}
+
+void
+_fail_ge(long long a, long long b, const char *a_str, const char *b_str,
+	const char *file, int line)
+{
+	fprintf(stderr, "  FAIL: %s:%d: %s < %s (expected greater or equal)\n",
+		file, line, a_str, b_str);
+	fprintf(stderr, "        Expected: %lld >= %lld\n", a, b);
+	_current_test_failed = 1;
+	longjmp(_test_jmp_buf, 1);
+}
+
+/* Silence unused parameter warnings for test macros */
+static void
+_unused_ptr(const void *p)
+{
+	(void)p;
+}
+
+void
 _fail_null(const char *expr, const char *file, int line)
 {
 	fprintf(stderr, "  FAIL: %s:%d: %s is not NULL\n", file, line, expr);

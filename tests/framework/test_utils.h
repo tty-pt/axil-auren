@@ -43,6 +43,22 @@ extern jmp_buf _test_jmp_buf;
 	} \
 } while(0)
 
+#define ASSERT_GT(a, b) do { \
+	__typeof__(a) _a = (a); \
+	__typeof__(b) _b = (b); \
+	if (!(_a > _b)) { \
+		_fail_gt((long long)_a, (long long)_b, #a, #b, __FILE__, __LINE__); \
+	} \
+} while(0)
+
+#define ASSERT_GE(a, b) do { \
+	__typeof__(a) _a = (a); \
+	__typeof__(b) _b = (b); \
+	if (!(_a >= _b)) { \
+		_fail_ge((long long)_a, (long long)_b, #a, #b, __FILE__, __LINE__); \
+	} \
+} while(0)
+
 #define ASSERT_NULL(p) do { \
 	if ((p) != NULL) { \
 		_fail_null(#p, __FILE__, __LINE__); \
@@ -109,6 +125,8 @@ void _fail_str_eq(const char *a, const char *b, const char *a_str, const char *b
 void _fail_str_ne(const char *a, const char *b, const char *a_str, const char *b_str, const char *file, int line);
 void _fail_mem_eq(const void *a, const void *b, size_t n, const char *a_str, const char *b_str, const char *file, int line);
 void _fail_float_eq(float a, float b, const char *a_str, const char *b_str, const char *file, int line);
+void _fail_gt(long long a, long long b, const char *a_str, const char *b_str, const char *file, int line);
+void _fail_ge(long long a, long long b, const char *a_str, const char *b_str, const char *file, int line);
 
 int run_all_tests(void);
 void test_summary(void);

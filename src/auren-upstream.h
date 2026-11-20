@@ -116,26 +116,6 @@ const char *auren_upstream_get_affinity_tier(uint64_t hash);
 /* Set the affinity tier for a hash (called after successful upstream call). */
 void auren_upstream_set_affinity_tier(uint64_t hash, const char *tier);
 
-/* Returns 1 if an upstream auth.json file exists or upstream env vars are set. */
-int auren_upstream_has_credentials(void);
-
-/* Classify a requested model_id into an upstream route.
- * Returns AUREN_UPSTREAM_NONE (0) if model_id is not an upstream model.
- * Note: callers should check local auren_registry_find() first if local models
- * take precedence, except for explicit provider prefixes ("antigravity/",
- * "kilo/", "copilot/", "github-copilot/") or aliases ("fast", "smart", "auto"). */
-enum auren_upstream_provider auren_upstream_resolve_model(
-	const char *model_id,
-	const char *requested_effort,
-	struct auren_upstream_route *out);
-
-/* Append available upstream models to a /v1/models `data` JSON array. */
-void auren_upstream_append_models_json(struct json_object *data_arr);
-
-/* Sanitize system prompt strings for Antigravity Cloud Code compatibility.
- * Returns a newly allocated string (caller must free). */
-char *auren_upstream_sanitize_system_prompt(const char *input);
-
 /* Build an Antigravity Cloud Code v1internal request envelope JSON object from
  * an OpenAI /v1/chat/completions request JSON object and resolved route.
  * Caller owns the returned json_object and must json_object_put() it. */

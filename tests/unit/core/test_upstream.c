@@ -10,26 +10,42 @@ TEST(upstream_resolve_aliases)
 {
 	struct auren_upstream_route r;
 
-	/* "fast" alias */
-	enum auren_upstream_provider p1 = auren_upstream_resolve_model("fast", NULL, &r);
-	ASSERT_EQ(p1, AUREN_UPSTREAM_ALIAS_FAST);
+	/* "very-fast" alias */
+	enum auren_upstream_provider p0 = auren_upstream_resolve_model("very-fast", NULL, &r);
+	ASSERT_EQ(p0, AUREN_UPSTREAM_ALIAS_VERY_FAST);
 	ASSERT_STR_EQ(r.runtime_model, "gemini-3.8-flash-low");
 	ASSERT_STR_EQ(r.effort, "low");
 	ASSERT_EQ(r.is_thinking, 1);
 	ASSERT_EQ(r.model_enum, 320);
 
-	/* "auto" alias */
+	/* "fast" alias -> now gemini-4-hydrogen-low */
+	enum auren_upstream_provider p1 = auren_upstream_resolve_model("fast", NULL, &r);
+	ASSERT_EQ(p1, AUREN_UPSTREAM_ALIAS_FAST);
+	ASSERT_STR_EQ(r.runtime_model, "gemini-4-hydrogen-low");
+	ASSERT_STR_EQ(r.effort, "low");
+	ASSERT_EQ(r.is_thinking, 1);
+	ASSERT_EQ(r.model_enum, 527);
+
+	/* "auto" alias -> maps to fast (gemini-4-hydrogen-low) */
 	enum auren_upstream_provider p2 = auren_upstream_resolve_model("auto", NULL, &r);
 	ASSERT_EQ(p2, AUREN_UPSTREAM_ALIAS_FAST);
-	ASSERT_STR_EQ(r.runtime_model, "gemini-3.8-flash-low");
+	ASSERT_STR_EQ(r.runtime_model, "gemini-4-hydrogen-low");
 
-	/* "smart" alias */
+	/* "smart" alias -> gemini-4-hydrogen-high */
 	enum auren_upstream_provider p3 = auren_upstream_resolve_model("smart", NULL, &r);
 	ASSERT_EQ(p3, AUREN_UPSTREAM_ALIAS_SMART);
 	ASSERT_STR_EQ(r.runtime_model, "gemini-4-hydrogen-high");
 	ASSERT_STR_EQ(r.effort, "high");
 	ASSERT_EQ(r.is_thinking, 1);
 	ASSERT_EQ(r.model_enum, 525);
+
+	/* "genius" alias -> gemini-4-argon-high */
+	enum auren_upstream_provider p4 = auren_upstream_resolve_model("genius", NULL, &r);
+	ASSERT_EQ(p4, AUREN_UPSTREAM_ALIAS_GENIUS);
+	ASSERT_STR_EQ(r.runtime_model, "gemini-4-argon-high");
+	ASSERT_STR_EQ(r.effort, "high");
+	ASSERT_EQ(r.is_thinking, 1);
+	ASSERT_EQ(r.model_enum, 417);
 }
 
 TEST(upstream_resolve_antigravity_models)
@@ -62,6 +78,23 @@ TEST(upstream_resolve_antigravity_models)
 	enum auren_upstream_provider p5 = auren_upstream_resolve_model("gpt-oss-120b", NULL, &r);
 	ASSERT_EQ(p5, AUREN_UPSTREAM_ANTIGRAVITY);
 	ASSERT_EQ(r.is_gpt_oss, 1);
+
+	/* New models: Claude 5.5 */
+	enum auren_upstream_provider p6 = auren_upstream_resolve_model("claude-sonnet-5-5", NULL, &r);
+	ASSERT_EQ(p6, AUREN_UPSTREAM_ANTIGRAVITY);
+	ASSERT_EQ(r.is_claude, 1);
+
+	enum auren_upstream_provider p7 = auren_upstream_resolve_model("claude-opus-5-5", NULL, &r);
+	ASSERT_EQ(p7, AUREN_UPSTREAM_ANTIGRAVITY);
+	ASSERT_EQ(r.is_claude, 1);
+
+	/* New models: Gemini 2.5 */
+	enum auren_upstream_provider p8 = auren_upstream_resolve_model("gemini-2.5-flash", NULL, &r);
+	ASSERT_EQ(p8, AUREN_UPSTREAM_ANTIGRAVITY);
+
+	enum auren_upstream_provider p9 = auren_upstream_resolve_model("gemini-2.5-pro", NULL, &r);
+	ASSERT_EQ(p9, AUREN_UPSTREAM_ANTIGRAVITY);
+}
 	ASSERT_STR_EQ(r.runtime_model, "gpt-oss-120b-medium");
 }
 

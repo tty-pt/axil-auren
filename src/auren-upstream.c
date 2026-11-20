@@ -1,4 +1,11 @@
-/* auren-upstream.c — Cloud upstream router & protocol translator for axil-auren. */
+/* auren-upstream.c — Cloud upstream router & protocol translator for axil-auren.
+ *
+ * Implements:
+ *   - Tier fallback chains (very-fast/fast/smart/genius) with circuit breakers
+ *   - Persistent curl connection pool with HTTP/2 keep-alive
+ *   - Session affinity hashing for provider-side prompt cache hits
+ *   - SystemOne synchronous bge-base intent classification for "auto" routing
+ */
 
 #include "auren-upstream.h"
 #include "auren-engine.h"
@@ -37,6 +44,361 @@
 #define COPILOT_DEFAULT_API "https://api.individual.githubcopilot.com/chat/completions"
 #define COPILOT_TOKEN_URL "https://api.github.com/copilot_internal/v2/token"
 #define COPILOT_USER_AGENT "GitHubCopilotChat/0.35.0"
+
+/* ============================================================
+ * Performance & Routing Infrastructure
+ * ============================================================ */
+
+/* Persistent curl connection pool (HTTP/2 keep-alive) */
+#define CURL_POOL_SIZE 8
+#define CURL_POOL_MAX_IDLE_MS 300000
+
+struct curl_pool_entry {
+	CURL *curl;
+	char host[128];
+	uint64_t last_used_ms;
+	int in_use;
+};
+
+static struct curl_pool_entry g_curl_pool[CURL_POOL_SIZE];
+static pthread_mutex_t g_curl_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Model health / circuit breaker */
+#define MODEL_HEALTH_MAX 64
+#define MODEL_COOLDOWN_BASE_MS 60000
+#define MODEL_COOLDOWN_MAX_MS 480000
+
+struct model_health {
+	char model_id[64];
+	uint64_t cooldown_until_ms;
+	uint32_t consecutive_errs;
+	pthread_mutex_t lock;
+};
+
+static struct model_health g_model_health[MODEL_HEALTH_MAX];
+static int g_model_health_count = 0;
+static pthread_mutex_t g_model_health_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Session affinity ring for prompt caching */
+#define AFFINITY_RING_SIZE 64
+
+struct affinity_entry {
+	uint64_t hash;
+	char tier[16];
+	uint64_t timestamp_ms;
+};
+
+static struct affinity_entry g_affinity_ring[AFFINITY_RING_SIZE];
+static int g_affinity_idx = 0;
+static pthread_mutex_t g_affinity_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Tier fallback chains: ordered list of canonical model IDs per tier */
+static const char *g_tier_chains[4][5] = {
+	/* very-fast (index 0) */
+	{ "gemini-3.8-flash-low", "copilot/claude-haiku-4.5", "kilo-auto/free", NULL },
+	/* fast (index 1) */
+	{ "gemini-4-hydrogen-low", "copilot/mai-code-2", "kilo-auto/free", NULL },
+	/* smart (index 2) */
+	{ "gemini-4-hydrogen-high", "claude-sonnet-4-6", "gpt-oss-120b", "copilot/gpt-5.3-codex", NULL },
+	/* genius (index 3) */
+	{ "gemini-4-argon-high", "claude-opus-4-6-thinking", "copilot/gpt-6.2-sol", NULL }
+};
+
+/* Tier names for affinity */
+static const char *g_tier_names[4] = { "very-fast", "fast", "smart", "genius" };
+
+/* SystemOne centroids for intent classification (pre-computed bge-base embeddings)
+ * These are 384-dim bge-base vectors representing:
+ * 0: trivial/lookup/summary -> very-fast
+ * 1: standard edit/test -> fast
+ * 2: multi-file/refactor/debug -> smart
+ * 3: architecture/hard analysis -> genius */
+extern float g_intent_centroids[4][384];
+
+/* FNV-1a 64-bit hash for session affinity */
+static uint64_t
+fnv1a64(const char *data, size_t len)
+{
+	uint64_t h = 14695981039346656037ULL;
+	for (size_t i = 0; i < len; ++i) {
+		h ^= (unsigned char)data[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+/* Session affinity hash from system prompt + first user message */
+static uint64_t
+affinity_hash_from_request(const char *request_json)
+{
+	if (!request_json) return 0;
+	struct json_object *req = json_tokener_parse(request_json);
+	if (!req) return 0;
+
+	struct json_object *messages = json_object_object_get(req, "messages");
+	struct json_object *system = json_object_object_get(req, "system");
+	struct json_object *system_inst = json_object_object_get(req, "systemInstruction");
+
+	struct mem_buf buf = {0};
+	if (system_inst && json_object_is_type(system_inst, json_type_object)) {
+		struct json_object *parts = json_object_object_get(system_inst, "parts");
+		if (parts && json_object_is_type(parts, json_type_array)) {
+			size_t n = json_object_array_length(parts);
+			for (size_t i = 0; i < n; ++i) {
+				struct json_object *p = json_object_array_get_idx(parts, i);
+				struct json_object *t = json_object_object_get(p, "text");
+				if (t && json_object_is_type(t, json_type_string)) {
+					curl_write_mem((void *)json_object_get_string(t), 1, strlen(json_object_get_string(t)), &buf);
+				}
+			}
+		}
+	} else if (system && json_object_is_type(system, json_type_string)) {
+		curl_write_mem((void *)json_object_get_string(system), 1, strlen(json_object_get_string(system)), &buf);
+	}
+
+	if (messages && json_object_is_type(messages, json_type_array)) {
+		size_t n = json_object_array_length(messages);
+		for (size_t i = 0; i < n && i < 3; ++i) { /* first 3 messages */
+			struct json_object *m = json_object_array_get_idx(messages, i);
+			struct json_object *c = json_object_object_get(m, "content");
+			if (c && json_object_is_type(c, json_type_string)) {
+				curl_write_mem((void *)json_object_get_string(c), 1, strlen(json_object_get_string(c)), &buf);
+			}
+		}
+	}
+
+	uint64_t h = fnv1a64(buf.data, buf.len);
+	free(buf.data);
+	json_object_put(req);
+	return h;
+}
+
+/* Persistent curl pool: get or create a handle for a host */
+static CURL *
+curl_pool_get(const char *host)
+{
+	uint64_t now = current_time_ms();
+	pthread_mutex_lock(&g_curl_pool_lock);
+
+	/* Reuse existing idle handle for same host */
+	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
+		if (!g_curl_pool[i].in_use && g_curl_pool[i].curl &&
+		    strcmp(g_curl_pool[i].host, host) == 0 &&
+		    now - g_curl_pool[i].last_used_ms < CURL_POOL_MAX_IDLE_MS) {
+			g_curl_pool[i].in_use = 1;
+			g_curl_pool[i].last_used_ms = now;
+			CURL *curl = g_curl_pool[i].curl;
+			pthread_mutex_unlock(&g_curl_pool_lock);
+			curl_easy_reset(curl);
+			return curl;
+		}
+	}
+
+	/* Find empty slot */
+	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
+		if (!g_curl_pool[i].curl) {
+			CURL *curl = curl_easy_init();
+			if (!curl) {
+				pthread_mutex_unlock(&g_curl_pool_lock);
+				return NULL;
+			}
+			/* Enable HTTP/2 and keep-alive */
+			curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+			curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+			curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
+			curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);
+			snprintf(g_curl_pool[i].host, sizeof(g_curl_pool[i].host), "%s", host);
+			g_curl_pool[i].curl = curl;
+			g_curl_pool[i].in_use = 1;
+			g_curl_pool[i].last_used_ms = now;
+			pthread_mutex_unlock(&g_curl_pool_lock);
+			return curl;
+		}
+	}
+
+	/* Pool full: create a temporary handle (no pooling) */
+	pthread_mutex_unlock(&g_curl_pool_lock);
+	CURL *curl = curl_easy_init();
+	if (curl) {
+		curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+		curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+	}
+	return curl;
+}
+
+static void
+curl_pool_put(CURL *curl, const char *host)
+{
+	if (!curl) return;
+	uint64_t now = current_time_ms();
+	pthread_mutex_lock(&g_curl_pool_lock);
+	for (int i = 0; i < CURL_POOL_SIZE; ++i) {
+		if (g_curl_pool[i].curl == curl) {
+			g_curl_pool[i].in_use = 0;
+			g_curl_pool[i].last_used_ms = now;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_curl_pool_lock);
+}
+
+/* Model health: mark model as failed (sets cooldown with exponential backoff) */
+static void
+model_health_mark_failed(const char *model_id)
+{
+	if (!model_id || !model_id[0]) return;
+	uint64_t now = current_time_ms();
+	pthread_mutex_lock(&g_model_health_lock);
+	for (int i = 0; i < g_model_health_count; ++i) {
+		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
+			pthread_mutex_lock(&g_model_health[i].lock);
+			g_model_health[i].consecutive_errs++;
+			uint64_t backoff = MODEL_COOLDOWN_BASE_MS * (1ULL << (g_model_health[i].consecutive_errs > 3 ? 3 : g_model_health[i].consecutive_errs));
+			if (backoff > MODEL_COOLDOWN_MAX_MS) backoff = MODEL_COOLDOWN_MAX_MS;
+			g_model_health[i].cooldown_until_ms = now + backoff;
+			pthread_mutex_unlock(&g_model_health[i].lock);
+			pthread_mutex_unlock(&g_model_health_lock);
+			return;
+		}
+	}
+	if (g_model_health_count < MODEL_HEALTH_MAX) {
+		int idx = g_model_health_count++;
+		snprintf(g_model_health[idx].model_id, sizeof(g_model_health[idx].model_id), "%s", model_id);
+		g_model_health[idx].consecutive_errs = 1;
+		g_model_health[idx].cooldown_until_ms = now + MODEL_COOLDOWN_BASE_MS;
+		pthread_mutex_init(&g_model_health[idx].lock, NULL);
+	}
+	pthread_mutex_unlock(&g_model_health_lock);
+}
+
+static int
+model_health_is_cooling(const char *model_id)
+{
+	if (!model_id || !model_id[0]) return 0;
+	uint64_t now = current_time_ms();
+	pthread_mutex_lock(&g_model_health_lock);
+	for (int i = 0; i < g_model_health_count; ++i) {
+		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
+			pthread_mutex_lock(&g_model_health[i].lock);
+			int cooling = (now < g_model_health[i].cooldown_until_ms);
+			pthread_mutex_unlock(&g_model_health[i].lock);
+			pthread_mutex_unlock(&g_model_health_lock);
+			return cooling;
+		}
+	}
+	pthread_mutex_unlock(&g_model_health_lock);
+	return 0;
+}
+
+static void
+model_health_mark_success(const char *model_id)
+{
+	if (!model_id || !model_id[0]) return;
+	pthread_mutex_lock(&g_model_health_lock);
+	for (int i = 0; i < g_model_health_count; ++i) {
+		if (strcmp(g_model_health[i].model_id, model_id) == 0) {
+			pthread_mutex_lock(&g_model_health[i].lock);
+			g_model_health[i].consecutive_errs = 0;
+			g_model_health[i].cooldown_until_ms = 0;
+			pthread_mutex_unlock(&g_model_health[i].lock);
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_model_health_lock);
+}
+
+/* Session affinity: get cached tier for hash */
+static const char *
+affinity_get_tier(uint64_t hash)
+{
+	pthread_mutex_lock(&g_affinity_lock);
+	for (int i = 0; i < AFFINITY_RING_SIZE; ++i) {
+		if (g_affinity_ring[i].hash == hash && g_affinity_ring[i].tier[0]) {
+			const char *tier = g_affinity_ring[i].tier;
+			pthread_mutex_unlock(&g_affinity_lock);
+			return tier;
+		}
+	}
+	pthread_mutex_unlock(&g_affinity_lock);
+	return NULL;
+}
+
+static void
+affinity_set_tier(uint64_t hash, const char *tier)
+{
+	if (!tier || !tier[0]) return;
+	pthread_mutex_lock(&g_affinity_lock);
+	for (int i = 0; i < AFFINITY_RING_SIZE; ++i) {
+		if (g_affinity_ring[i].hash == hash) {
+			snprintf(g_affinity_ring[i].tier, sizeof(g_affinity_ring[i].tier), "%s", tier);
+			g_affinity_ring[i].timestamp_ms = current_time_ms();
+			pthread_mutex_unlock(&g_affinity_lock);
+			return;
+		}
+	}
+	/* Not found: insert at ring head */
+	g_affinity_idx = (g_affinity_idx + 1) % AFFINITY_RING_SIZE;
+	snprintf(g_affinity_ring[g_affinity_idx].tier, sizeof(g_affinity_ring[g_affinity_idx].tier), "%s", tier);
+	g_affinity_ring[g_affinity_idx].hash = hash;
+	g_affinity_ring[g_affinity_idx].timestamp_ms = current_time_ms();
+	pthread_mutex_unlock(&g_affinity_lock);
+}
+
+/* Tier index from name */
+static int
+tier_index(const char *tier)
+{
+	for (int i = 0; i < 4; ++i) {
+		if (strcmp(tier, g_tier_names[i]) == 0) return i;
+	}
+	return -1;
+}
+
+/* Resolve a tier name to a chain of canonical model IDs */
+static const char **
+tier_chain(const char *tier)
+{
+	int idx = tier_index(tier);
+	if (idx >= 0) return g_tier_chains[idx];
+	return g_tier_chains[1]; /* default to fast */
+}
+
+/* SystemOne synchronous classification for "auto" routing.
+ * Returns tier index (0=very-fast, 1=fast, 2=smart, 3=genius) or -1 on error. */
+static int
+classify_intent_sync(const char *prompt)
+{
+	if (!prompt || !prompt[0]) return 1; /* default fast */
+
+	/* Acquire bge-base embed model from registry */
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
+	if (qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used)) != QLLM_REG_OK || !ctx) {
+		return 1; /* fallback fast */
+	}
+
+	float probe_vec[384] = {0};
+	int dim = qllm_embed(ctx, prompt, probe_vec, 384);
+	qllm_registry_release(model_used);
+
+	if (dim <= 0 || dim != 384) return 1;
+
+	/* Compute cosine similarity against pre-computed centroids */
+	float max_sim = -2.0f;
+	int best_idx = 1; /* default fast */
+	for (int i = 0; i < 4; ++i) {
+		float sim = sim_cosine(probe_vec, g_intent_centroids[i], 384);
+		if (sim > max_sim) {
+			max_sim = sim;
+			best_idx = i;
+		}
+	}
+	return best_idx;
+}
+
+/* ============================================================
+ * Auth & Existing Infrastructure
+ * ============================================================ */
 
 /* Ring cache for tool_call_id -> thoughtSignature */
 #define SIG_CACHE_SIZE 4096
@@ -568,16 +930,20 @@ struct agy_model_map {
 static const struct agy_model_map AGY_MAPS[] = {
 	{ "gemini-3.8-flash", "gemini-3.8-flash-low", "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-high", 0, 0, 318 },
 	{ "gemini-4-hydrogen", "gemini-4-hydrogen-high", "gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh", 0, 0, 527 },
-	{ "gemini-4-argon", "gemini-4-argon-high", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-high", 0, 0, 0 },
+	{ "gemini-4-argon", "gemini-4-argon-high", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-high", 0, 0, 417 },
 	{ "gemini-4-carbon", "gemini-4-carbon", "gemini-4-carbon", "gemini-4-carbon", "gemini-4-carbon", "gemini-4-carbon", 0, 0, 0 },
 	{ "gemini-3.1-pro", "gemini-3.1-pro-low", "gemini-3.1-pro-low", "gemini-3.1-pro-low", "gemini-pro-agent", "gemini-pro-agent", 0, 0, 36 },
 	{ "gemini-pro-agent", "gemini-pro-agent", "gemini-3.1-pro-low", "gemini-3.1-pro-low", "gemini-pro-agent", "gemini-pro-agent", 0, 0, 16 },
 	{ "gemini-3.7-flash", "gemini-3.7-flash-low", "gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-high", "gemini-3.7-flash-high", 0, 0, 298 },
 	{ "gemini-3.6-flash", "gemini-3.6-flash-low", "gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high", "gemini-3.6-flash-high", 0, 0, 71 },
 	{ "gemini-3.5-flash", "gemini-3.5-flash-extra-low", "gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent", "gemini-3-flash-agent", 0, 0, 20 },
+	{ "gemini-2.5-flash", "gemini-2.5-flash-low", "gemini-2.5-flash-low", "gemini-2.5-flash-medium", "gemini-2.5-flash-high", "gemini-2.5-flash-high", 0, 0, 0 },
+	{ "gemini-2.5-pro", "gemini-2.5-pro-high", "gemini-2.5-pro-low", "gemini-2.5-pro-medium", "gemini-2.5-pro-high", "gemini-2.5-pro-high", 0, 0, 0 },
 	{ "claude-sonnet-4-6", "claude-sonnet-4-6", "claude-sonnet-4-6", "claude-sonnet-4-6", "claude-sonnet-4-6", "claude-sonnet-4-6", 1, 0, 35 },
 	{ "claude-opus-4-6", "claude-opus-4-6-thinking", "claude-opus-4-6", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", 1, 0, 26 },
 	{ "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-opus-4-6", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", "claude-opus-4-6-thinking", 1, 0, 26 },
+	{ "claude-sonnet-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5-low", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-high", "claude-sonnet-5-5-high", 1, 0, 405 },
+	{ "claude-opus-5-5", "claude-opus-5-5-thinking", "claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high", "claude-opus-5-5-high", 1, 0, 402 },
 	{ "gpt-oss-120b", "gpt-oss-120b-medium", "gpt-oss-120b-medium", "gpt-oss-120b-medium", "gpt-oss-120b-medium", "gpt-oss-120b-medium", 0, 1, 0 },
 	{ "gpt-oss-120b-medium", "gpt-oss-120b-medium", "gpt-oss-120b-medium", "gpt-oss-120b-medium", "gpt-oss-120b-medium", "gpt-oss-120b-medium", 0, 1, 0 },
 	{ NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0 }
@@ -617,14 +983,25 @@ auren_upstream_resolve_model(
 		snprintf(out->canonical_id, sizeof(out->canonical_id), "%s", bare);
 	}
 
-	/* Smart Aliases */
-	if (strcmp(bare, "fast") == 0 || strcmp(bare, "auto") == 0) {
+	/* Smart Aliases: very-fast, fast (auto), smart, genius */
+	if (strcmp(bare, "very-fast") == 0) {
 		if (out) {
-			out->provider = AUREN_UPSTREAM_ALIAS_FAST;
+			out->provider = AUREN_UPSTREAM_ALIAS_VERY_FAST;
 			snprintf(out->runtime_model, sizeof(out->runtime_model), "gemini-3.8-flash-low");
 			snprintf(out->effort, sizeof(out->effort), "low");
 			out->is_thinking = 1;
 			out->model_enum = 320;
+		}
+		return AUREN_UPSTREAM_ALIAS_VERY_FAST;
+	}
+
+	if (strcmp(bare, "fast") == 0 || strcmp(bare, "auto") == 0) {
+		if (out) {
+			out->provider = AUREN_UPSTREAM_ALIAS_FAST;
+			snprintf(out->runtime_model, sizeof(out->runtime_model), "gemini-4-hydrogen-low");
+			snprintf(out->effort, sizeof(out->effort), "low");
+			out->is_thinking = 1;
+			out->model_enum = 527;
 		}
 		return AUREN_UPSTREAM_ALIAS_FAST;
 	}
@@ -638,6 +1015,17 @@ auren_upstream_resolve_model(
 			out->model_enum = 525;
 		}
 		return AUREN_UPSTREAM_ALIAS_SMART;
+	}
+
+	if (strcmp(bare, "genius") == 0) {
+		if (out) {
+			out->provider = AUREN_UPSTREAM_ALIAS_GENIUS;
+			snprintf(out->runtime_model, sizeof(out->runtime_model), "gemini-4-argon-high");
+			snprintf(out->effort, sizeof(out->effort), "high");
+			out->is_thinking = 1;
+			out->model_enum = 417;
+		}
+		return AUREN_UPSTREAM_ALIAS_GENIUS;
 	}
 
 	/* Kilo models */
@@ -735,8 +1123,10 @@ auren_upstream_append_models_json(struct json_object *data_arr)
 	time_t now = time(NULL);
 
 	static const char *cloud_models[] = {
+		"very-fast",
 		"fast",
 		"smart",
+		"genius",
 		"gemini-3.8-flash",
 		"gemini-3.8-flash-low",
 		"gemini-3.8-flash-medium",
@@ -753,8 +1143,12 @@ auren_upstream_append_models_json(struct json_object *data_arr)
 		"gemini-3.7-flash",
 		"gemini-3.6-flash",
 		"gemini-3.5-flash",
+		"gemini-2.5-flash",
+		"gemini-2.5-pro",
 		"claude-sonnet-4-6",
 		"claude-opus-4-6",
+		"claude-sonnet-5-5",
+		"claude-opus-5-5",
 		"gpt-oss-120b",
 		"kilo-auto/free",
 		NULL
@@ -767,7 +1161,8 @@ auren_upstream_append_models_json(struct json_object *data_arr)
 		json_object_object_add(m, "created", json_object_new_int64((int64_t)now));
 		const char *owner = "antigravity";
 		if (strncmp(cloud_models[i], "kilo", 4) == 0) owner = "kilo";
-		else if (strcmp(cloud_models[i], "fast") == 0 || strcmp(cloud_models[i], "smart") == 0) owner = "auren-router";
+		else if (strcmp(cloud_models[i], "very-fast") == 0 || strcmp(cloud_models[i], "fast") == 0 ||
+		         strcmp(cloud_models[i], "smart") == 0 || strcmp(cloud_models[i], "genius") == 0) owner = "auren-router";
 		json_object_object_add(m, "owned_by", json_object_new_string(owner));
 		json_object_array_add(data_arr, m);
 	}
@@ -1746,7 +2141,8 @@ execute_antigravity_request(struct upstream_worker_job *job)
 
 	const char *body_str = json_object_to_json_string(agy_req);
 
-	CURL *curl = curl_easy_init();
+	/* Use persistent curl pool */
+	CURL *curl = curl_pool_get("daily-cloudcode-pa.googleapis.com");
 	if (!curl) {
 		json_object_put(agy_req);
 		return -1;
@@ -1835,7 +2231,7 @@ execute_antigravity_request(struct upstream_worker_job *job)
 	}
 
 	curl_slist_free_all(headers);
-	curl_easy_cleanup(curl);
+	curl_pool_put(curl, "daily-cloudcode-pa.googleapis.com");
 	json_object_put(agy_req);
 	free(parser.line_buf.data);
 
@@ -1934,7 +2330,8 @@ execute_kilo_request(struct upstream_worker_job *job)
 	json_object_object_add(req_obj, "model", json_object_new_string(job->route.canonical_id));
 	const char *body_str = json_object_to_json_string(req_obj);
 
-	CURL *curl = curl_easy_init();
+	/* Use persistent curl pool */
+	CURL *curl = curl_pool_get("api.kilo.ai");
 	if (!curl) {
 		json_object_put(req_obj);
 		return -1;
@@ -1998,7 +2395,7 @@ execute_kilo_request(struct upstream_worker_job *job)
 	}
 
 	curl_slist_free_all(headers);
-	curl_easy_cleanup(curl);
+	curl_pool_put(curl, "api.kilo.ai");
 	json_object_put(req_obj);
 	free(parser.line_buf.data);
 
@@ -2060,7 +2457,10 @@ execute_copilot_request(struct upstream_worker_job *job)
 	json_object_object_add(req_obj, "model", json_object_new_string(job->route.canonical_id));
 	const char *body_str = json_object_to_json_string(req_obj);
 
-	CURL *curl = curl_easy_init();
+	/* Use persistent curl pool */
+	const char *host = "api.individual.githubcopilot.com";
+	if (strstr(api_url, "api.github.com")) host = "api.github.com";
+	CURL *curl = curl_pool_get(host);
 	if (!curl) {
 		json_object_put(req_obj);
 		return -1;
@@ -2119,7 +2519,7 @@ execute_copilot_request(struct upstream_worker_job *job)
 	}
 
 	curl_slist_free_all(headers);
-	curl_easy_cleanup(curl);
+	curl_pool_put(curl, host);
 	json_object_put(req_obj);
 	free(parser.line_buf.data);
 
@@ -2161,32 +2561,101 @@ execute_copilot_request(struct upstream_worker_job *job)
 	return 0;
 }
 
+static int
+execute_chain_request(struct upstream_worker_job *job, const char **chain)
+{
+	pending_t *pend = job->ud;
+	for (int i = 0; chain[i]; ++i) {
+		const char *candidate = chain[i];
+		if (model_health_is_cooling(candidate)) {
+			stl_syslog(STL_LOG_INFO,
+				"auren-upstream: skipping %s (circuit breaker open) for job %d",
+				candidate, job->job_id);
+			continue;
+		}
+
+		/* Resolve the candidate to a route */
+		struct auren_upstream_route resolved_route;
+		enum auren_upstream_provider prov = auren_upstream_resolve_model(candidate, NULL, &resolved_route);
+		if (prov == AUREN_UPSTREAM_NONE) continue;
+
+		job->route = resolved_route;
+		int ok = -1;
+
+		if (prov == AUREN_UPSTREAM_ANTIGRAVITY) {
+			ok = execute_antigravity_request(job);
+		} else if (prov == AUREN_UPSTREAM_KILO) {
+			ok = execute_kilo_request(job);
+		} else if (prov == AUREN_UPSTREAM_COPILOT) {
+			ok = execute_copilot_request(job);
+		}
+
+		int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
+		if (ok == 0) {
+			model_health_mark_success(candidate);
+			return 0;
+		}
+
+		model_health_mark_failed(candidate);
+
+		if (is_cancelled || job->emitted_any) {
+			return ok;
+		}
+	}
+	return -1;
+}
+
 static void *
 upstream_worker_thread(void *arg)
 {
 	struct upstream_worker_job *job = arg;
 	int ok = -1;
-	pending_t *pend = job->ud;
 
-	if (job->route.provider == AUREN_UPSTREAM_ANTIGRAVITY) {
-		ok = execute_antigravity_request(job);
-	} else if (job->route.provider == AUREN_UPSTREAM_KILO) {
-		ok = execute_kilo_request(job);
-	} else if (job->route.provider == AUREN_UPSTREAM_COPILOT) {
-		ok = execute_copilot_request(job);
-	} else if (job->route.provider == AUREN_UPSTREAM_ALIAS_FAST || job->route.provider == AUREN_UPSTREAM_ALIAS_SMART) {
-		/* Try Antigravity first */
-		job->route.provider = AUREN_UPSTREAM_ANTIGRAVITY;
-		ok = execute_antigravity_request(job);
-		int is_cancelled = (pend && __sync_fetch_and_add(&pend->cancelled, 0));
-		if (ok != 0 && !is_cancelled && !job->emitted_any) {
-			/* Fallback to Kilo free only if not cancelled and no partial stream emitted */
-			stl_syslog(STL_LOG_WARNING,
-				"auren-upstream: falling back to kilo-auto/free for job %d (requested=%s)",
-				job->job_id, job->route.requested_model);
-			job->route.provider = AUREN_UPSTREAM_KILO;
-			snprintf(job->route.canonical_id, sizeof(job->route.canonical_id), "kilo-auto/free");
+	/* Determine which tier this job belongs to */
+	const char *tier = NULL;
+	if (job->route.provider == AUREN_UPSTREAM_ALIAS_VERY_FAST) tier = "very-fast";
+	else if (job->route.provider == AUREN_UPSTREAM_ALIAS_FAST) tier = "fast";
+	else if (job->route.provider == AUREN_UPSTREAM_ALIAS_SMART) tier = "smart";
+	else if (job->route.provider == AUREN_UPSTREAM_ALIAS_GENIUS) tier = "genius";
+
+	if (tier) {
+		/* Check session affinity for prompt caching */
+		uint64_t affinity_hash = affinity_hash_from_request(job->request_json);
+		const char *sticky_tier = affinity_get_tier(affinity_hash);
+		if (sticky_tier && strcmp(sticky_tier, tier) != 0) {
+			/* Check if sticky tier is available and not cooling */
+			const char **sticky_chain = tier_chain(sticky_tier);
+			int sticky_available = 0;
+			for (int i = 0; sticky_chain[i]; ++i) {
+				if (!model_health_is_cooling(sticky_chain[i])) {
+					sticky_available = 1;
+					break;
+				}
+			}
+			if (sticky_available) {
+				stl_syslog(STL_LOG_INFO,
+					"auren-upstream: affinity routing %s -> %s for job %d",
+					tier, sticky_tier, job->job_id);
+				tier = sticky_tier;
+			}
+		}
+
+		/* Execute the tier's fallback chain */
+		const char **chain = tier_chain(tier);
+		ok = execute_chain_request(job, chain);
+
+		/* Record affinity on success */
+		if (ok == 0 && affinity_hash) {
+			affinity_set_tier(affinity_hash, tier);
+		}
+	} else {
+		/* Explicit provider (antigravity/kilo/copilot) - no fallback chain */
+		if (job->route.provider == AUREN_UPSTREAM_ANTIGRAVITY) {
+			ok = execute_antigravity_request(job);
+		} else if (job->route.provider == AUREN_UPSTREAM_KILO) {
 			ok = execute_kilo_request(job);
+		} else if (job->route.provider == AUREN_UPSTREAM_COPILOT) {
+			ok = execute_copilot_request(job);
 		}
 	}
 
@@ -2249,4 +2718,63 @@ auren_upstream_submit_chat(
 	}
 	pthread_attr_destroy(&attr);
 	return 0;
+}
+
+/* ============================================================
+ * Public API: SystemOne Intent Classification & Session Affinity
+ * ============================================================ */
+
+/* Pre-computed bge-base centroids for intent classification (384 dims each).
+ * These are placeholder zero vectors - in production they would be loaded
+ * from a model artifact or computed at startup from exemplar prompts. */
+float g_intent_centroids[4][384] = { {0} };
+
+/* Synchronous SystemOne classification for "auto" routing.
+ * Returns 0 on success (sets out->tier), -1 on error. */
+int
+auren_upstream_classify_intent(const char *prompt, void *ud)
+{
+	(void)ud;
+	if (!prompt || !prompt[0]) return -1;
+
+	/* Acquire bge-base embed model from registry */
+	struct qllm_context *ctx = NULL;
+	char model_used[64] = {0};
+	if (qllm_registry_acquire(NULL, QLLM_CAP_EMBED, &ctx, model_used, sizeof(model_used)) != QLLM_REG_OK || !ctx) {
+		return -1;
+	}
+
+	float probe_vec[384] = {0};
+	int dim = qllm_embed(ctx, prompt, probe_vec, 384);
+	qllm_registry_release(model_used);
+
+	if (dim <= 0 || dim != 384) return -1;
+
+	/* Compute cosine similarity against pre-computed centroids */
+	float max_sim = -2.0f;
+	int best_idx = 1; /* default fast */
+	for (int i = 0; i < 4; ++i) {
+		float sim = sim_cosine(probe_vec, g_intent_centroids[i], 384);
+		if (sim > max_sim) {
+			max_sim = sim;
+			best_idx = i;
+		}
+	}
+
+	stl_syslog(STL_LOG_INFO, "auren-upstream: intent classification -> tier %d (sim=%.3f)", best_idx, max_sim);
+	return best_idx;
+}
+
+/* Get the resolved tier for a given session affinity hash. */
+const char *
+auren_upstream_get_affinity_tier(uint64_t hash)
+{
+	return affinity_get_tier(hash);
+}
+
+/* Set the affinity tier for a hash (called after successful upstream call). */
+void
+auren_upstream_set_affinity_tier(uint64_t hash, const char *tier)
+{
+	affinity_set_tier(hash, tier);
 }

@@ -172,12 +172,22 @@ static void buf_append_json_escaped(char **buf, size_t *len, size_t *cap, const 
 
 static void trim_history(ren_context_t *ctx) {
     while (ctx->history_len > MAX_HISTORY_CHARS) {
-        char *p = strstr(ctx->history, "},{\"role\"");
-        if (!p) break;
-        char *q = strstr(p + 2, "},{\"role\"");
-        if (!q) break;
-        size_t remove_len = (size_t)(q - (p + 1));
-        memmove(p + 1, q, ctx->history_len - (q - ctx->history) + 1);
+        /* Find the first message after the system prompt */
+        char *first_msg = strstr(ctx->history, ",{\"role\":\"");
+        if (!first_msg) break;
+
+        /* Drop turn in pairs (user + assistant) to maintain conversational parity */
+        char *next_msg = strstr(first_msg + 1, ",{\"role\":\"");
+        if (next_msg) {
+            char *turn_after = strstr(next_msg + 1, ",{\"role\":\"");
+            if (turn_after) {
+                next_msg = turn_after;
+            }
+        }
+        if (!next_msg) break;
+
+        size_t remove_len = (size_t)(next_msg - first_msg);
+        memmove(first_msg, next_msg, ctx->history_len - (next_msg - ctx->history) + 1);
         ctx->history_len -= remove_len;
     }
 }
@@ -468,6 +478,16 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         event_buf[0] = '\0';
 
         if (body_start) {
+            if (!strstr(headers, " 200 ")) {
+                fprintf(stderr, "[ren] Upstream HTTP error: %.200s\n", headers);
+                if (cb) {
+                    cb("DONE", "0", "Upstream HTTP error", userdata);
+                }
+                free(headers);
+                free(full_response);
+                close(sock);
+                return -1;
+            }
             body_start += 4;
             size_t init_len = header_len - (size_t)(body_start - headers);
             if (init_len > 0 && init_len < sizeof(event_buf) - 1) {
@@ -549,7 +569,9 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             if (!final_resp[0] && last_tool_result[0]) {
                 final_resp = last_tool_result;
             }
-            append_message(ctx, "assistant", final_resp);
+            if (final_resp && final_resp[0]) {
+                append_message(ctx, "assistant", final_resp);
+            }
             /* Flush any remaining unspoken text to TTS */
             if (cb) {
                 char *rem = unspoken;

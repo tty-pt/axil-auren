@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
+#include <errno.h>
 #include "ttypt/libren.h"
 
 static char *session_path = NULL;
@@ -89,7 +90,7 @@ static void sock_event_cb(const char *event_type, const char *arg1, const char *
 }
 
 static int setup_unix_listener(const char *path) {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -185,31 +186,44 @@ int main(int argc, char **argv) {
 
         char *line = NULL;
         size_t cap = 0;
+        int stdin_closed = 0;
 
         while (1) {
-            if (interactive) {
+            if (interactive && !stdin_closed) {
                 printf("> ");
                 fflush(stdout);
             }
 
             struct pollfd pfds[2];
             int nfds = 0;
-            pfds[nfds].fd = STDIN_FILENO;
-            pfds[nfds].events = POLLIN;
-            nfds++;
+            int stdin_idx = -1;
+            int listen_idx = -1;
+
+            if (!stdin_closed) {
+                stdin_idx = nfds;
+                pfds[nfds].fd = STDIN_FILENO;
+                pfds[nfds].events = POLLIN;
+                nfds++;
+            }
 
             if (listen_fd >= 0) {
+                listen_idx = nfds;
                 pfds[nfds].fd = listen_fd;
                 pfds[nfds].events = POLLIN;
                 nfds++;
             }
 
+            if (nfds == 0) break;
+
             int prc = poll(pfds, nfds, -1);
-            if (prc < 0) break;
+            if (prc < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
 
             /* 1. Handle Unix Domain Socket connection from jarvisd / CLI */
-            if (listen_fd >= 0 && nfds > 1 && (pfds[1].revents & POLLIN)) {
-                int cli = accept(listen_fd, NULL, NULL);
+            if (listen_idx >= 0 && (pfds[listen_idx].revents & POLLIN)) {
+                int cli = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
                 if (cli >= 0) {
                     char req[4096];
                     ssize_t n = read(cli, req, sizeof(req) - 1);
@@ -222,13 +236,13 @@ int main(int argc, char **argv) {
                             if (strcmp(req, "/new") == 0 || strcmp(req, "/reset") == 0) {
                                 ren_reset(&ctx);
                                 save_session(&ctx, session_path);
-                                if (interactive) {
+                                if (interactive && !stdin_closed) {
                                     printf("\n[voice] /reset (session cleared)\n");
                                     fflush(stdout);
                                 }
                                 sock_event_cb("DONE", "1", "Session reset", &cli);
                             } else {
-                                if (interactive) {
+                                if (interactive && !stdin_closed) {
                                     printf("\n[jarvis] > %s\n", req);
                                     fflush(stdout);
                                 }
@@ -243,9 +257,15 @@ int main(int argc, char **argv) {
             }
 
             /* 2. Handle interactive STDIN line in tmux / terminal */
-            if (pfds[0].revents & (POLLIN | POLLHUP)) {
+            if (stdin_idx >= 0 && (pfds[stdin_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
                 ssize_t nread = getline(&line, &cap, stdin);
-                if (nread <= 0) break;
+                if (nread <= 0) {
+                    if (listen_fd >= 0) {
+                        stdin_closed = 1;
+                        continue;
+                    }
+                    break;
+                }
 
                 while (nread > 0 && (line[nread - 1] == '\n' || line[nread - 1] == '\r')) {
                     line[--nread] = '\0';

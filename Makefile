@@ -267,20 +267,8 @@ npm-test: npm-build
 
 # ren modules
 mm_prefix := $(shell for d in ../libmm ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/mm.h" ] && { [ -f "$$d/lib/libmm.${SO}" ] || [ -f "$$d/lib64/libmm.${SO}" ]; } && echo "$$d" && break; done || true)
-mm_prefix != for d in ../libmm ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/mm.h" ] && { [ -f "$$d/lib/libmm.${SO}" ] || [ -f "$$d/lib64/libmm.${SO}" ]; } && echo "$$d" && break; done || true
-
-jarvis_prefix := $(shell for d in ../libjarvis ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/jarvis.h" ] && { [ -f "$$d/lib/libjarvis.${SO}" ] || [ -f "$$d/lib64/libjarvis.${SO}" ]; } && echo "$$d" && break; done || true)
-jarvis_prefix != for d in ../libjarvis ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/jarvis.h" ] && { [ -f "$$d/lib/libjarvis.${SO}" ] || [ -f "$$d/lib64/libjarvis.${SO}" ]; } && echo "$$d" && break; done || true
-
-mm_rpath_dev-../libmm := -Wl,-rpath,'$$ORIGIN/../../../libmm/lib'
-jarvis_rpath_dev-../libjarvis := -Wl,-rpath,'$$ORIGIN/../../../libjarvis/lib'
-mm_lib_flag := $(shell [ -n "${mm_prefix}" ] && echo "-L${mm_prefix}/lib" || true)
-mm_lib_flag != [ -n "${mm_prefix}" ] && echo "-L${mm_prefix}/lib" || true
-
 REN_CORE_MODS := mods/fs/mod_fs.so mods/bash/mod_bash.so
-REN_OPT_MODS := $(shell [ -n "${mm_prefix}" ] && echo mods/mm/mod_mm.so; [ -n "${jarvis_prefix}" ] && echo mods/jarvis/mod_jarvis.so)
-REN_OPT_MODS != [ -n "${mm_prefix}" ] && echo mods/mm/mod_mm.so; [ -n "${jarvis_prefix}" ] && echo mods/jarvis/mod_jarvis.so
-REN_MODS := ${REN_CORE_MODS} ${REN_OPT_MODS}
+REN_MODS := ${REN_CORE_MODS}
 
 mods/fs/mod_fs.so: mods/fs/mod_fs.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/fs
@@ -289,14 +277,6 @@ mods/fs/mod_fs.so: mods/fs/mod_fs.c include/ttypt/libren.h lib/libren.so
 mods/bash/mod_bash.so: mods/bash/mod_bash.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/bash
 	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/mod_bash.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
-
-mods/mm/mod_mm.so: mods/mm/mod_mm.c include/ttypt/libren.h lib/libren.so
-	@mkdir -p mods/mm
-	$(CC) $(CFLAGS) -I${mm_prefix}/include -fPIC -shared -o $@ mods/mm/mod_mm.c $(LDFLAGS) -Llib -lren -L${mm_prefix}/lib -lmm -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' ${mm_rpath_dev-${mm_prefix}}
-
-mods/jarvis/mod_jarvis.so: mods/jarvis/mod_jarvis.c include/ttypt/libren.h lib/libren.so
-	@mkdir -p mods/jarvis
-	$(CC) $(CFLAGS) -I${jarvis_prefix}/include -fPIC -shared -o $@ mods/jarvis/mod_jarvis.c $(LDFLAGS) -Llib -lren -L${jarvis_prefix}/lib ${mm_lib_flag} -ljarvis -lxylem -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' ${jarvis_rpath_dev-${jarvis_prefix}} ${mm_rpath_dev-${mm_prefix}}
 
 all: ${REN_MODS}
 

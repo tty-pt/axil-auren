@@ -58,8 +58,13 @@ static void load_session(ren_context_t *ctx, const char *path) {
 static void save_session(ren_context_t *ctx, const char *path) {
     if (!path) return;
     FILE *f = fopen(path, "w");
-    if (!f) return;
-    fwrite(ctx->history, 1, ctx->history_len, f);
+    if (!f) {
+        fprintf(stderr, "[ren] Error: failed to save session %s: %s\n", path, strerror(errno));
+        return;
+    }
+    if (ctx->history_len > 0 && fwrite(ctx->history, 1, ctx->history_len, f) != ctx->history_len) {
+        fprintf(stderr, "[ren] Error: short write saving session %s: %s\n", path, strerror(errno));
+    }
     fclose(f);
 }
 
@@ -91,18 +96,23 @@ static void sock_event_cb(const char *event_type, const char *arg1, const char *
 
 static int setup_unix_listener(const char *path) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        fprintf(stderr, "[ren] Error: socket(%s) failed: %s\n", path, strerror(errno));
+        return -1;
+    }
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
     unlink(path);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "[ren] Error: bind(%s) failed: %s\n", path, strerror(errno));
         close(fd);
         return -1;
     }
     chmod(path, 0600);
     if (listen(fd, 8) < 0) {
+        fprintf(stderr, "[ren] Error: listen(%s) failed: %s\n", path, strerror(errno));
         close(fd);
         unlink(path);
         return -1;
@@ -160,7 +170,7 @@ int main(int argc, char **argv) {
 
     int ret = 0;
     if (prompt && !listen_arg) {
-        ret = ren_chat(&ctx, prompt, host, port);
+        ret = ren_chat(&ctx, prompt, host, port) < 0 ? 1 : 0;
         save_session(&ctx, session_path);
     } else {
         int interactive = isatty(STDIN_FILENO);
@@ -180,7 +190,8 @@ int main(int argc, char **argv) {
         if (prompt && *prompt) {
             printf("> %s\n", prompt);
             fflush(stdout);
-            ren_chat(&ctx, prompt, host, port);
+            if (ren_chat(&ctx, prompt, host, port) < 0)
+                ret = 1;
             save_session(&ctx, session_path);
         }
 

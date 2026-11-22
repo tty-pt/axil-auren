@@ -123,6 +123,16 @@ void auren_upstream_health_mark_success(const char *model_id);
 int  auren_upstream_health_is_cooling(const char *model_id);
 void auren_upstream_health_reset_all(void);
 
+/* Inspect a sequence of Antigravity SSE lines (NUL-terminated, newline-delimited)
+ * without network I/O; returns 0 if valid output was produced, -1 on empty or
+ * rejected completion (e.g. MALFORMED_FUNCTION_CALL), populating finish_reason_out. */
+int auren_upstream_inspect_agy_sse(
+	const char *sse_body,
+	char *finish_reason_out,
+	size_t finish_reason_sz,
+	char *finish_msg_out,
+	size_t finish_msg_sz);
+
 #ifdef __cplusplus
 }
 #endif

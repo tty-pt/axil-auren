@@ -1455,6 +1455,7 @@ struct upstream_worker_job {
 	void *ud;
 	int job_id;
 	int emitted_any;
+	char last_err[512];
 };
 
 /* Forward declaration for execute_chain_request (uses upstream_worker_job) */
@@ -1471,17 +1472,28 @@ struct agy_stream_parser {
 	struct mem_buf err_buf;
 	int tc_index;
 	int emitted_any_chunk;
+	int emitted_output;
 	int has_tool_calls;
+	int dry_run;
+	char finish_reason[64];
+	char finish_message[512];
 	struct json_object *tool_calls_arr;
 };
 
 static void
 agy_emit_chunk(struct agy_stream_parser *p, const char *delta_key, const char *delta_val)
 {
+	if (strcmp(delta_key, "content") == 0 && delta_val && delta_val[0])
+		p->emitted_output = 1;
+
 	if (!p->stream) {
 		if (strcmp(delta_key, "content") == 0 && delta_val) {
 			curl_write_mem((void *)delta_val, 1, strlen(delta_val), &p->full_content);
 		}
+		return;
+	}
+	if (p->dry_run) {
+		p->emitted_any_chunk = 1;
 		return;
 	}
 
@@ -1523,7 +1535,7 @@ agy_emit_chunk(struct agy_stream_parser *p, const char *delta_key, const char *d
 static void
 agy_emit_finish_chunk(struct agy_stream_parser *p)
 {
-	if (!p->stream)
+	if (!p->stream || p->dry_run)
 		return;
 
 	struct json_object *obj = json_object_new_object();
@@ -1565,6 +1577,7 @@ static void
 agy_emit_tool_call(struct agy_stream_parser *p, const char *call_id, const char *name, const char *args_json)
 {
 	p->has_tool_calls = 1;
+	p->emitted_output = 1;
 
 	if (!p->tool_calls_arr)
 		p->tool_calls_arr = json_object_new_array();
@@ -1580,6 +1593,10 @@ agy_emit_tool_call(struct agy_stream_parser *p, const char *call_id, const char 
 
 	if (!p->stream)
 		return; /* handled in final completion if non-streaming */
+	if (p->dry_run) {
+		p->emitted_any_chunk = 1;
+		return;
+	}
 
 	struct json_object *obj = json_object_new_object();
 	char id[64];
@@ -1644,12 +1661,35 @@ agy_parse_sse_line(struct agy_stream_parser *p, const char *line)
 		return;
 	}
 
+	struct json_object *err_o = json_object_object_get(root, "error");
+	if (err_o && json_object_is_type(err_o, json_type_object)) {
+		struct json_object *msg_o = json_object_object_get(err_o, "message");
+		if (msg_o && json_object_is_type(msg_o, json_type_string))
+			snprintf(p->finish_message, sizeof(p->finish_message), "%s", json_object_get_string(msg_o));
+		if (!p->finish_reason[0])
+			snprintf(p->finish_reason, sizeof(p->finish_reason), "UPSTREAM_ERROR");
+	}
+
 	struct json_object *resp = json_object_object_get(root, "response");
 	if (!resp) resp = root;
+
+	struct json_object *pf = json_object_object_get(resp, "promptFeedback");
+	if (pf && json_object_is_type(pf, json_type_object)) {
+		struct json_object *br = json_object_object_get(pf, "blockReason");
+		if (br && json_object_is_type(br, json_type_string) && !p->finish_reason[0])
+			snprintf(p->finish_reason, sizeof(p->finish_reason), "%s", json_object_get_string(br));
+	}
 
 	struct json_object *cands = json_object_object_get(resp, "candidates");
 	if (cands && json_object_is_type(cands, json_type_array) && json_object_array_length(cands) > 0) {
 		struct json_object *cand = json_object_array_get_idx(cands, 0);
+		struct json_object *fr = cand ? json_object_object_get(cand, "finishReason") : NULL;
+		if (fr && json_object_is_type(fr, json_type_string))
+			snprintf(p->finish_reason, sizeof(p->finish_reason), "%s", json_object_get_string(fr));
+		struct json_object *fm = cand ? json_object_object_get(cand, "finishMessage") : NULL;
+		if (fm && json_object_is_type(fm, json_type_string))
+			snprintf(p->finish_message, sizeof(p->finish_message), "%s", json_object_get_string(fm));
+
 		struct json_object *content = cand ? json_object_object_get(cand, "content") : NULL;
 		struct json_object *parts = content ? json_object_object_get(content, "parts") : NULL;
 
@@ -1702,6 +1742,22 @@ agy_parse_sse_line(struct agy_stream_parser *p, const char *line)
 	json_object_put(root);
 }
 
+static int
+agy_parser_is_valid_completion(const struct agy_stream_parser *p)
+{
+	int is_bad_finish = (p->finish_reason[0] &&
+		strcmp(p->finish_reason, "STOP") != 0 &&
+		strcmp(p->finish_reason, "MAX_TOKENS") != 0);
+	int has_output = p->stream
+		? p->emitted_output
+		: ((p->full_content.data && p->full_content.data[0]) || p->has_tool_calls);
+	if (!has_output)
+		return 0;
+	if (is_bad_finish)
+		return 0;
+	return 1;
+}
+
 static size_t
 curl_write_agy_stream(void *ptr, size_t size, size_t nmemb, void *userdata)
 {
@@ -1745,6 +1801,8 @@ struct openai_stream_parser {
 	struct mem_buf full_body;
 	struct mem_buf err_buf;
 	int emitted_any;
+	int emitted_output;
+	char err_msg[512];
 };
 
 static void
@@ -1756,6 +1814,42 @@ openai_parse_sse_line(struct openai_stream_parser *p, const char *line)
 	const char *payload = line + 6;
 	if (strcmp(payload, "[DONE]") == 0)
 		return;
+
+	struct json_object *obj = json_tokener_parse(payload);
+	if (obj && json_object_is_type(obj, json_type_object)) {
+		struct json_object *err_o = json_object_object_get(obj, "error");
+		if (err_o) {
+			const char *emsg = NULL;
+			if (json_object_is_type(err_o, json_type_object)) {
+				struct json_object *mo = json_object_object_get(err_o, "message");
+				if (mo && json_object_is_type(mo, json_type_string))
+					emsg = json_object_get_string(mo);
+			} else if (json_object_is_type(err_o, json_type_string)) {
+				emsg = json_object_get_string(err_o);
+			}
+			snprintf(p->err_msg, sizeof(p->err_msg), "%s", emsg ? emsg : "upstream SSE error");
+			if (!p->emitted_any) {
+				json_object_put(obj);
+				return;
+			}
+		}
+
+		struct json_object *choices = json_object_object_get(obj, "choices");
+		if (choices && json_object_is_type(choices, json_type_array) && json_object_array_length(choices) > 0) {
+			struct json_object *c0 = json_object_array_get_idx(choices, 0);
+			struct json_object *delta = c0 ? json_object_object_get(c0, "delta") : NULL;
+			if (delta && json_object_is_type(delta, json_type_object)) {
+				struct json_object *co = json_object_object_get(delta, "content");
+				struct json_object *tc = json_object_object_get(delta, "tool_calls");
+				if ((co && json_object_is_type(co, json_type_string) && json_object_get_string(co)[0]) ||
+				    (tc && json_object_is_type(tc, json_type_array) && json_object_array_length(tc) > 0)) {
+					p->emitted_output = 1;
+				}
+			}
+		}
+	}
+	if (obj)
+		json_object_put(obj);
 
 	struct auren_engine_result r = {
 		.job_id = p->job_id,
@@ -1830,6 +1924,7 @@ execute_antigravity_request(struct upstream_worker_job *job)
 	if (antigravity_refresh_token_locked() != 0) {
 		pthread_mutex_unlock(&g_auth.lock);
 		stl_syslog(STL_LOG_ERR, "auren-upstream: antigravity token refresh failed for job %d", job->job_id);
+		snprintf(job->last_err, sizeof(job->last_err), "antigravity token refresh failed");
 		return -1;
 	}
 	char access_token[1024];
@@ -1839,13 +1934,17 @@ execute_antigravity_request(struct upstream_worker_job *job)
 	pthread_mutex_unlock(&g_auth.lock);
 
 	struct json_object *openai_req = json_tokener_parse(job->request_json);
-	if (!openai_req)
+	if (!openai_req) {
+		snprintf(job->last_err, sizeof(job->last_err), "antigravity invalid request JSON");
 		return -1;
+	}
 
 	struct json_object *agy_req = auren_upstream_build_antigravity_request(openai_req, &job->route, project_id);
 	json_object_put(openai_req);
-	if (!agy_req)
+	if (!agy_req) {
+		snprintf(job->last_err, sizeof(job->last_err), "antigravity request build failed");
 		return -1;
+	}
 
 	const char *body_str = json_object_to_json_string(agy_req);
 
@@ -1853,6 +1952,7 @@ execute_antigravity_request(struct upstream_worker_job *job)
 	CURL *curl = curl_pool_get("daily-cloudcode-pa.googleapis.com");
 	if (!curl) {
 		json_object_put(agy_req);
+		snprintf(job->last_err, sizeof(job->last_err), "antigravity curl handle unavailable");
 		return -1;
 	}
 
@@ -1896,6 +1996,9 @@ execute_antigravity_request(struct upstream_worker_job *job)
 			parser.line_buf.len = 0;
 			parser.full_content.len = 0;
 			parser.err_buf.len = 0;
+			parser.emitted_output = 0;
+			parser.finish_reason[0] = '\0';
+			parser.finish_message[0] = '\0';
 		}
 		res = curl_easy_perform(curl);
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -1932,6 +2035,9 @@ execute_antigravity_request(struct upstream_worker_job *job)
 		parser.line_buf.len = 0;
 		parser.full_content.len = 0;
 		parser.err_buf.len = 0;
+		parser.emitted_output = 0;
+		parser.finish_reason[0] = '\0';
+		parser.finish_message[0] = '\0';
 		snprintf(endpoint_url, sizeof(endpoint_url), "%s/v1internal:streamGenerateContent?alt=sse", AGY_FALLBACK_ENDPOINT);
 		curl_easy_setopt(curl, CURLOPT_URL, endpoint_url);
 		res = curl_easy_perform(curl);
@@ -1947,10 +2053,13 @@ execute_antigravity_request(struct upstream_worker_job *job)
 		job->emitted_any = 1;
 
 	if (res != CURLE_OK || http_code != 200) {
+		const char *detail = parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res);
 		stl_syslog(STL_LOG_ERR,
 			"auren-upstream: antigravity request failed (job=%d model=%s curl=%d http=%ld err=%s)",
-			job->job_id, job->route.runtime_model, (int)res, http_code,
-			parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res));
+			job->job_id, job->route.runtime_model, (int)res, http_code, detail);
+		snprintf(job->last_err, sizeof(job->last_err),
+			"antigravity %s failed (curl=%d http=%ld): %.180s",
+			job->route.runtime_model, (int)res, http_code, detail);
 		if (parser.tool_calls_arr)
 			json_object_put(parser.tool_calls_arr);
 		free(parser.full_content.data);
@@ -1958,6 +2067,21 @@ execute_antigravity_request(struct upstream_worker_job *job)
 		return -1;
 	}
 	free(parser.err_buf.data);
+
+	if (!agy_parser_is_valid_completion(&parser)) {
+		const char *fr = parser.finish_reason[0] ? parser.finish_reason : "EMPTY";
+		const char *fm = parser.finish_message[0] ? parser.finish_message : "model produced no output";
+		stl_syslog(STL_LOG_ERR,
+			"auren-upstream: antigravity empty/rejected completion (job=%d model=%s finish=%s msg=%s)",
+			job->job_id, job->route.runtime_model, fr, fm);
+		snprintf(job->last_err, sizeof(job->last_err),
+			"antigravity %s returned %s: %.180s",
+			job->route.runtime_model, fr, fm);
+		if (parser.tool_calls_arr)
+			json_object_put(parser.tool_calls_arr);
+		free(parser.full_content.data);
+		return -1;
+	}
 
 	/* Finish response */
 	if (job->stream) {
@@ -2029,12 +2153,17 @@ execute_kilo_request(struct upstream_worker_job *job)
 	snprintf(access_token, sizeof(access_token), "%s", g_auth.kilo_access);
 	pthread_mutex_unlock(&g_auth.lock);
 
-	if (!access_token[0])
+	if (!access_token[0]) {
+		snprintf(job->last_err, sizeof(job->last_err), "kilo auth token missing");
 		return -1;
+	}
 
 	/* Rewrite model in body if bare is kilo-auto/free */
 	struct json_object *req_obj = json_tokener_parse(job->request_json);
-	if (!req_obj) return -1;
+	if (!req_obj) {
+		snprintf(job->last_err, sizeof(job->last_err), "kilo invalid request JSON");
+		return -1;
+	}
 	json_object_object_add(req_obj, "model", json_object_new_string(job->route.canonical_id));
 	const char *body_str = json_object_to_json_string(req_obj);
 
@@ -2042,6 +2171,7 @@ execute_kilo_request(struct upstream_worker_job *job)
 	CURL *curl = curl_pool_get("api.kilo.ai");
 	if (!curl) {
 		json_object_put(req_obj);
+		snprintf(job->last_err, sizeof(job->last_err), "kilo curl handle unavailable");
 		return -1;
 	}
 
@@ -2081,6 +2211,8 @@ execute_kilo_request(struct upstream_worker_job *job)
 			parser.line_buf.len = 0;
 			parser.full_body.len = 0;
 			parser.err_buf.len = 0;
+			parser.emitted_output = 0;
+			parser.err_msg[0] = '\0';
 		}
 		res = curl_easy_perform(curl);
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -2097,6 +2229,8 @@ execute_kilo_request(struct upstream_worker_job *job)
 		parser.line_buf.len = 0;
 		parser.full_body.len = 0;
 		parser.err_buf.len = 0;
+		parser.emitted_output = 0;
+		parser.err_msg[0] = '\0';
 		curl_easy_setopt(curl, CURLOPT_URL, KILO_FALLBACK_GATEWAY);
 		res = curl_easy_perform(curl);
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -2111,15 +2245,32 @@ execute_kilo_request(struct upstream_worker_job *job)
 		job->emitted_any = 1;
 
 	if (res != CURLE_OK || http_code != 200) {
+		const char *detail = parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res);
 		stl_syslog(STL_LOG_ERR,
 			"auren-upstream: kilo request failed (job=%d model=%s curl=%d http=%ld err=%s)",
-			job->job_id, job->route.canonical_id, (int)res, http_code,
-			parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res));
+			job->job_id, job->route.canonical_id, (int)res, http_code, detail);
+		snprintf(job->last_err, sizeof(job->last_err),
+			"kilo %s failed (curl=%d http=%ld): %.180s",
+			job->route.canonical_id, (int)res, http_code, detail);
 		free(parser.full_body.data);
 		free(parser.err_buf.data);
 		return -1;
 	}
 	free(parser.err_buf.data);
+
+	if (parser.err_msg[0] ||
+	    (job->stream && !parser.emitted_output) ||
+	    (!job->stream && (!parser.full_body.data || !parser.full_body.data[0]))) {
+		const char *detail = parser.err_msg[0] ? parser.err_msg : "model produced no output";
+		stl_syslog(STL_LOG_ERR,
+			"auren-upstream: kilo empty/error completion (job=%d model=%s msg=%s)",
+			job->job_id, job->route.canonical_id, detail);
+		snprintf(job->last_err, sizeof(job->last_err),
+			"kilo %s error: %.180s",
+			job->route.canonical_id, detail);
+		free(parser.full_body.data);
+		return -1;
+	}
 
 	if (job->stream) {
 		struct auren_engine_result fin = {
@@ -2152,6 +2303,7 @@ execute_copilot_request(struct upstream_worker_job *job)
 	if (copilot_refresh_token_locked() != 0) {
 		pthread_mutex_unlock(&g_auth.lock);
 		stl_syslog(STL_LOG_ERR, "auren-upstream: copilot token refresh failed for job %d", job->job_id);
+		snprintf(job->last_err, sizeof(job->last_err), "copilot token refresh failed");
 		return -1;
 	}
 	char access_token[2048];
@@ -2161,7 +2313,10 @@ execute_copilot_request(struct upstream_worker_job *job)
 	pthread_mutex_unlock(&g_auth.lock);
 
 	struct json_object *req_obj = json_tokener_parse(job->request_json);
-	if (!req_obj) return -1;
+	if (!req_obj) {
+		snprintf(job->last_err, sizeof(job->last_err), "copilot invalid request JSON");
+		return -1;
+	}
 	json_object_object_add(req_obj, "model", json_object_new_string(job->route.canonical_id));
 	const char *body_str = json_object_to_json_string(req_obj);
 
@@ -2171,6 +2326,7 @@ execute_copilot_request(struct upstream_worker_job *job)
 	CURL *curl = curl_pool_get(host);
 	if (!curl) {
 		json_object_put(req_obj);
+		snprintf(job->last_err, sizeof(job->last_err), "copilot curl handle unavailable");
 		return -1;
 	}
 
@@ -2214,6 +2370,8 @@ execute_copilot_request(struct upstream_worker_job *job)
 			parser.line_buf.len = 0;
 			parser.full_body.len = 0;
 			parser.err_buf.len = 0;
+			parser.emitted_output = 0;
+			parser.err_msg[0] = '\0';
 		}
 		res = curl_easy_perform(curl);
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -2235,15 +2393,32 @@ execute_copilot_request(struct upstream_worker_job *job)
 		job->emitted_any = 1;
 
 	if (res != CURLE_OK || http_code != 200) {
+		const char *detail = parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res);
 		stl_syslog(STL_LOG_ERR,
 			"auren-upstream: copilot request failed (job=%d model=%s curl=%d http=%ld err=%s)",
-			job->job_id, job->route.canonical_id, (int)res, http_code,
-			parser.err_buf.data ? parser.err_buf.data : curl_easy_strerror(res));
+			job->job_id, job->route.canonical_id, (int)res, http_code, detail);
+		snprintf(job->last_err, sizeof(job->last_err),
+			"copilot %s failed (curl=%d http=%ld): %.180s",
+			job->route.canonical_id, (int)res, http_code, detail);
 		free(parser.full_body.data);
 		free(parser.err_buf.data);
 		return -1;
 	}
 	free(parser.err_buf.data);
+
+	if (parser.err_msg[0] ||
+	    (job->stream && !parser.emitted_output) ||
+	    (!job->stream && (!parser.full_body.data || !parser.full_body.data[0]))) {
+		const char *detail = parser.err_msg[0] ? parser.err_msg : "model produced no output";
+		stl_syslog(STL_LOG_ERR,
+			"auren-upstream: copilot empty/error completion (job=%d model=%s msg=%s)",
+			job->job_id, job->route.canonical_id, detail);
+		snprintf(job->last_err, sizeof(job->last_err),
+			"copilot %s error: %.180s",
+			job->route.canonical_id, detail);
+		free(parser.full_body.data);
+		return -1;
+	}
 
 	if (job->stream) {
 		struct auren_engine_result fin = {
@@ -2735,7 +2910,7 @@ upstream_worker_thread(void *arg)
 			.kind = AUREN_JOB_CHAT_ONESHOT,
 			.err = -502,
 			.more = 0,
-			.payload = NULL,
+			.payload = job->last_err[0] ? strdup(job->last_err) : NULL,
 			.ud = job->ud,
 		};
 		auren_engine_push_external_result(&err_res);
@@ -2866,4 +3041,51 @@ void
 auren_upstream_set_affinity_tier(uint64_t hash, const char *tier)
 {
 	affinity_set_tier(hash, tier);
+}
+
+int
+auren_upstream_inspect_agy_sse(
+	const char *sse_body,
+	char *finish_reason_out,
+	size_t finish_reason_sz,
+	char *finish_msg_out,
+	size_t finish_msg_sz)
+{
+	if (finish_reason_out && finish_reason_sz > 0)
+		finish_reason_out[0] = '\0';
+	if (finish_msg_out && finish_msg_sz > 0)
+		finish_msg_out[0] = '\0';
+	if (!sse_body)
+		return -1;
+
+	struct agy_stream_parser p = {
+		.stream = 1,
+		.job_id = 0,
+		.ud = NULL,
+		.model_id = "test",
+		.dry_run = 1,
+	};
+
+	size_t len = strlen(sse_body);
+	if (len > 0) {
+		curl_write_agy_stream((void *)sse_body, 1, len, &p);
+		if (p.line_buf.data && p.line_buf.len > 0) {
+			p.line_buf.data[p.line_buf.len] = '\0';
+			agy_parse_sse_line(&p, p.line_buf.data);
+			p.line_buf.len = 0;
+		}
+	}
+
+	if (finish_reason_out && finish_reason_sz > 0)
+		snprintf(finish_reason_out, finish_reason_sz, "%s", p.finish_reason);
+	if (finish_msg_out && finish_msg_sz > 0)
+		snprintf(finish_msg_out, finish_msg_sz, "%s", p.finish_message);
+
+	int valid = agy_parser_is_valid_completion(&p);
+	free(p.line_buf.data);
+	free(p.full_content.data);
+	free(p.err_buf.data);
+	if (p.tool_calls_arr)
+		json_object_put(p.tool_calls_arr);
+	return valid ? 0 : -1;
 }

@@ -10,11 +10,14 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
+#include <json-c/json.h>
 #include "ttypt/libren.h"
 
 #define MAX_RESPONSE 65536
 #define MAX_TOOL_TURNS 8
-#define MAX_HISTORY_CHARS 16000
+#define MAX_HISTORY_CHARS 65536
+#define MAX_TOOL_RESULT_CHARS 16384
+#define MAX_TOOL_CALLS_PER_TURN 16
 #define MAX_TOOLS 64
 
 typedef struct {
@@ -23,12 +26,32 @@ typedef struct {
     ren_tool_func fn;
 } ren_tool_entry_t;
 
+typedef struct {
+    int index;
+    char id[128];
+    char name[128];
+    char *args;
+    size_t args_len;
+    size_t args_cap;
+} ren_tc_accum_t;
+
 static ren_tool_entry_t g_tools[MAX_TOOLS];
 static int g_num_tools = 0;
 static char *g_system_prompt = NULL;
 static int g_tools_loaded = 0;
 static ren_tier0_func g_tier0_fn = NULL;
 static ren_context_func g_context_fn = NULL;
+
+static void buf_append(char **buf, size_t *len, size_t *cap, const char *str, size_t slen) {
+    if (*len + slen + 1 > *cap) {
+        if (*cap == 0) *cap = 256;
+        while (*len + slen + 1 > *cap) *cap *= 2;
+        *buf = realloc(*buf, *cap);
+    }
+    memcpy(*buf + *len, str, slen);
+    *len += slen;
+    (*buf)[*len] = '\0';
+}
 
 static void rebuild_system_prompt(void) {
     free(g_system_prompt);
@@ -47,14 +70,15 @@ static void rebuild_system_prompt(void) {
         len = strlen(g_system_prompt);
     }
     const char *tail =
-        "To run a tool, output ONLY a single line starting with: TOOL: <name> <args>\n"
-        "Wait for TOOL_RESULT before answering.\n"
+        "Use the provided function tools to inspect files, run commands, and perform desktop actions, passing the tool arguments in the 'args' field according to each tool's usage above.\n"
+        "If function calling is unavailable (local models), you may instead output ONLY a single line starting with: TOOL: <name> <args>\n"
+        "Wait for tool results before answering.\n"
         "You have full live GUI and browser control via 'inspect', 'browser', 'window', and 'input'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
         "To interact with an open browser tab or send a message (e.g. on WhatsApp Web):\n"
-        "1. Run 'TOOL: inspect browser' (or 'TOOL: browser tab whatsapp') to focus the browser and see tabs and UI elements.\n"
-        "2. Run 'TOOL: input send <contact_or_entry> | <message>' (or 'TOOL: input click <contact>' then 'TOOL: input submit <message>') to select the conversation, type the text, and press Enter.\n"
-        "After receiving a final TOOL_RESULT that completes the user's request, always output a brief 1-sentence confirmation to the user (never an empty reply).\n"
-        "When answering the user directly (no TOOL: line), keep spoken replies concise, natural, and direct.\n"
+        "1. Run inspect with 'browser' (or browser with 'tab whatsapp') to focus the browser and see tabs and UI elements.\n"
+        "2. Run input with 'send <contact_or_entry> | <message>' (or 'click <contact>' then 'submit <message>') to select the conversation, type the text, and press Enter.\n"
+        "After receiving tool results that complete the user's request, always output a brief 1-sentence confirmation to the user (never an empty reply).\n"
+        "When answering the user directly, keep spoken replies concise, natural, and direct.\n"
         "Context is limited. Use 'record' to save important findings before they scroll out.";
     if (len + strlen(tail) + 2 > cap) {
         cap += strlen(tail) + 64;
@@ -142,65 +166,126 @@ static void load_default_tools(void) {
     ren_load_module("mods/jarvis/mod_jarvis");
 }
 
-static void buf_append(char **buf, size_t *len, size_t *cap, const char *str, size_t slen) {
-    if (*len + slen + 1 > *cap) {
-        while (*len + slen + 1 > *cap) *cap *= 2;
-        *buf = realloc(*buf, *cap);
+static const char *msg_role(struct json_object *msg) {
+    if (!msg || !json_object_is_type(msg, json_type_object)) return NULL;
+    struct json_object *ro = json_object_object_get(msg, "role");
+    if (ro && json_object_is_type(ro, json_type_string)) {
+        return json_object_get_string(ro);
     }
-    memcpy(*buf + *len, str, slen);
-    *len += slen;
-    (*buf)[*len] = '\0';
+    return NULL;
 }
 
-static void buf_append_json_escaped(char **buf, size_t *len, size_t *cap, const char *s) {
-    for (const char *p = s; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        switch (c) {
-            case '"':  buf_append(buf, len, cap, "\\\"", 2); break;
-            case '\\': buf_append(buf, len, cap, "\\\\", 2); break;
-            case '\n': buf_append(buf, len, cap, "\\n", 2); break;
-            case '\r': buf_append(buf, len, cap, "\\r", 2); break;
-            case '\t': buf_append(buf, len, cap, "\\t", 2); break;
-            default:
-                if (c >= 0x20) {
-                    buf_append(buf, len, cap, p, 1);
-                }
-                break;
+static struct json_object *parse_history_array(ren_context_t *ctx) {
+    if (!ctx || !ctx->history || ctx->history_len == 0) {
+        return json_object_new_array();
+    }
+    size_t wlen = ctx->history_len + 3;
+    char *wrapped = malloc(wlen);
+    if (!wrapped) return json_object_new_array();
+    snprintf(wrapped, wlen, "[%s]", ctx->history);
+    struct json_object *arr = json_tokener_parse(wrapped);
+    free(wrapped);
+    if (!arr || !json_object_is_type(arr, json_type_array)) {
+        if (arr) json_object_put(arr);
+        fprintf(stderr, "[ren] Warning: corrupt session history, resetting\n");
+        return json_object_new_array();
+    }
+    return arr;
+}
+
+static void write_history_array(ren_context_t *ctx, struct json_object *arr) {
+    const char *ser = json_object_to_json_string_ext(arr, JSON_C_TO_STRING_PLAIN);
+    if (!ser) return;
+    size_t slen = strlen(ser);
+    size_t inner_len = (slen >= 2 && ser[0] == '[' && ser[slen - 1] == ']') ? (slen - 2) : 0;
+    if (inner_len + 1 > ctx->history_cap) {
+        while (inner_len + 1 > ctx->history_cap) {
+            ctx->history_cap = ctx->history_cap ? ctx->history_cap * 2 : 4096;
         }
+        ctx->history = realloc(ctx->history, ctx->history_cap);
     }
+    if (inner_len > 0) {
+        memcpy(ctx->history, ser + 1, inner_len);
+    }
+    ctx->history[inner_len] = '\0';
+    ctx->history_len = inner_len;
 }
 
-static void trim_history(ren_context_t *ctx) {
-    while (ctx->history_len > MAX_HISTORY_CHARS) {
-        /* Find the first message after the system prompt */
-        char *first_msg = strstr(ctx->history, ",{\"role\":\"");
-        if (!first_msg) break;
-
-        /* Drop turn in pairs (user + assistant) to maintain conversational parity */
-        char *next_msg = strstr(first_msg + 1, ",{\"role\":\"");
-        if (next_msg) {
-            char *turn_after = strstr(next_msg + 1, ",{\"role\":\"");
-            if (turn_after) {
-                next_msg = turn_after;
-            }
-        }
-        if (!next_msg) break;
-
-        size_t remove_len = (size_t)(next_msg - first_msg);
-        memmove(first_msg, next_msg, ctx->history_len - (next_msg - ctx->history) + 1);
-        ctx->history_len -= remove_len;
-    }
-}
-
-static void append_message(ren_context_t *ctx, const char *role, const char *content) {
+static void append_json_message(ren_context_t *ctx, struct json_object *msg) {
+    const char *s = json_object_to_json_string_ext(msg, JSON_C_TO_STRING_PLAIN);
+    if (!s) return;
     if (ctx->history_len > 0) {
         buf_append(&ctx->history, &ctx->history_len, &ctx->history_cap, ",", 1);
     }
-    buf_append(&ctx->history, &ctx->history_len, &ctx->history_cap, "{\"role\":\"", 9);
-    buf_append(&ctx->history, &ctx->history_len, &ctx->history_cap, role, strlen(role));
-    buf_append(&ctx->history, &ctx->history_len, &ctx->history_cap, "\",\"content\":\"", 13);
-    buf_append_json_escaped(&ctx->history, &ctx->history_len, &ctx->history_cap, content);
-    buf_append(&ctx->history, &ctx->history_len, &ctx->history_cap, "\"}", 2);
+    buf_append(&ctx->history, &ctx->history_len, &ctx->history_cap, s, strlen(s));
+}
+
+static void append_message(ren_context_t *ctx, const char *role, const char *content) {
+    struct json_object *msg = json_object_new_object();
+    json_object_object_add(msg, "role", json_object_new_string(role));
+    json_object_object_add(msg, "content", json_object_new_string(content ? content : ""));
+    append_json_message(ctx, msg);
+    json_object_put(msg);
+}
+
+static void trim_history(ren_context_t *ctx) {
+    if (!ctx || ctx->history_len <= MAX_HISTORY_CHARS) return;
+
+    struct json_object *arr = parse_history_array(ctx);
+    size_t arr_len = json_object_array_length(arr);
+    if (arr_len <= 2) {
+        json_object_put(arr);
+        return;
+    }
+
+    size_t start_idx = 0;
+    const char *first_role = msg_role(json_object_array_get_idx(arr, 0));
+    if (first_role && strcmp(first_role, "system") == 0) {
+        start_idx = 1;
+    }
+
+    while (1) {
+        const char *ser = json_object_to_json_string_ext(arr, JSON_C_TO_STRING_PLAIN);
+        size_t ser_len = ser ? strlen(ser) : 0;
+        arr_len = json_object_array_length(arr);
+        if (ser_len <= MAX_HISTORY_CHARS + 2 || arr_len <= start_idx + 2) {
+            break;
+        }
+
+        int has_later_user = 0;
+        for (size_t i = start_idx + 1; i < arr_len; i++) {
+            const char *r = msg_role(json_object_array_get_idx(arr, i));
+            if (r && strcmp(r, "user") == 0) {
+                has_later_user = 1;
+                break;
+            }
+        }
+
+        if (has_later_user) {
+            json_object_array_del_idx(arr, start_idx, 1);
+            while (json_object_array_length(arr) > start_idx + 1) {
+                const char *r = msg_role(json_object_array_get_idx(arr, start_idx));
+                if (r && strcmp(r, "user") == 0) break;
+                json_object_array_del_idx(arr, start_idx, 1);
+            }
+        } else {
+            size_t drop_at = start_idx;
+            const char *r0 = msg_role(json_object_array_get_idx(arr, start_idx));
+            if (r0 && strcmp(r0, "user") == 0 && start_idx + 1 < arr_len) {
+                drop_at = start_idx + 1;
+            }
+            if (drop_at + 1 >= json_object_array_length(arr)) break;
+            json_object_array_del_idx(arr, drop_at, 1);
+            while (json_object_array_length(arr) > drop_at + 1) {
+                const char *r = msg_role(json_object_array_get_idx(arr, drop_at));
+                if (r && strcmp(r, "tool") != 0) break;
+                json_object_array_del_idx(arr, drop_at, 1);
+            }
+        }
+    }
+
+    write_history_array(ctx, arr);
+    json_object_put(arr);
 }
 
 static void sync_system_message(ren_context_t *ctx) {
@@ -209,21 +294,38 @@ static void sync_system_message(ren_context_t *ctx) {
         append_message(ctx, "system", g_system_prompt);
         return;
     }
-    /* Replace leading system message if tools were added after session load */
-    if (strncmp(ctx->history, "{\"role\":\"system\",\"content\":\"", 28) == 0) {
-        char *end = strstr(ctx->history, "\"},{\"role\":");
-        if (end) {
-            char *rest = strdup(end + 2); /* starts with ,{"role":... */
-            ctx->history_len = 0;
-            ctx->history[0] = '\0';
-            append_message(ctx, "system", g_system_prompt);
-            buf_append(&ctx->history, &ctx->history_len, &ctx->history_cap, rest, strlen(rest));
-            free(rest);
-        } else {
-            ctx->history_len = 0;
-            ctx->history[0] = '\0';
-            append_message(ctx, "system", g_system_prompt);
+
+    struct json_object *arr = parse_history_array(ctx);
+    size_t n = json_object_array_length(arr);
+    if (n == 0) {
+        struct json_object *sys = json_object_new_object();
+        json_object_object_add(sys, "role", json_object_new_string("system"));
+        json_object_object_add(sys, "content", json_object_new_string(g_system_prompt));
+        json_object_array_add(arr, sys);
+        write_history_array(ctx, arr);
+        json_object_put(arr);
+        return;
+    }
+
+    struct json_object *first = json_object_array_get_idx(arr, 0);
+    const char *r = msg_role(first);
+    if (r && strcmp(r, "system") == 0) {
+        json_object_object_add(first, "content", json_object_new_string(g_system_prompt));
+        write_history_array(ctx, arr);
+        json_object_put(arr);
+    } else {
+        struct json_object *new_arr = json_object_new_array();
+        struct json_object *sys = json_object_new_object();
+        json_object_object_add(sys, "role", json_object_new_string("system"));
+        json_object_object_add(sys, "content", json_object_new_string(g_system_prompt));
+        json_object_array_add(new_arr, sys);
+        for (size_t i = 0; i < n; i++) {
+            struct json_object *el = json_object_array_get_idx(arr, i);
+            json_object_array_add(new_arr, json_object_get(el));
         }
+        write_history_array(ctx, new_arr);
+        json_object_put(new_arr);
+        json_object_put(arr);
     }
 }
 
@@ -250,33 +352,107 @@ void ren_free(ren_context_t *ctx) {
     free(ctx->history);
 }
 
-static void extract_delta(const char *json, char *out, size_t out_cap) {
-    out[0] = '\0';
-    const char *c = strstr(json, "\"content\"");
-    if (!c) return;
-    c = strchr(c, ':');
-    if (!c) return;
-    c++;
-    while (*c == ' ' || *c == '\t') c++;
-    if (*c != '"') return;
-    c++;
-    size_t olen = 0;
-    for (const char *p = c; *p && *p != '"' && olen < out_cap - 1; p++) {
-        if (*p == '\\' && *(p + 1)) {
-            p++;
-            switch (*p) {
-                case 'n': out[olen++] = '\n'; break;
-                case 'r': out[olen++] = '\r'; break;
-                case 't': out[olen++] = '\t'; break;
-                case '"': out[olen++] = '"'; break;
-                case '\\': out[olen++] = '\\'; break;
-                default: out[olen++] = *p; break;
+static struct json_object *build_chat_request_json(ren_context_t *ctx) {
+    struct json_object *req = json_object_new_object();
+    struct json_object *msgs = parse_history_array(ctx);
+
+    json_object_object_add(req, "model", json_object_new_string("fast"));
+    json_object_object_add(req, "messages", msgs);
+    json_object_object_add(req, "stream", json_object_new_boolean(1));
+
+    if (g_num_tools > 0) {
+        struct json_object *tools = json_object_new_array();
+        for (int i = 0; i < g_num_tools; i++) {
+            struct json_object *entry = json_object_new_object();
+            json_object_object_add(entry, "type", json_object_new_string("function"));
+
+            struct json_object *fn = json_object_new_object();
+            json_object_object_add(fn, "name", json_object_new_string(g_tools[i].name));
+            json_object_object_add(fn, "description", json_object_new_string(g_tools[i].usage));
+
+            struct json_object *params = json_object_new_object();
+            json_object_object_add(params, "type", json_object_new_string("object"));
+            struct json_object *props = json_object_new_object();
+            struct json_object *args_prop = json_object_new_object();
+            json_object_object_add(args_prop, "type", json_object_new_string("string"));
+            json_object_object_add(args_prop, "description", json_object_new_string(g_tools[i].usage));
+            json_object_object_add(props, "args", args_prop);
+            json_object_object_add(params, "properties", props);
+
+            struct json_object *required = json_object_new_array();
+            json_object_array_add(required, json_object_new_string("args"));
+            json_object_object_add(params, "required", required);
+
+            json_object_object_add(fn, "parameters", params);
+            json_object_object_add(entry, "function", fn);
+            json_object_array_add(tools, entry);
+        }
+        json_object_object_add(req, "tools", tools);
+    }
+
+    return req;
+}
+
+static char *unpack_tool_args(const char *raw_args) {
+    if (!raw_args || !*raw_args) return strdup("");
+    struct json_object *obj = json_tokener_parse(raw_args);
+    if (obj && json_object_is_type(obj, json_type_object)) {
+        static const char *const keys[] = {
+            "args", "command", "cmd", "path", "file", "query", "input", "text", "url", NULL
+        };
+        for (int i = 0; keys[i]; i++) {
+            struct json_object *v = json_object_object_get(obj, keys[i]);
+            if (v && json_object_is_type(v, json_type_string)) {
+                char *res = strdup(json_object_get_string(v));
+                json_object_put(obj);
+                return res ? res : strdup("");
             }
-        } else {
-            out[olen++] = *p;
+        }
+        struct json_object_iterator it = json_object_iter_begin(obj);
+        struct json_object_iterator end = json_object_iter_end(obj);
+        while (!json_object_iter_equal(&it, &end)) {
+            struct json_object *v = json_object_iter_peek_value(&it);
+            if (v && json_object_is_type(v, json_type_string)) {
+                char *res = strdup(json_object_get_string(v));
+                json_object_put(obj);
+                return res ? res : strdup("");
+            }
+            json_object_iter_next(&it);
+        }
+    } else if (obj && json_object_is_type(obj, json_type_string)) {
+        char *res = strdup(json_object_get_string(obj));
+        json_object_put(obj);
+        return res ? res : strdup("");
+    }
+    if (obj) json_object_put(obj);
+    return strdup(raw_args);
+}
+
+static ren_tc_accum_t *find_or_add_tc(ren_tc_accum_t *tcs, int *n_tcs, int idx, const char *id_hint) {
+    for (int i = 0; i < *n_tcs; i++) {
+        if (tcs[i].index == idx) {
+            return &tcs[i];
         }
     }
-    out[olen] = '\0';
+    if (id_hint && *id_hint) {
+        for (int i = 0; i < *n_tcs; i++) {
+            if (strcmp(tcs[i].id, id_hint) == 0) {
+                return &tcs[i];
+            }
+        }
+    }
+    if (*n_tcs >= MAX_TOOL_CALLS_PER_TURN) return NULL;
+    ren_tc_accum_t *slot = &tcs[(*n_tcs)++];
+    memset(slot, 0, sizeof(*slot));
+    slot->index = idx;
+    return slot;
+}
+
+static void free_tcs(ren_tc_accum_t *tcs, int n_tcs) {
+    for (int i = 0; i < n_tcs; i++) {
+        free(tcs[i].args);
+        tcs[i].args = NULL;
+    }
 }
 
 /* Pop a ready spoken sentence/clause from unspoken buffer if we know it's not a TOOL: call */
@@ -335,9 +511,67 @@ static int pop_spoken_clause(char *unspoken, bool is_first, char *out_clause, si
     return clen > 0 ? 1 : 0;
 }
 
+static void append_tool_result_turn(ren_context_t *ctx, const char *tname, const char *targs,
+                                    const char *tool_call_id, ren_event_cb cb, void *userdata,
+                                    int is_native) {
+    fprintf(stderr, "[tool] %s %s\n", tname, targs);
+    if (cb) {
+        cb("TOOL", tname, targs, userdata);
+    }
+
+    char *tres = NULL;
+    int rc = dispatch_tool(tname, targs, &tres);
+    if (!tres || !*tres) {
+        free(tres);
+        tres = strdup(rc == 0 ? "(ok, empty output)" : "Error: tool exited non-zero with no output");
+    }
+
+    size_t tlen = strlen(tres);
+    if (tlen > MAX_TOOL_RESULT_CHARS) {
+        const char *trunc = "\n...(truncated)";
+        size_t trlen = strlen(trunc);
+        if (MAX_TOOL_RESULT_CHARS > trlen) {
+            memcpy(tres + MAX_TOOL_RESULT_CHARS - trlen, trunc, trlen + 1);
+        } else {
+            tres[MAX_TOOL_RESULT_CHARS] = '\0';
+        }
+    }
+
+    printf("[tool-result] %.240s%s\n", tres, strlen(tres) > 240 ? "..." : "");
+    fflush(stdout);
+
+    if (is_native) {
+        struct json_object *tmsg = json_object_new_object();
+        json_object_object_add(tmsg, "role", json_object_new_string("tool"));
+        json_object_object_add(tmsg, "tool_call_id", json_object_new_string(tool_call_id));
+        json_object_object_add(tmsg, "name", json_object_new_string(tname));
+        json_object_object_add(tmsg, "content", json_object_new_string(tres));
+        append_json_message(ctx, tmsg);
+        json_object_put(tmsg);
+    } else {
+        size_t msg_cap = strlen(tres) + 32;
+        char *tmsg = malloc(msg_cap);
+        snprintf(tmsg, msg_cap, "TOOL_RESULT:\n%s", tres);
+        append_message(ctx, "user", tmsg);
+        free(tmsg);
+    }
+
+    free(tres);
+}
+
+static void emit_error(ren_event_cb cb, void *userdata, const char *msg) {
+    fprintf(stderr, "[ren] Error: %s\n", msg);
+    if (cb) {
+        cb("DONE", "0", msg, userdata);
+    }
+}
+
 int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int port,
                 ren_event_cb cb, void *userdata) {
-    if (!ctx || !prompt || !*prompt) return -1;
+    if (!ctx || !prompt || !*prompt) {
+        emit_error(cb, userdata, "Invalid prompt or context");
+        return -1;
+    }
     sync_system_message(ctx);
 
     /* 1. Tier-0 Fast Deterministic Reflex Check (<1ms) */
@@ -395,31 +629,48 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         append_message(ctx, "user", prompt);
     }
 
-    char last_tool_result[256] = {0};
-
     for (int turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         trim_history(ctx);
-        size_t body_cap = ctx->history_len + 128;
-        char *body = malloc(body_cap);
-        snprintf(body, body_cap,
-            "{\"model\":\"fast\",\"messages\":[%s],\"stream\":true}",
-            ctx->history);
+        struct json_object *req_obj = build_chat_request_json(ctx);
+        const char *body = req_obj ? json_object_to_json_string_ext(req_obj, JSON_C_TO_STRING_PLAIN) : NULL;
+        if (!body) {
+            if (req_obj) json_object_put(req_obj);
+            emit_error(cb, userdata, "Failed to serialize request JSON");
+            return -1;
+        }
 
         int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) { free(body); return -1; }
+        if (sock < 0) {
+            char emsg[256];
+            snprintf(emsg, sizeof(emsg), "socket() failed: %s", strerror(errno));
+            json_object_put(req_obj);
+            emit_error(cb, userdata, emsg);
+            return -1;
+        }
 
         struct hostent *he = gethostbyname(host);
-        if (!he) { close(sock); free(body); return -1; }
+        if (!he) {
+            char emsg[256];
+            snprintf(emsg, sizeof(emsg), "Failed to resolve host %s", host);
+            close(sock);
+            json_object_put(req_obj);
+            emit_error(cb, userdata, emsg);
+            return -1;
+        }
 
         struct sockaddr_in addr;
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+        addr.sin_port = htons((uint16_t)port);
+        memcpy(&addr.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
 
         if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-            close(sock); free(body);
-            if (cb) cb("DONE", "0", "Failed to connect to axil-auren", userdata);
+            char emsg[256];
+            snprintf(emsg, sizeof(emsg), "Failed to connect to axil-auren (%s:%d): %s",
+                     host, port, strerror(errno));
+            close(sock);
+            json_object_put(req_obj);
+            emit_error(cb, userdata, emsg);
             return -1;
         }
 
@@ -433,37 +684,106 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             "Content-Length: %zu\r\n"
             "Connection: close\r\n\r\n%s",
             host, port, body_len, body);
+        json_object_put(req_obj);
 
         size_t sent = 0;
+        int send_failed = 0;
         while (sent < (size_t)req_len) {
-            ssize_t n = send(sock, request + sent, req_len - sent, 0);
-            if (n <= 0) { free(request); free(body); close(sock); return -1; }
-            sent += n;
+            ssize_t n = send(sock, request + sent, (size_t)req_len - sent, 0);
+            if (n <= 0) {
+                send_failed = 1;
+                break;
+            }
+            sent += (size_t)n;
         }
         free(request);
-        free(body);
+        if (send_failed) {
+            char emsg[256];
+            snprintf(emsg, sizeof(emsg), "send() to axil-auren failed: %s", strerror(errno));
+            close(sock);
+            emit_error(cb, userdata, emsg);
+            return -1;
+        }
 
-        /* Read headers (and keep any body bytes that arrived in the same packet) */
+        /* Read HTTP headers (and keep any body bytes that arrived in the same packet) */
         char buf[4096];
         size_t header_len = 0;
-        char *headers = malloc(8192);
         size_t headers_cap = 8192;
+        char *headers = malloc(headers_cap);
+        headers[0] = '\0';
         char *body_start = NULL;
+        int recv_err = 0;
 
         while (!body_start) {
             ssize_t n = recv(sock, buf, sizeof(buf), 0);
-            if (n <= 0) break;
-            if (header_len + n + 1 > headers_cap) {
-                headers_cap *= 2;
+            if (n < 0) {
+                recv_err = errno;
+                break;
+            }
+            if (n == 0) break;
+            if (header_len + (size_t)n + 1 > headers_cap) {
+                while (header_len + (size_t)n + 1 > headers_cap) headers_cap *= 2;
                 headers = realloc(headers, headers_cap);
             }
-            memcpy(headers + header_len, buf, n);
-            header_len += n;
+            memcpy(headers + header_len, buf, (size_t)n);
+            header_len += (size_t)n;
             headers[header_len] = '\0';
             body_start = strstr(headers, "\r\n\r\n");
         }
 
-        /* Process remaining data as SSE */
+        if (!body_start) {
+            char emsg[256];
+            if (recv_err) {
+                snprintf(emsg, sizeof(emsg), "recv() from axil-auren failed: %s", strerror(recv_err));
+            } else {
+                snprintf(emsg, sizeof(emsg), "axil-auren closed connection before HTTP headers");
+            }
+            free(headers);
+            close(sock);
+            emit_error(cb, userdata, emsg);
+            return -1;
+        }
+
+        int http_status = 0;
+        if (strncmp(headers, "HTTP/", 5) == 0) {
+            const char *sp = strchr(headers, ' ');
+            if (sp) http_status = atoi(sp + 1);
+        }
+
+        body_start += 4;
+        size_t init_len = header_len - (size_t)(body_start - headers);
+
+        if (http_status != 200) {
+            char err_body[1024];
+            size_t eblen = init_len < sizeof(err_body) - 1 ? init_len : sizeof(err_body) - 1;
+            if (eblen > 0) memcpy(err_body, body_start, eblen);
+            while (eblen < sizeof(err_body) - 1) {
+                ssize_t n = recv(sock, err_body + eblen, sizeof(err_body) - 1 - eblen, 0);
+                if (n <= 0) break;
+                eblen += (size_t)n;
+            }
+            err_body[eblen] = '\0';
+            char emsg[1200];
+            if (eblen > 0) {
+                snprintf(emsg, sizeof(emsg), "Upstream HTTP %d: %s", http_status, err_body);
+            } else {
+                snprintf(emsg, sizeof(emsg), "Upstream HTTP %d", http_status);
+            }
+            free(headers);
+            close(sock);
+            emit_error(cb, userdata, emsg);
+            return -1;
+        }
+
+        size_t event_cap = 16384;
+        size_t event_len = 0;
+        char *event_buf = malloc(event_cap);
+        event_buf[0] = '\0';
+        if (init_len > 0) {
+            buf_append(&event_buf, &event_len, &event_cap, body_start, init_len);
+        }
+        free(headers);
+
         size_t full_cap = MAX_RESPONSE;
         char *full_response = malloc(full_cap);
         size_t full_len = 0;
@@ -473,71 +793,146 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         unspoken[0] = '\0';
         bool first_clause = true;
 
-        char event_buf[16384];
-        size_t event_len = 0;
-        event_buf[0] = '\0';
+        ren_tc_accum_t tcs[MAX_TOOL_CALLS_PER_TURN];
+        int n_tcs = 0;
 
-        if (body_start) {
-            if (!strstr(headers, " 200 ")) {
-                fprintf(stderr, "[ren] Upstream HTTP error: %.200s\n", headers);
-                if (cb) {
-                    cb("DONE", "0", "Upstream HTTP error", userdata);
-                }
-                free(headers);
-                free(full_response);
-                close(sock);
-                return -1;
-            }
-            body_start += 4;
-            size_t init_len = header_len - (size_t)(body_start - headers);
-            if (init_len > 0 && init_len < sizeof(event_buf) - 1) {
-                memcpy(event_buf, body_start, init_len);
-                event_len = init_len;
-                event_buf[event_len] = '\0';
-            }
-        }
-        free(headers);
+        int got_sse_error = 0;
+        char sse_err[512] = {0};
+        int stream_recv_err = 0;
+        int stop_reading = 0;
+        int eof_seen = 0;
 
         char chunk[4096];
         while (1) {
-            /* First parse any complete events already in event_buf */
+            /* Parse complete newline-delimited SSE lines */
             char *ptr = event_buf;
-            char *end;
-            while ((end = strstr(ptr, "\n\n")) != NULL) {
-                *end = '\0';
-                char *data = strstr(ptr, "data: ");
-                if (data) {
-                    data += 6;
-                    if (strncmp(data, "[DONE]", 6) == 0) {
-                        goto done;
-                    }
-                    char delta[4096];
-                    extract_delta(data, delta, sizeof(delta));
-                    if (delta[0] != '\0') {
-                        printf("%s", delta);
-                        fflush(stdout);
-                        buf_append(&full_response, &full_len, &full_cap, delta, strlen(delta));
-                        char *tl = strstr(full_response, "TOOL: ");
-                        if (tl) {
-                            char *nl = strchr(tl, '\n');
-                            if (nl) {
-                                *nl = '\0';
-                                full_len = (size_t)(nl - full_response);
-                                goto done;
-                            }
-                        }
-                        if (cb && strlen(unspoken) + strlen(delta) + 1 < sizeof(unspoken)) {
-                            strcat(unspoken, delta);
-                            char clause[512];
-                            while (pop_spoken_clause(unspoken, first_clause, clause, sizeof(clause))) {
-                                cb("CLAUSE", clause, "0", userdata);
-                                first_clause = false;
-                            }
-                        }
-                    }
+            char *nl;
+            while ((nl = memchr(ptr, '\n', event_len - (size_t)(ptr - event_buf))) != NULL) {
+                *nl = '\0';
+                size_t llen = (size_t)(nl - ptr);
+                if (llen > 0 && ptr[llen - 1] == '\r') {
+                    ptr[--llen] = '\0';
                 }
-                ptr = end + 2;
+
+                if (strncmp(ptr, "data: ", 6) == 0) {
+                    const char *data = ptr + 6;
+                    if (strcmp(data, "[DONE]") == 0) {
+                        stop_reading = 1;
+                        break;
+                    }
+                    struct json_object *jobj = json_tokener_parse(data);
+                    if (jobj && json_object_is_type(jobj, json_type_object)) {
+                        struct json_object *err_o = json_object_object_get(jobj, "error");
+                        if (err_o) {
+                            const char *emsg = NULL;
+                            if (json_object_is_type(err_o, json_type_object)) {
+                                struct json_object *mo = json_object_object_get(err_o, "message");
+                                if (mo && json_object_is_type(mo, json_type_string)) {
+                                    emsg = json_object_get_string(mo);
+                                }
+                            } else if (json_object_is_type(err_o, json_type_string)) {
+                                emsg = json_object_get_string(err_o);
+                            }
+                            snprintf(sse_err, sizeof(sse_err), "%s",
+                                     (emsg && *emsg) ? emsg : "Upstream SSE error");
+                            got_sse_error = 1;
+                            json_object_put(jobj);
+                            stop_reading = 1;
+                            break;
+                        }
+
+                        struct json_object *choices = json_object_object_get(jobj, "choices");
+                        if (choices && json_object_is_type(choices, json_type_array) &&
+                            json_object_array_length(choices) > 0) {
+                            struct json_object *c0 = json_object_array_get_idx(choices, 0);
+                            struct json_object *delta = c0 ? json_object_object_get(c0, "delta") : NULL;
+                            if (delta && json_object_is_type(delta, json_type_object)) {
+                                struct json_object *co = json_object_object_get(delta, "content");
+                                if (co && json_object_is_type(co, json_type_string)) {
+                                    const char *ds = json_object_get_string(co);
+                                    if (ds && ds[0] != '\0') {
+                                        printf("%s", ds);
+                                        fflush(stdout);
+                                        buf_append(&full_response, &full_len, &full_cap, ds, strlen(ds));
+                                        if (n_tcs == 0) {
+                                            char *tl = strstr(full_response, "TOOL: ");
+                                            if (tl) {
+                                                char *tnl = strchr(tl, '\n');
+                                                if (tnl) {
+                                                    *tnl = '\0';
+                                                    full_len = (size_t)(tnl - full_response);
+                                                    json_object_put(jobj);
+                                                    stop_reading = 1;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if (cb && n_tcs == 0 && strlen(unspoken) + strlen(ds) + 1 < sizeof(unspoken)) {
+                                            strcat(unspoken, ds);
+                                            char clause[512];
+                                            while (pop_spoken_clause(unspoken, first_clause, clause, sizeof(clause))) {
+                                                cb("CLAUSE", clause, "0", userdata);
+                                                first_clause = false;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                struct json_object *tc_arr = json_object_object_get(delta, "tool_calls");
+                                if (tc_arr && json_object_is_type(tc_arr, json_type_array)) {
+                                    size_t n_tc_items = json_object_array_length(tc_arr);
+                                    for (size_t ti = 0; ti < n_tc_items; ti++) {
+                                        struct json_object *tc_item = json_object_array_get_idx(tc_arr, ti);
+                                        if (!tc_item || !json_object_is_type(tc_item, json_type_object)) continue;
+
+                                        struct json_object *id_o = json_object_object_get(tc_item, "id");
+                                        const char *id_s = (id_o && json_object_is_type(id_o, json_type_string))
+                                            ? json_object_get_string(id_o) : NULL;
+
+                                        struct json_object *idx_o = json_object_object_get(tc_item, "index");
+                                        int tc_idx = 0;
+                                        if (idx_o && json_object_is_type(idx_o, json_type_int)) {
+                                            tc_idx = json_object_get_int(idx_o);
+                                        } else if (id_s && *id_s && n_tcs > 0 && strcmp(tcs[n_tcs - 1].id, id_s) != 0) {
+                                            tc_idx = n_tcs;
+                                        }
+
+                                        ren_tc_accum_t *slot = find_or_add_tc(tcs, &n_tcs, tc_idx, id_s);
+                                        if (!slot) continue;
+
+                                        if (id_s && *id_s) {
+                                            snprintf(slot->id, sizeof(slot->id), "%s", id_s);
+                                        }
+                                        struct json_object *fn_o = json_object_object_get(tc_item, "function");
+                                        if (fn_o && json_object_is_type(fn_o, json_type_object)) {
+                                            struct json_object *name_o = json_object_object_get(fn_o, "name");
+                                            if (name_o && json_object_is_type(name_o, json_type_string)) {
+                                                const char *nm = json_object_get_string(name_o);
+                                                if (nm && *nm) {
+                                                    snprintf(slot->name, sizeof(slot->name), "%s", nm);
+                                                }
+                                            }
+                                            struct json_object *args_o = json_object_object_get(fn_o, "arguments");
+                                            if (args_o && json_object_is_type(args_o, json_type_string)) {
+                                                const char *as = json_object_get_string(args_o);
+                                                if (as && *as) {
+                                                    buf_append(&slot->args, &slot->args_len, &slot->args_cap, as, strlen(as));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (jobj) json_object_put(jobj);
+                }
+
+                ptr = nl + 1;
             }
+
+            if (stop_reading || eof_seen) break;
+
             size_t remaining = event_len - (size_t)(ptr - event_buf);
             if (ptr != event_buf) {
                 memmove(event_buf, ptr, remaining);
@@ -546,40 +941,102 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             }
 
             ssize_t n = recv(sock, chunk, sizeof(chunk) - 1, 0);
-            if (n <= 0) break;
-            chunk[n] = '\0';
-
-            if (event_len + n + 1 > sizeof(event_buf)) {
-                event_len = 0;
+            if (n < 0) {
+                stream_recv_err = errno;
+                break;
             }
-            memcpy(event_buf + event_len, chunk, n);
-            event_len += n;
-            event_buf[event_len] = '\0';
+            if (n == 0) {
+                if (event_len > 0) {
+                    buf_append(&event_buf, &event_len, &event_cap, "\n", 1);
+                    eof_seen = 1;
+                    continue;
+                }
+                break;
+            }
+            buf_append(&event_buf, &event_len, &event_cap, chunk, (size_t)n);
         }
-    done:
+
         close(sock);
+        free(event_buf);
 
-        printf("\n");
-        fflush(stdout);
+        if (full_len > 0) {
+            printf("\n");
+            fflush(stdout);
+        }
 
-        /* Check for TOOL: */
+        if (got_sse_error) {
+            free_tcs(tcs, n_tcs);
+            free(full_response);
+            emit_error(cb, userdata, sse_err);
+            return -1;
+        }
+
+        if (stream_recv_err && full_len == 0 && n_tcs == 0) {
+            char emsg[256];
+            snprintf(emsg, sizeof(emsg), "Stream recv() error: %s", strerror(stream_recv_err));
+            free_tcs(tcs, n_tcs);
+            free(full_response);
+            emit_error(cb, userdata, emsg);
+            return -1;
+        }
+
+        /* 2a. Native OpenAI tool_calls turn */
+        if (n_tcs > 0) {
+            struct json_object *asst = json_object_new_object();
+            json_object_object_add(asst, "role", json_object_new_string("assistant"));
+            if (full_len > 0) {
+                json_object_object_add(asst, "content", json_object_new_string(full_response));
+            } else {
+                json_object_object_add(asst, "content", NULL);
+            }
+            struct json_object *tc_arr = json_object_new_array();
+            for (int i = 0; i < n_tcs; i++) {
+                if (!tcs[i].id[0]) {
+                    snprintf(tcs[i].id, sizeof(tcs[i].id), "call_%d_%d", turn, i);
+                }
+                struct json_object *tc = json_object_new_object();
+                json_object_object_add(tc, "id", json_object_new_string(tcs[i].id));
+                json_object_object_add(tc, "type", json_object_new_string("function"));
+                struct json_object *fn = json_object_new_object();
+                json_object_object_add(fn, "name", json_object_new_string(tcs[i].name));
+                json_object_object_add(fn, "arguments",
+                    json_object_new_string(tcs[i].args ? tcs[i].args : "{}"));
+                json_object_object_add(tc, "function", fn);
+                json_object_array_add(tc_arr, tc);
+            }
+            json_object_object_add(asst, "tool_calls", tc_arr);
+            append_json_message(ctx, asst);
+            json_object_put(asst);
+
+            for (int i = 0; i < n_tcs; i++) {
+                char *targs = unpack_tool_args(tcs[i].args);
+                append_tool_result_turn(ctx, tcs[i].name, targs ? targs : "",
+                                        tcs[i].id, cb, userdata, 1);
+                free(targs);
+            }
+
+            free_tcs(tcs, n_tcs);
+            free(full_response);
+            continue;
+        }
+        free_tcs(tcs, n_tcs);
+
+        /* 2b. Legacy/local model TOOL: fallback */
         char *tool_line = strstr(full_response, "TOOL: ");
         if (!tool_line) {
-            const char *final_resp = full_response;
-            if (!final_resp[0] && last_tool_result[0]) {
-                final_resp = last_tool_result;
+            if (full_len == 0) {
+                free(full_response);
+                emit_error(cb, userdata, "Upstream returned empty response");
+                return -1;
             }
-            if (final_resp && final_resp[0]) {
-                append_message(ctx, "assistant", final_resp);
-            }
-            /* Flush any remaining unspoken text to TTS */
+            append_message(ctx, "assistant", full_response);
             if (cb) {
                 char *rem = unspoken;
                 while (*rem && isspace((unsigned char)*rem)) rem++;
                 if (*rem) {
                     cb("CLAUSE", rem, "1", userdata);
                 }
-                cb("DONE", "1", final_resp, userdata);
+                cb("DONE", "1", full_response, userdata);
             }
             free(full_response);
             return 0;
@@ -601,34 +1058,12 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             while (*targs == ' ') targs++;
         }
 
-        fprintf(stderr, "[tool] %s %s\n", tname, targs);
-        if (cb) {
-            cb("TOOL", tname, targs, userdata);
-        }
-
-        char *tres = NULL;
-        dispatch_tool(tname, targs, &tres);
-        if (!tres) tres = strdup("OK");
-
-        snprintf(last_tool_result, sizeof(last_tool_result), "%.250s", tres);
-        char *nl_pos = strchr(last_tool_result, '\n');
-        if (nl_pos) *nl_pos = '\0';
-
-        printf("[tool-result] %.240s%s\n", tres, strlen(tres) > 240 ? "..." : "");
-        fflush(stdout);
-
-        size_t msg_cap = strlen(tres) + 32;
-        char *tmsg = malloc(msg_cap);
-        snprintf(tmsg, msg_cap, "TOOL_RESULT:\n%s", tres);
-        append_message(ctx, "user", tmsg);
-
-        free(tmsg);
-        free(tres);
+        append_tool_result_turn(ctx, tname, targs, "", cb, userdata, 0);
         free(full_response);
     }
 
-    if (cb) cb("DONE", "1", "Max tool turns reached", userdata);
-    return 0;
+    emit_error(cb, userdata, "Max tool turns reached");
+    return -1;
 }
 
 int ren_chat(ren_context_t *ctx, const char *prompt, const char *host, int port) {

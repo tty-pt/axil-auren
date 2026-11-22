@@ -17,6 +17,8 @@
 #include "auren-pending.h"
 #include "auren-upstream.h"
 
+#include <json-c/json.h>
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -305,11 +307,22 @@ drain(void *cbud __attribute__((unused)),
 
 		if (p->mode) {
 			if (r->err) {
-				char err_buf[256];
-				snprintf(err_buf, sizeof(err_buf),
-					"data: {\"error\":{\"message\":\"Engine error %d: generation or context failed\",\"type\":\"server_error\"}}\n\n",
-					r->err);
-				axil_write(fd, err_buf, strlen(err_buf));
+				char fallback[128];
+				snprintf(fallback, sizeof(fallback),
+					"Engine error %d: generation or context failed", r->err);
+				const char *msg = (r->payload && r->payload[0]) ? r->payload : fallback;
+				struct json_object *eo = json_object_new_object();
+				struct json_object *ei = json_object_new_object();
+				json_object_object_add(ei, "message", json_object_new_string(msg));
+				json_object_object_add(ei, "type", json_object_new_string("server_error"));
+				json_object_object_add(eo, "error", ei);
+				const char *es = json_object_to_json_string(eo);
+				if (es) {
+					axil_write(fd, "data: ", 6);
+					axil_write(fd, (char *)es, strlen(es));
+					axil_write(fd, "\n\n", 2);
+				}
+				json_object_put(eo);
 			} else if (r->payload) {
 				axil_write(fd, "data: ", 6);
 				axil_write(fd, r->payload, strlen(r->payload));

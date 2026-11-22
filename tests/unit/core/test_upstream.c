@@ -310,3 +310,42 @@ TEST(upstream_large_system_prompt_and_many_tool_calls)
 	json_object_put(agy_req);
 }
 
+TEST(upstream_agy_sse_valid_and_rejected_completions)
+{
+	char fr[64], fm[512];
+
+	/* 1. Valid text completion with STOP */
+	const char *ok_text =
+		"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello world\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}}\n\n";
+	ASSERT_EQ(auren_upstream_inspect_agy_sse(ok_text, fr, sizeof(fr), fm, sizeof(fm)), 0);
+	ASSERT_STR_EQ(fr, "STOP");
+
+	/* 2. Valid native tool call */
+	const char *ok_tc =
+		"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"bash\",\"args\":{\"args\":\"ls -la\"}},\"thoughtSignature\":\"sig123\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}}\n\n";
+	ASSERT_EQ(auren_upstream_inspect_agy_sse(ok_tc, fr, sizeof(fr), fm, sizeof(fm)), 0);
+
+	/* 3. Exact production failure: empty text + MALFORMED_FUNCTION_CALL */
+	const char *bad_mfc =
+		"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\"}],\"role\":\"model\"},\"finishReason\":\"MALFORMED_FUNCTION_CALL\",\"finishMessage\":\"Malformed function call: call:ren:bash{}\"}]}}\n\n";
+	ASSERT_EQ(auren_upstream_inspect_agy_sse(bad_mfc, fr, sizeof(fr), fm, sizeof(fm)), -1);
+	ASSERT_STR_EQ(fr, "MALFORMED_FUNCTION_CALL");
+	ASSERT_NOT_NULL(strstr(fm, "Malformed function call"));
+
+	/* 4. Thinking tokens followed by MALFORMED_FUNCTION_CALL and no visible output */
+	const char *bad_thoughts_only =
+		"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Let me run bash\",\"thought\":true}],\"role\":\"model\"}}]}}\n\n"
+		"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\"}],\"role\":\"model\"},\"finishReason\":\"MALFORMED_FUNCTION_CALL\",\"finishMessage\":\"Malformed function call\"}]}}\n\n";
+	ASSERT_EQ(auren_upstream_inspect_agy_sse(bad_thoughts_only, fr, sizeof(fr), fm, sizeof(fm)), -1);
+	ASSERT_STR_EQ(fr, "MALFORMED_FUNCTION_CALL");
+
+	/* 5. Completely empty stream */
+	ASSERT_EQ(auren_upstream_inspect_agy_sse("data: [DONE]\n\n", fr, sizeof(fr), fm, sizeof(fm)), -1);
+
+	/* 6. Upstream JSON error frame in SSE */
+	const char *sse_err =
+		"data: {\"error\":{\"code\":429,\"message\":\"Quota exceeded\"}}\n\n";
+	ASSERT_EQ(auren_upstream_inspect_agy_sse(sse_err, fr, sizeof(fr), fm, sizeof(fm)), -1);
+	ASSERT_STR_EQ(fr, "UPSTREAM_ERROR");
+	ASSERT_STR_EQ(fm, "Quota exceeded");
+}

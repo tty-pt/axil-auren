@@ -14,7 +14,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define MAX_MOCK_TURNS 8
+#define MAX_MOCK_TURNS 40
 
 struct mock_http_server {
 	int listen_fd;
@@ -31,7 +31,8 @@ static char *read_http_request_body(int cfd) {
 	if (!buf) return NULL;
 	buf[0] = '\0';
 
-	char *hdr_end = NULL;
+	int has_hdr = 0;
+	size_t body_off = 0;
 	size_t content_len = 0;
 
 	while (1) {
@@ -44,19 +45,20 @@ static char *read_http_request_body(int cfd) {
 		len += (size_t)n;
 		buf[len] = '\0';
 
-		if (!hdr_end) {
-			hdr_end = strstr(buf, "\r\n\r\n");
+		if (!has_hdr) {
+			char *hdr_end = strstr(buf, "\r\n\r\n");
 			if (hdr_end) {
+				has_hdr = 1;
+				body_off = (size_t)((hdr_end + 4) - buf);
 				const char *cl = strcasestr(buf, "Content-Length:");
 				if (cl && cl < hdr_end) {
 					content_len = (size_t)strtoul(cl + 15, NULL, 10);
 				}
 			}
 		}
-		if (hdr_end) {
-			size_t body_off = (size_t)((hdr_end + 4) - buf);
+		if (has_hdr) {
 			if (len - body_off >= content_len) {
-				char *body = strndup(hdr_end + 4, content_len);
+				char *body = strndup(buf + body_off, content_len);
 				free(buf);
 				return body;
 			}
@@ -122,11 +124,19 @@ static void mock_server_launch(struct mock_http_server *s) {
 	pthread_create(&s->tid, NULL, mock_server_thread, s);
 }
 
+static void mock_server_join(struct mock_http_server *s) {
+	if (s->listen_fd >= 0) {
+		pthread_join(s->tid, NULL);
+		close(s->listen_fd);
+		s->listen_fd = -1;
+	}
+}
+
 static void mock_server_stop(struct mock_http_server *s) {
-	pthread_join(s->tid, NULL);
-	close(s->listen_fd);
+	mock_server_join(s);
 	for (int i = 0; i < s->n_turns; i++) {
 		free(s->req_bodies[i]);
+		s->req_bodies[i] = NULL;
 	}
 }
 
@@ -191,7 +201,7 @@ TEST(ren_native_tool_calls_multi_turn)
 
 	struct captured_events ev = {0};
 	int rc = ren_chat_ex(&ctx, "List the files", "127.0.0.1", srv.port, test_event_cb, &ev);
-	mock_server_stop(&srv);
+	mock_server_join(&srv);
 
 	ASSERT_EQ(rc, 0);
 	ASSERT_EQ(ev.tool_calls, 1);
@@ -224,6 +234,7 @@ TEST(ren_native_tool_calls_multi_turn)
 	ASSERT_NOT_NULL(strstr(json_object_get_string(json_object_object_get(last_m, "content")), "README.md"));
 	json_object_put(req1);
 
+	mock_server_stop(&srv);
 	ren_free(&ctx);
 }
 
@@ -342,12 +353,13 @@ TEST(ren_history_trim_preserves_json_and_tool_parity)
 
 	ren_context_t ctx;
 	ren_init(&ctx);
+	ctx.max_history_chars = 262144;
 	ren_register_tool("bash", "bash <command>", mock_bash_tool);
 
 	struct mock_http_server srv;
 	ASSERT_EQ(mock_server_start(&srv, 2), 0);
 
-	/* Seed history with literal delimiter pattern inside content and >70KB so trim_history runs */
+	/* Seed history with literal delimiter pattern inside content and >262KB so proactive compaction runs */
 	char big_chunk[18000];
 	memset(big_chunk, 'X', sizeof(big_chunk) - 1);
 	big_chunk[sizeof(big_chunk) - 1] = '\0';
@@ -365,11 +377,8 @@ TEST(ren_history_trim_preserves_json_and_tool_parity)
 		"data: {\"choices\":[{\"delta\":{\"content\":\"Trimmed cleanly.\"}}]}\n\n"
 		"data: [DONE]\n\n";
 
-	/* Populate 4 large user/assistant turns via mock_server-free manual append?
-	 * Better: use ren_chat_ex? No, we can inject large turns directly via ren_reset + append?
-	 * Only ctx->history is public, so append valid comma-separated JSON objects cleanly: */
 	struct json_object *arr = json_object_new_array();
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 16; i++) {
 		struct json_object *u = json_object_new_object();
 		json_object_object_add(u, "role", json_object_new_string("user"));
 		json_object_object_add(u, "content", json_object_new_string(big_chunk));
@@ -394,22 +403,385 @@ TEST(ren_history_trim_preserves_json_and_tool_parity)
 	mock_server_launch(&srv);
 	struct captured_events ev = {0};
 	int rc = ren_chat_ex(&ctx, "Check trimmed history", "127.0.0.1", srv.port, test_event_cb, &ev);
-	mock_server_stop(&srv);
+	mock_server_join(&srv);
 
 	ASSERT_EQ(rc, 0);
 	ASSERT_STR_EQ(ev.done_msg, "Trimmed cleanly.");
 
-	/* Verify turn 0 request messages parsed cleanly, started with system, then user */
+	/* Verify turn 0 request messages were trimmed, started with system, then user */
 	struct json_object *req0 = json_tokener_parse(srv.req_bodies[0]);
 	ASSERT_NOT_NULL(req0);
 	struct json_object *msgs0 = json_object_object_get(req0, "messages");
 	ASSERT_NOT_NULL(msgs0);
-	ASSERT_TRUE(json_object_array_length(msgs0) >= 2);
+	size_t m0_len = json_object_array_length(msgs0);
+	ASSERT_TRUE(m0_len >= 2);
+	ASSERT_TRUE(m0_len < 34);
 	struct json_object *m0 = json_object_array_get_idx(msgs0, 0);
 	struct json_object *m1 = json_object_array_get_idx(msgs0, 1);
 	ASSERT_STR_EQ(json_object_get_string(json_object_object_get(m0, "role")), "system");
 	ASSERT_STR_EQ(json_object_get_string(json_object_object_get(m1, "role")), "user");
 	json_object_put(req0);
 
+	mock_server_stop(&srv);
 	ren_free(&ctx);
 }
+
+TEST(ren_max_tool_turns_triggers_graceful_wrapup)
+{
+	signal(SIGPIPE, SIG_IGN);
+	snprintf(g_mock_tool_output, sizeof(g_mock_tool_output), "file_entry");
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ctx.max_turns = 8;
+	ren_register_tool("bash", "bash <command>", mock_bash_tool);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 9), 0);
+
+	char *resps[8];
+	for (int i = 0; i < 8; i++) {
+		resps[i] = malloc(512);
+		snprintf(resps[i], 512,
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"args\\\":\\\"ls_%d\\\"}\"}}]}}]}\n\n"
+			"data: [DONE]\n\n", i);
+		srv.responses[i] = resps[i];
+	}
+	srv.responses[8] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Summary after 8 tool turns.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	mock_server_launch(&srv);
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Explore project", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	for (int i = 0; i < 8; i++) free(resps[i]);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(ev.tool_calls, 8);
+	ASSERT_EQ(ev.done_calls, 1);
+	ASSERT_STR_EQ(ev.done_ok, "1");
+	ASSERT_STR_EQ(ev.done_msg, "Summary after 8 tool turns.");
+
+	/* Turn 8 wrap-up request should include tool_choice: "none" and transient wrap-up nudge */
+	ASSERT_NOT_NULL(srv.req_bodies[8]);
+	struct json_object *req_w = json_tokener_parse(srv.req_bodies[8]);
+	ASSERT_NOT_NULL(req_w);
+	struct json_object *tc_o = json_object_object_get(req_w, "tool_choice");
+	ASSERT_NOT_NULL(tc_o);
+	ASSERT_STR_EQ(json_object_get_string(tc_o), "none");
+	struct json_object *msgs_w = json_object_object_get(req_w, "messages");
+	ASSERT_NOT_NULL(msgs_w);
+	size_t nw = json_object_array_length(msgs_w);
+	struct json_object *last_w = json_object_array_get_idx(msgs_w, nw - 1);
+	ASSERT_STR_EQ(json_object_get_string(json_object_object_get(last_w, "role")), "user");
+	ASSERT_NOT_NULL(strstr(json_object_get_string(json_object_object_get(last_w, "content")), "Tool turn limit reached"));
+	json_object_put(req_w);
+
+	mock_server_stop(&srv);
+
+	/* Persisted history should end with assistant summary, not transient nudge or dangling tool */
+	size_t wlen = ctx.history_len + 3;
+	char *wrapped = malloc(wlen);
+	snprintf(wrapped, wlen, "[%s]", ctx.history);
+	struct json_object *arr = json_tokener_parse(wrapped);
+	free(wrapped);
+	ASSERT_NOT_NULL(arr);
+	size_t hn = json_object_array_length(arr);
+	struct json_object *last_h = json_object_array_get_idx(arr, hn - 1);
+	ASSERT_STR_EQ(json_object_get_string(json_object_object_get(last_h, "role")), "assistant");
+	ASSERT_STR_EQ(json_object_get_string(json_object_object_get(last_h, "content")), "Summary after 8 tool turns.");
+	json_object_put(arr);
+
+	ren_free(&ctx);
+}
+
+TEST(ren_unlimited_turns_exceeds_32_by_default)
+{
+	signal(SIGPIPE, SIG_IGN);
+	snprintf(g_mock_tool_output, sizeof(g_mock_tool_output), "ok");
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ASSERT_EQ(ctx.max_turns, 0);
+	ASSERT_EQ(ctx.max_history_chars, (size_t)0);
+	ren_register_tool("bash", "bash <command>", mock_bash_tool);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 36), 0);
+
+	char *resps[35];
+	for (int i = 0; i < 35; i++) {
+		resps[i] = malloc(512);
+		snprintf(resps[i], 512,
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"args\\\":\\\"step_%d\\\"}\"}}]}}]}\n\n"
+			"data: [DONE]\n\n", i);
+		srv.responses[i] = resps[i];
+	}
+	srv.responses[35] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Completed 35 turns.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	mock_server_launch(&srv);
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Explore deeply", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	for (int i = 0; i < 35; i++) free(resps[i]);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(ev.tool_calls, 35);
+	ASSERT_STR_EQ(ev.done_ok, "1");
+	ASSERT_STR_EQ(ev.done_msg, "Completed 35 turns.");
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+TEST(ren_stall_detection_wraps_up_repeated_calls)
+{
+	signal(SIGPIPE, SIG_IGN);
+	snprintf(g_mock_tool_output, sizeof(g_mock_tool_output), "same_dir_listing");
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_register_tool("bash", "bash <command>", mock_bash_tool);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 4), 0);
+
+	const char *repeat_tc =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"args\\\":\\\"ls -la\\\"}\"}}]}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	srv.responses[0] = repeat_tc;
+	srv.responses[1] = repeat_tc;
+	srv.responses[2] = repeat_tc; /* 3rd identical turn triggers stall wrap-up without executing tool */
+	srv.responses[3] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Stopped repeating and answered.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	mock_server_launch(&srv);
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Inspect", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(ev.tool_calls, 2);
+	ASSERT_STR_EQ(ev.done_ok, "1");
+	ASSERT_STR_EQ(ev.done_msg, "Stopped repeating and answered.");
+
+	ASSERT_NOT_NULL(srv.req_bodies[3]);
+	struct json_object *req_w = json_tokener_parse(srv.req_bodies[3]);
+	ASSERT_NOT_NULL(req_w);
+	ASSERT_STR_EQ(json_object_get_string(json_object_object_get(req_w, "tool_choice")), "none");
+	struct json_object *msgs_w = json_object_object_get(req_w, "messages");
+	size_t nw = json_object_array_length(msgs_w);
+	struct json_object *last_w = json_object_array_get_idx(msgs_w, nw - 1);
+	ASSERT_NOT_NULL(strstr(json_object_get_string(json_object_object_get(last_w, "content")), "Repeated identical tool calls detected"));
+	json_object_put(req_w);
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+TEST(ren_overflow_compaction_retries_and_recovers)
+{
+	signal(SIGPIPE, SIG_IGN);
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+
+	/* Seed multi-turn history without setting max_history_chars (default 0 = no upfront trim) */
+	char big_chunk[4096];
+	memset(big_chunk, 'A', sizeof(big_chunk) - 1);
+	big_chunk[sizeof(big_chunk) - 1] = '\0';
+
+	struct json_object *arr = json_object_new_array();
+	for (int i = 0; i < 6; i++) {
+		struct json_object *u = json_object_new_object();
+		json_object_object_add(u, "role", json_object_new_string("user"));
+		json_object_object_add(u, "content", json_object_new_string(big_chunk));
+		json_object_array_add(arr, u);
+
+		struct json_object *a = json_object_new_object();
+		json_object_object_add(a, "role", json_object_new_string("assistant"));
+		json_object_object_add(a, "content", json_object_new_string("ok"));
+		json_object_array_add(arr, a);
+	}
+	const char *ser = json_object_to_json_string_ext(arr, JSON_C_TO_STRING_PLAIN);
+	size_t inner = strlen(ser) - 2;
+	free(ctx.history);
+	ctx.history_cap = inner + 16;
+	ctx.history = malloc(ctx.history_cap);
+	memcpy(ctx.history, ser + 1, inner);
+	ctx.history[inner] = '\0';
+	ctx.history_len = inner;
+	json_object_put(arr);
+
+	size_t seeded_len = ctx.history_len;
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 2), 0);
+
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"error\":{\"message\":\"antigravity failed (http=400): maximum context length exceeded\",\"type\":\"server_error\"}}\n\n"
+		"data: [DONE]\n\n";
+
+	srv.responses[1] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Recovered after compaction.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	mock_server_launch(&srv);
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Continue", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_STR_EQ(ev.done_ok, "1");
+	ASSERT_STR_EQ(ev.done_msg, "Recovered after compaction.");
+	ASSERT_TRUE(ctx.history_len < seeded_len);
+	ASSERT_TRUE(strlen(srv.req_bodies[1]) < strlen(srv.req_bodies[0]));
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+static int g_custom_compact_calls = 0;
+static char g_custom_compact_reason[64] = {0};
+
+static int mock_xylem_compactor(ren_context_t *ctx, size_t target_bytes, const char *reason)
+{
+	(void)target_bytes;
+	g_custom_compact_calls++;
+	snprintf(g_custom_compact_reason, sizeof(g_custom_compact_reason), "%s", reason ? reason : "");
+
+	const char *replacement =
+		"{\"role\":\"system\",\"content\":\"You are ren.\"},"
+		"{\"role\":\"user\",\"content\":\"[compacted summary] Continue\"}";
+	size_t rlen = strlen(replacement);
+	if (rlen + 1 > ctx->history_cap) {
+		ctx->history_cap = rlen + 16;
+		ctx->history = realloc(ctx->history, ctx->history_cap);
+	}
+	memcpy(ctx->history, replacement, rlen + 1);
+	ctx->history_len = rlen;
+	return 1;
+}
+
+TEST(ren_custom_compactor_extension_hook)
+{
+	signal(SIGPIPE, SIG_IGN);
+	g_custom_compact_calls = 0;
+	g_custom_compact_reason[0] = '\0';
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_register_compactor(mock_xylem_compactor);
+
+	char big_chunk[4096];
+	memset(big_chunk, 'Z', sizeof(big_chunk) - 1);
+	big_chunk[sizeof(big_chunk) - 1] = '\0';
+
+	struct json_object *arr = json_object_new_array();
+	for (int i = 0; i < 4; i++) {
+		struct json_object *u = json_object_new_object();
+		json_object_object_add(u, "role", json_object_new_string("user"));
+		json_object_object_add(u, "content", json_object_new_string(big_chunk));
+		json_object_array_add(arr, u);
+	}
+	const char *ser = json_object_to_json_string_ext(arr, JSON_C_TO_STRING_PLAIN);
+	size_t inner = strlen(ser) - 2;
+	free(ctx.history);
+	ctx.history_cap = inner + 16;
+	ctx.history = malloc(ctx.history_cap);
+	memcpy(ctx.history, ser + 1, inner);
+	ctx.history[inner] = '\0';
+	ctx.history_len = inner;
+	json_object_put(arr);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 2), 0);
+
+	srv.responses[0] =
+		"HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+		"{\"error\":\"request entity too large\"}";
+	srv.responses[1] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Custom compactor worked.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	mock_server_launch(&srv);
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Continue", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	ren_register_compactor(NULL);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(g_custom_compact_calls, 1);
+	ASSERT_STR_EQ(g_custom_compact_reason, "overflow");
+	ASSERT_STR_EQ(ev.done_msg, "Custom compactor worked.");
+	ASSERT_NOT_NULL(strstr(srv.req_bodies[1], "[compacted summary]"));
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+TEST(ren_default_prompt_excludes_optional_mods)
+{
+	ren_context_t ctx;
+	ren_init(&ctx);
+
+	ASSERT_NOT_NULL(ctx.history);
+	ASSERT_NOT_NULL(strstr(ctx.history, "You are ren, a pure-C coding assistant."));
+	ASSERT_NULL(strstr(ctx.history, "Jarvis"));
+	ASSERT_NULL(strstr(ctx.history, "WhatsApp"));
+	ASSERT_NULL(strstr(ctx.history, "record"));
+	ASSERT_NULL(strstr(ctx.history, "recall"));
+	ASSERT_NULL(strstr(ctx.history, "inspect"));
+
+	ren_free(&ctx);
+}
+
+TEST(ren_prompt_hint_updates_system_prompt)
+{
+	signal(SIGPIPE, SIG_IGN);
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_register_prompt_hint("Test hint: custom module active.");
+	ren_register_prompt_hint("Test hint: custom module active.");
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 1), 0);
+
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Hint received.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	mock_server_launch(&srv);
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Check prompt", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_NOT_NULL(srv.req_bodies[0]);
+	const char *first_hit = strstr(srv.req_bodies[0], "Test hint: custom module active.");
+	ASSERT_NOT_NULL(first_hit);
+	ASSERT_NULL(strstr(first_hit + 1, "Test hint: custom module active."));
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+

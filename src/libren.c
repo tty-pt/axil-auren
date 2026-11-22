@@ -14,11 +14,10 @@
 #include "ttypt/libren.h"
 
 #define MAX_RESPONSE 65536
-#define MAX_TOOL_TURNS 8
-#define MAX_HISTORY_CHARS 65536
-#define MAX_TOOL_RESULT_CHARS 16384
 #define MAX_TOOL_CALLS_PER_TURN 16
 #define MAX_TOOLS 64
+#define STALL_REPEAT_THRESHOLD 3
+#define MAX_OVERFLOW_RETRIES 3
 
 typedef struct {
     char *name;
@@ -35,12 +34,18 @@ typedef struct {
     size_t args_cap;
 } ren_tc_accum_t;
 
+#define MAX_PROMPT_HINTS 16
+
 static ren_tool_entry_t g_tools[MAX_TOOLS];
 static int g_num_tools = 0;
+static char *g_prompt_hints[MAX_PROMPT_HINTS];
+static int g_num_prompt_hints = 0;
 static char *g_system_prompt = NULL;
 static int g_tools_loaded = 0;
 static ren_tier0_func g_tier0_fn = NULL;
 static ren_context_func g_context_fn = NULL;
+static ren_compact_func g_compactor_fn = NULL;
+static volatile sig_atomic_t *g_abort_flag = NULL;
 
 static void buf_append(char **buf, size_t *len, size_t *cap, const char *str, size_t slen) {
     if (*len + slen + 1 > *cap) {
@@ -56,35 +61,29 @@ static void buf_append(char **buf, size_t *len, size_t *cap, const char *str, si
 static void rebuild_system_prompt(void) {
     free(g_system_prompt);
     size_t cap = 1024;
+    size_t len = 0;
     g_system_prompt = malloc(cap);
-    snprintf(g_system_prompt, cap,
-        "You are ren (Jarvis's executive brain), a pure-C coding and Linux desktop assistant. Available tools:\n");
-    size_t len = strlen(g_system_prompt);
+    g_system_prompt[0] = '\0';
+
+    const char *hdr = "You are ren, a pure-C coding assistant. Available tools:\n";
+    buf_append(&g_system_prompt, &len, &cap, hdr, strlen(hdr));
+
     for (int i = 0; i < g_num_tools; i++) {
-        size_t need = len + strlen(g_tools[i].usage) + 32;
-        if (need > cap) {
-            while (need > cap) cap *= 2;
-            g_system_prompt = realloc(g_system_prompt, cap);
-        }
-        snprintf(g_system_prompt + len, cap - len, "- %s\n", g_tools[i].usage);
-        len = strlen(g_system_prompt);
+        buf_append(&g_system_prompt, &len, &cap, "- ", 2);
+        buf_append(&g_system_prompt, &len, &cap, g_tools[i].usage, strlen(g_tools[i].usage));
+        buf_append(&g_system_prompt, &len, &cap, "\n", 1);
     }
+
     const char *tail =
-        "Use the provided function tools to inspect files, run commands, and perform desktop actions, passing the tool arguments in the 'args' field according to each tool's usage above.\n"
+        "Use the provided function tools, passing the tool arguments in the 'args' field according to each tool's usage above.\n"
         "If function calling is unavailable (local models), you may instead output ONLY a single line starting with: TOOL: <name> <args>\n"
-        "Wait for tool results before answering.\n"
-        "You have full live GUI and browser control via 'inspect', 'browser', 'window', and 'input'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
-        "To interact with an open browser tab or send a message (e.g. on WhatsApp Web):\n"
-        "1. Run inspect with 'browser' (or browser with 'tab whatsapp') to focus the browser and see tabs and UI elements.\n"
-        "2. Run input with 'send <contact_or_entry> | <message>' (or 'click <contact>' then 'submit <message>') to select the conversation, type the text, and press Enter.\n"
-        "After receiving tool results that complete the user's request, always output a brief 1-sentence confirmation to the user (never an empty reply).\n"
-        "When answering the user directly, keep spoken replies concise, natural, and direct.\n"
-        "Context is limited. Use 'record' to save important findings before they scroll out.";
-    if (len + strlen(tail) + 2 > cap) {
-        cap += strlen(tail) + 64;
-        g_system_prompt = realloc(g_system_prompt, cap);
+        "Wait for tool results before answering.";
+    buf_append(&g_system_prompt, &len, &cap, tail, strlen(tail));
+
+    for (int i = 0; i < g_num_prompt_hints; i++) {
+        buf_append(&g_system_prompt, &len, &cap, "\n", 1);
+        buf_append(&g_system_prompt, &len, &cap, g_prompt_hints[i], strlen(g_prompt_hints[i]));
     }
-    strcat(g_system_prompt, tail);
 }
 
 void ren_register_tool(const char *name, const char *usage, ren_tool_func fn) {
@@ -105,6 +104,16 @@ void ren_register_tool(const char *name, const char *usage, ren_tool_func fn) {
     rebuild_system_prompt();
 }
 
+void ren_register_prompt_hint(const char *hint) {
+    if (!hint || !*hint) return;
+    for (int i = 0; i < g_num_prompt_hints; i++) {
+        if (strcmp(g_prompt_hints[i], hint) == 0) return;
+    }
+    if (g_num_prompt_hints >= MAX_PROMPT_HINTS) return;
+    g_prompt_hints[g_num_prompt_hints++] = strdup(hint);
+    rebuild_system_prompt();
+}
+
 void ren_register_tier0(ren_tier0_func fn) {
     g_tier0_fn = fn;
 }
@@ -113,7 +122,26 @@ void ren_register_context_provider(ren_context_func fn) {
     g_context_fn = fn;
 }
 
+void ren_register_compactor(ren_compact_func fn) {
+    g_compactor_fn = fn;
+}
+
+void ren_set_abort_flag(volatile sig_atomic_t *flag) {
+    g_abort_flag = flag;
+}
+
+static int try_load_so_stem(const char *stem) {
+    char probe[2100];
+    snprintf(probe, sizeof(probe), "%s.so", stem);
+    if (access(probe, R_OK) == 0) {
+        return xy_load((char *)stem);
+    }
+    return -1;
+}
+
 int ren_load_module(const char *path) {
+    if (!path || !*path) return -1;
+
     char clean[512];
     snprintf(clean, sizeof(clean), "%s", path);
     size_t len = strlen(clean);
@@ -121,26 +149,43 @@ int ren_load_module(const char *path) {
         clean[len - 3] = '\0';
     }
 
-    char probe[1050];
-    snprintf(probe, sizeof(probe), "%s.so", clean);
-    if (access(probe, R_OK) == 0) {
-        return xy_load(clean);
+    if (try_load_so_stem(clean) == 0) {
+        return 0;
     }
 
-    const char *home = getenv("HOME");
-    if (home && *home && path[0] != '/') {
+    if (path[0] != '/') {
         const char *base = strrchr(clean, '/');
         base = base ? (base + 1) : clean;
-        char candidate[1024];
-        snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/%s", home, base);
-        snprintf(probe, sizeof(probe), "%s.so", candidate);
-        if (access(probe, R_OK) == 0) {
-            return xy_load(candidate);
+        int has_mod_prefix = (strncmp(base, "mod_", 4) == 0);
+        char candidate[2048];
+
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/%s", home, base);
+            if (try_load_so_stem(candidate) == 0) return 0;
+
+            if (!has_mod_prefix) {
+                snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/mod_%s", home, base);
+                if (try_load_so_stem(candidate) == 0) return 0;
+            }
+
+            snprintf(candidate, sizeof(candidate), "%s/site/external/axil-auren/%s", home, clean);
+            if (try_load_so_stem(candidate) == 0) return 0;
+
+            if (!has_mod_prefix) {
+                snprintf(candidate, sizeof(candidate), "%s/site/external/axil-auren/mods/%s/mod_%s", home, base, base);
+                if (try_load_so_stem(candidate) == 0) return 0;
+            }
         }
-        snprintf(candidate, sizeof(candidate), "%s/site/external/axil-auren/%s", home, clean);
-        snprintf(probe, sizeof(probe), "%s.so", candidate);
-        if (access(probe, R_OK) == 0) {
-            return xy_load(candidate);
+
+        static const char *const sys_dirs[] = { "/usr/local/lib/ren", "/usr/lib/ren", NULL };
+        for (int i = 0; sys_dirs[i]; i++) {
+            snprintf(candidate, sizeof(candidate), "%s/%s", sys_dirs[i], base);
+            if (try_load_so_stem(candidate) == 0) return 0;
+            if (!has_mod_prefix) {
+                snprintf(candidate, sizeof(candidate), "%s/mod_%s", sys_dirs[i], base);
+                if (try_load_so_stem(candidate) == 0) return 0;
+            }
         }
     }
     return xy_load(clean);
@@ -162,8 +207,6 @@ static void load_default_tools(void) {
     xy_init();
     ren_load_module("mods/fs/mod_fs");
     ren_load_module("mods/bash/mod_bash");
-    ren_load_module("mods/mm/mod_mm");
-    ren_load_module("mods/jarvis/mod_jarvis");
 }
 
 static const char *msg_role(struct json_object *msg) {
@@ -228,14 +271,14 @@ static void append_message(ren_context_t *ctx, const char *role, const char *con
     json_object_put(msg);
 }
 
-static void trim_history(ren_context_t *ctx) {
-    if (!ctx || ctx->history_len <= MAX_HISTORY_CHARS) return;
+int ren_compact_default(ren_context_t *ctx, size_t target_bytes) {
+    if (!ctx || ctx->history_len <= target_bytes) return 0;
 
     struct json_object *arr = parse_history_array(ctx);
     size_t arr_len = json_object_array_length(arr);
     if (arr_len <= 2) {
         json_object_put(arr);
-        return;
+        return 0;
     }
 
     size_t start_idx = 0;
@@ -248,7 +291,7 @@ static void trim_history(ren_context_t *ctx) {
         const char *ser = json_object_to_json_string_ext(arr, JSON_C_TO_STRING_PLAIN);
         size_t ser_len = ser ? strlen(ser) : 0;
         arr_len = json_object_array_length(arr);
-        if (ser_len <= MAX_HISTORY_CHARS + 2 || arr_len <= start_idx + 2) {
+        if (ser_len <= target_bytes + 2 || arr_len <= start_idx + 2) {
             break;
         }
 
@@ -274,18 +317,33 @@ static void trim_history(ren_context_t *ctx) {
             if (r0 && strcmp(r0, "user") == 0 && start_idx + 1 < arr_len) {
                 drop_at = start_idx + 1;
             }
-            if (drop_at + 1 >= json_object_array_length(arr)) break;
-            json_object_array_del_idx(arr, drop_at, 1);
-            while (json_object_array_length(arr) > drop_at + 1) {
-                const char *r = msg_role(json_object_array_get_idx(arr, drop_at));
-                if (r && strcmp(r, "tool") != 0) break;
-                json_object_array_del_idx(arr, drop_at, 1);
+            size_t group_end = drop_at + 1;
+            while (group_end < arr_len) {
+                const char *r = msg_role(json_object_array_get_idx(arr, group_end));
+                if (!r || strcmp(r, "tool") != 0) break;
+                group_end++;
             }
+            if (group_end >= arr_len) break;
+            json_object_array_del_idx(arr, drop_at, group_end - drop_at);
         }
     }
 
+    size_t old_len = ctx->history_len;
     write_history_array(ctx, arr);
     json_object_put(arr);
+    return ctx->history_len < old_len ? 1 : 0;
+}
+
+static int compact_history(ren_context_t *ctx, size_t target_bytes, const char *reason) {
+    if (!ctx) return 0;
+    size_t before = ctx->history_len;
+    if (g_compactor_fn) {
+        int rc = g_compactor_fn(ctx, target_bytes, reason ? reason : "limit");
+        if (rc > 0 && ctx->history_len < before) {
+            return 1;
+        }
+    }
+    return ren_compact_default(ctx, target_bytes);
 }
 
 static void sync_system_message(ren_context_t *ctx) {
@@ -331,11 +389,17 @@ static void sync_system_message(ren_context_t *ctx) {
 
 void ren_init(ren_context_t *ctx) {
     load_default_tools();
+    if (!g_system_prompt) {
+        rebuild_system_prompt();
+    }
     ctx->session_id = strdup("session-1");
     ctx->history_cap = 4096;
     ctx->history = malloc(ctx->history_cap);
     ctx->history[0] = '\0';
     ctx->history_len = 0;
+    ctx->max_turns = 0;
+    ctx->max_history_chars = 0;
+    ctx->max_tool_output = REN_DEFAULT_TOOL_OUTPUT_CHARS;
 
     append_message(ctx, "system", g_system_prompt ? g_system_prompt : "You are ren.");
 }
@@ -352,9 +416,21 @@ void ren_free(ren_context_t *ctx) {
     free(ctx->history);
 }
 
-static struct json_object *build_chat_request_json(ren_context_t *ctx) {
+static struct json_object *build_chat_request_json(ren_context_t *ctx, const char *wrapup_reason) {
     struct json_object *req = json_object_new_object();
     struct json_object *msgs = parse_history_array(ctx);
+
+    if (wrapup_reason && *wrapup_reason) {
+        struct json_object *nudge = json_object_new_object();
+        char nbuf[512];
+        snprintf(nbuf, sizeof(nbuf),
+                 "%s Do not call any more tools. "
+                 "Summarize what you observed so far and answer the user's request directly.",
+                 wrapup_reason);
+        json_object_object_add(nudge, "role", json_object_new_string("user"));
+        json_object_object_add(nudge, "content", json_object_new_string(nbuf));
+        json_object_array_add(msgs, nudge);
+    }
 
     json_object_object_add(req, "model", json_object_new_string("fast"));
     json_object_object_add(req, "messages", msgs);
@@ -388,6 +464,9 @@ static struct json_object *build_chat_request_json(ren_context_t *ctx) {
             json_object_array_add(tools, entry);
         }
         json_object_object_add(req, "tools", tools);
+        if (wrapup_reason && *wrapup_reason) {
+            json_object_object_add(req, "tool_choice", json_object_new_string("none"));
+        }
     }
 
     return req;
@@ -527,13 +606,13 @@ static void append_tool_result_turn(ren_context_t *ctx, const char *tname, const
     }
 
     size_t tlen = strlen(tres);
-    if (tlen > MAX_TOOL_RESULT_CHARS) {
+    if (ctx->max_tool_output > 0 && tlen > ctx->max_tool_output) {
         const char *trunc = "\n...(truncated)";
         size_t trlen = strlen(trunc);
-        if (MAX_TOOL_RESULT_CHARS > trlen) {
-            memcpy(tres + MAX_TOOL_RESULT_CHARS - trlen, trunc, trlen + 1);
+        if (ctx->max_tool_output > trlen) {
+            memcpy(tres + ctx->max_tool_output - trlen, trunc, trlen + 1);
         } else {
-            tres[MAX_TOOL_RESULT_CHARS] = '\0';
+            tres[ctx->max_tool_output] = '\0';
         }
     }
 
@@ -564,6 +643,91 @@ static void emit_error(ren_event_cb cb, void *userdata, const char *msg) {
     if (cb) {
         cb("DONE", "0", msg, userdata);
     }
+}
+
+static int is_aborted(void) {
+    return g_abort_flag && *g_abort_flag;
+}
+
+static int is_context_overflow_error(int http_status, const char *msg) {
+    if (http_status == 413) return 1;
+    if (!msg || !*msg) return 0;
+    static const char *const needles[] = {
+        "context_length_exceeded",
+        "maximum context length",
+        "context length",
+        "context window",
+        "token limit",
+        "too many tokens",
+        "prompt is too long",
+        "input is too long",
+        "exceeds the maximum",
+        "payload too large",
+        "request entity too large",
+        "Engine error -4",
+        NULL
+    };
+    for (int i = 0; needles[i]; i++) {
+        if (strcasestr(msg, needles[i]) != NULL) return 1;
+    }
+    return 0;
+}
+
+static int try_overflow_compact(ren_context_t *ctx, int *overflow_retries) {
+    if (!ctx || *overflow_retries >= MAX_OVERFLOW_RETRIES) return 0;
+    size_t before = ctx->history_len;
+    size_t target = (before * 7) / 10;
+    if (target < 1024) target = 1024;
+    compact_history(ctx, target, "overflow");
+    if (ctx->history_len < before) {
+        (*overflow_retries)++;
+        fprintf(stderr, "[ren] Context overflow; compacted history (%zu -> %zu bytes), retrying (%d/%d)\n",
+                before, ctx->history_len, *overflow_retries, MAX_OVERFLOW_RETRIES);
+        return 1;
+    }
+    return 0;
+}
+
+static char *build_native_turn_sig(const ren_tc_accum_t *tcs, int n_tcs) {
+    size_t cap = 256, len = 0;
+    char *sig = malloc(cap);
+    if (!sig) return NULL;
+    sig[0] = '\0';
+    for (int i = 0; i < n_tcs; i++) {
+        char *ua = unpack_tool_args(tcs[i].args);
+        if (i > 0) buf_append(&sig, &len, &cap, "\x1e", 1);
+        buf_append(&sig, &len, &cap, tcs[i].name, strlen(tcs[i].name));
+        buf_append(&sig, &len, &cap, "\x1f", 1);
+        if (ua) {
+            buf_append(&sig, &len, &cap, ua, strlen(ua));
+            free(ua);
+        }
+    }
+    return sig;
+}
+
+static char *build_legacy_turn_sig(const char *tname, const char *targs) {
+    size_t cap = 256, len = 0;
+    char *sig = malloc(cap);
+    if (!sig) return NULL;
+    sig[0] = '\0';
+    buf_append(&sig, &len, &cap, tname ? tname : "", tname ? strlen(tname) : 0);
+    buf_append(&sig, &len, &cap, "\x1f", 1);
+    buf_append(&sig, &len, &cap, targs ? targs : "", targs ? strlen(targs) : 0);
+    return sig;
+}
+
+static int track_stall_repeat(char **prev_sig, int *stall_repeats, char *cur_sig) {
+    if (!cur_sig) return 0;
+    if (*prev_sig && strcmp(*prev_sig, cur_sig) == 0) {
+        free(cur_sig);
+        (*stall_repeats)++;
+    } else {
+        free(*prev_sig);
+        *prev_sig = cur_sig;
+        *stall_repeats = 1;
+    }
+    return *stall_repeats >= STALL_REPEAT_THRESHOLD;
 }
 
 int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int port,
@@ -629,12 +793,34 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         append_message(ctx, "user", prompt);
     }
 
-    for (int turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-        trim_history(ctx);
-        struct json_object *req_obj = build_chat_request_json(ctx);
+    int turn = 0;
+    int overflow_retries = 0;
+    const char *force_wrapup = NULL;
+    char *prev_sig = NULL;
+    int stall_repeats = 0;
+
+    while (1) {
+        if (is_aborted()) {
+            free(prev_sig);
+            emit_error(cb, userdata, "Interrupted");
+            return -1;
+        }
+
+        const char *wrapup_reason = force_wrapup;
+        if (!wrapup_reason && ctx->max_turns > 0 && turn >= ctx->max_turns) {
+            wrapup_reason = "Tool turn limit reached.";
+        }
+        int wrapup = (wrapup_reason != NULL);
+
+        if (ctx->max_history_chars > 0 && ctx->history_len > ctx->max_history_chars) {
+            compact_history(ctx, ctx->max_history_chars, "limit");
+        }
+
+        struct json_object *req_obj = build_chat_request_json(ctx, wrapup_reason);
         const char *body = req_obj ? json_object_to_json_string_ext(req_obj, JSON_C_TO_STRING_PLAIN) : NULL;
         if (!body) {
             if (req_obj) json_object_put(req_obj);
+            free(prev_sig);
             emit_error(cb, userdata, "Failed to serialize request JSON");
             return -1;
         }
@@ -644,6 +830,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             char emsg[256];
             snprintf(emsg, sizeof(emsg), "socket() failed: %s", strerror(errno));
             json_object_put(req_obj);
+            free(prev_sig);
             emit_error(cb, userdata, emsg);
             return -1;
         }
@@ -654,6 +841,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             snprintf(emsg, sizeof(emsg), "Failed to resolve host %s", host);
             close(sock);
             json_object_put(req_obj);
+            free(prev_sig);
             emit_error(cb, userdata, emsg);
             return -1;
         }
@@ -670,6 +858,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                      host, port, strerror(errno));
             close(sock);
             json_object_put(req_obj);
+            free(prev_sig);
             emit_error(cb, userdata, emsg);
             return -1;
         }
@@ -690,6 +879,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         int send_failed = 0;
         while (sent < (size_t)req_len) {
             ssize_t n = send(sock, request + sent, (size_t)req_len - sent, 0);
+            if (n < 0 && errno == EINTR && !is_aborted()) continue;
             if (n <= 0) {
                 send_failed = 1;
                 break;
@@ -699,8 +889,13 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         free(request);
         if (send_failed) {
             char emsg[256];
-            snprintf(emsg, sizeof(emsg), "send() to axil-auren failed: %s", strerror(errno));
+            if (is_aborted()) {
+                snprintf(emsg, sizeof(emsg), "Interrupted");
+            } else {
+                snprintf(emsg, sizeof(emsg), "send() to axil-auren failed: %s", strerror(errno));
+            }
             close(sock);
+            free(prev_sig);
             emit_error(cb, userdata, emsg);
             return -1;
         }
@@ -717,6 +912,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         while (!body_start) {
             ssize_t n = recv(sock, buf, sizeof(buf), 0);
             if (n < 0) {
+                if (errno == EINTR && !is_aborted()) continue;
                 recv_err = errno;
                 break;
             }
@@ -733,13 +929,16 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
 
         if (!body_start) {
             char emsg[256];
-            if (recv_err) {
+            if (is_aborted()) {
+                snprintf(emsg, sizeof(emsg), "Interrupted");
+            } else if (recv_err) {
                 snprintf(emsg, sizeof(emsg), "recv() from axil-auren failed: %s", strerror(recv_err));
             } else {
                 snprintf(emsg, sizeof(emsg), "axil-auren closed connection before HTTP headers");
             }
             free(headers);
             close(sock);
+            free(prev_sig);
             emit_error(cb, userdata, emsg);
             return -1;
         }
@@ -759,18 +958,26 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             if (eblen > 0) memcpy(err_body, body_start, eblen);
             while (eblen < sizeof(err_body) - 1) {
                 ssize_t n = recv(sock, err_body + eblen, sizeof(err_body) - 1 - eblen, 0);
+                if (n < 0 && errno == EINTR && !is_aborted()) continue;
                 if (n <= 0) break;
                 eblen += (size_t)n;
             }
             err_body[eblen] = '\0';
+            free(headers);
+            close(sock);
+
+            if (is_context_overflow_error(http_status, err_body) &&
+                try_overflow_compact(ctx, &overflow_retries)) {
+                continue;
+            }
+
             char emsg[1200];
             if (eblen > 0) {
                 snprintf(emsg, sizeof(emsg), "Upstream HTTP %d: %s", http_status, err_body);
             } else {
                 snprintf(emsg, sizeof(emsg), "Upstream HTTP %d", http_status);
             }
-            free(headers);
-            close(sock);
+            free(prev_sig);
             emit_error(cb, userdata, emsg);
             return -1;
         }
@@ -854,7 +1061,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                                         printf("%s", ds);
                                         fflush(stdout);
                                         buf_append(&full_response, &full_len, &full_cap, ds, strlen(ds));
-                                        if (n_tcs == 0) {
+                                        if (!wrapup && n_tcs == 0) {
                                             char *tl = strstr(full_response, "TOOL: ");
                                             if (tl) {
                                                 char *tnl = strchr(tl, '\n');
@@ -867,7 +1074,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                                                 }
                                             }
                                         }
-                                        if (cb && n_tcs == 0 && strlen(unspoken) + strlen(ds) + 1 < sizeof(unspoken)) {
+                                        if (cb && (wrapup || n_tcs == 0) && strlen(unspoken) + strlen(ds) + 1 < sizeof(unspoken)) {
                                             strcat(unspoken, ds);
                                             char clause[512];
                                             while (pop_spoken_clause(unspoken, first_clause, clause, sizeof(clause))) {
@@ -942,6 +1149,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
 
             ssize_t n = recv(sock, chunk, sizeof(chunk) - 1, 0);
             if (n < 0) {
+                if (errno == EINTR && !is_aborted()) continue;
                 stream_recv_err = errno;
                 break;
             }
@@ -964,9 +1172,22 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             fflush(stdout);
         }
 
+        if (is_aborted()) {
+            free_tcs(tcs, n_tcs);
+            free(full_response);
+            free(prev_sig);
+            emit_error(cb, userdata, "Interrupted");
+            return -1;
+        }
+
         if (got_sse_error) {
             free_tcs(tcs, n_tcs);
             free(full_response);
+            if (is_context_overflow_error(200, sse_err) &&
+                try_overflow_compact(ctx, &overflow_retries)) {
+                continue;
+            }
+            free(prev_sig);
             emit_error(cb, userdata, sse_err);
             return -1;
         }
@@ -976,12 +1197,25 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             snprintf(emsg, sizeof(emsg), "Stream recv() error: %s", strerror(stream_recv_err));
             free_tcs(tcs, n_tcs);
             free(full_response);
+            free(prev_sig);
             emit_error(cb, userdata, emsg);
             return -1;
         }
 
+        overflow_retries = 0;
+
         /* 2a. Native OpenAI tool_calls turn */
-        if (n_tcs > 0) {
+        if (!wrapup && n_tcs > 0) {
+            if (track_stall_repeat(&prev_sig, &stall_repeats, build_native_turn_sig(tcs, n_tcs))) {
+                fprintf(stderr, "[ren] Stall detected (%d identical tool turns); wrapping up.\n",
+                        STALL_REPEAT_THRESHOLD);
+                free_tcs(tcs, n_tcs);
+                free(full_response);
+                force_wrapup = "Repeated identical tool calls detected.";
+                stall_repeats = 0;
+                continue;
+            }
+
             struct json_object *asst = json_object_new_object();
             json_object_object_add(asst, "role", json_object_new_string("assistant"));
             if (full_len > 0) {
@@ -1017,16 +1251,22 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
 
             free_tcs(tcs, n_tcs);
             free(full_response);
+            turn++;
             continue;
         }
         free_tcs(tcs, n_tcs);
 
         /* 2b. Legacy/local model TOOL: fallback */
-        char *tool_line = strstr(full_response, "TOOL: ");
+        char *tool_line = !wrapup ? strstr(full_response, "TOOL: ") : NULL;
         if (!tool_line) {
             if (full_len == 0) {
                 free(full_response);
-                emit_error(cb, userdata, "Upstream returned empty response");
+                free(prev_sig);
+                const char *emsg = "Upstream returned empty response";
+                if (wrapup) {
+                    emsg = force_wrapup ? "Loop detected: repeated identical tool calls" : "Max tool turns reached";
+                }
+                emit_error(cb, userdata, emsg);
                 return -1;
             }
             append_message(ctx, "assistant", full_response);
@@ -1039,11 +1279,11 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                 cb("DONE", "1", full_response, userdata);
             }
             free(full_response);
+            free(prev_sig);
             return 0;
         }
 
-        append_message(ctx, "assistant", full_response);
-
+        /* Extract tool name + args first so stall detection runs before mutating ctx->history */
         char *line_end = strchr(tool_line, '\n');
         if (line_end) *line_end = '\0';
 
@@ -1058,12 +1298,25 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             while (*targs == ' ') targs++;
         }
 
+        if (track_stall_repeat(&prev_sig, &stall_repeats, build_legacy_turn_sig(tname, targs))) {
+            fprintf(stderr, "[ren] Stall detected (%d identical tool turns); wrapping up.\n",
+                    STALL_REPEAT_THRESHOLD);
+            free(full_response);
+            force_wrapup = "Repeated identical tool calls detected.";
+            stall_repeats = 0;
+            continue;
+        }
+
+        if (space) *space = ' ';
+        if (line_end) *line_end = '\n';
+        append_message(ctx, "assistant", full_response);
+        if (line_end) *line_end = '\0';
+        if (space) *space = '\0';
+
         append_tool_result_turn(ctx, tname, targs, "", cb, userdata, 0);
         free(full_response);
+        turn++;
     }
-
-    emit_error(cb, userdata, "Max tool turns reached");
-    return -1;
 }
 
 int ren_chat(ren_context_t *ctx, const char *prompt, const char *host, int port) {

@@ -125,7 +125,7 @@ TEST(upstream_build_antigravity_envelope)
 	struct auren_upstream_route r;
 	auren_upstream_resolve_model("gemini-3.8-flash-low", NULL, &r);
 
-	const char *req_str = "{\"model\":\"gemini-3.8-flash\",\"messages\":[{\"role\":\"system\",\"content\":\"You are helpful inside pi.\"},{\"role\":\"user\",\"content\":\"hello\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"test_tool\",\"description\":\"a test\",\"parameters\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}}}]}";
+	const char *req_str = "{\"model\":\"gemini-3.8-flash\",\"tool_choice\":\"none\",\"messages\":[{\"role\":\"system\",\"content\":\"You are helpful inside pi.\"},{\"role\":\"user\",\"content\":\"hello\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"test_tool\",\"description\":\"a test\",\"parameters\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}}}]}";
 	struct json_object *openai_req = json_tokener_parse(req_str);
 	ASSERT_NOT_NULL(openai_req);
 
@@ -145,6 +145,14 @@ TEST(upstream_build_antigravity_envelope)
 	struct json_object *tools = json_object_object_get(req, "tools");
 	ASSERT_NOT_NULL(tools);
 	ASSERT_EQ(json_object_array_length(tools), 1);
+
+	struct json_object *tool_cfg = json_object_object_get(req, "toolConfig");
+	ASSERT_NOT_NULL(tool_cfg);
+	struct json_object *fc_cfg = json_object_object_get(tool_cfg, "functionCallingConfig");
+	ASSERT_NOT_NULL(fc_cfg);
+	struct json_object *fc_mode = json_object_object_get(fc_cfg, "mode");
+	ASSERT_NOT_NULL(fc_mode);
+	ASSERT_STR_EQ(json_object_get_string(fc_mode), "NONE");
 
 	json_object_put(openai_req);
 	json_object_put(agy_req);

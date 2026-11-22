@@ -457,4 +457,12 @@ XY_MODULE_API void xy_install(void) {
     ren_register_tool("media", "media <play [query] | pause | next | prev | volume_up | volume_down | mute>", tool_media);
     ren_register_tool("inspect", "inspect <terminal [focused|other] | browser [filter_query] | windows | clipboard | system [aspect]>", tool_inspect);
     ren_register_tool("input", "input <send <contact_or_entry> | <text> | submit <text> | type <text> | key <combo> | click <x y | element_label> | scroll <up|down|left|right> [amount]>", tool_input);
+
+    ren_register_prompt_hint(
+        "You also act as Jarvis's desktop assistant with live GUI and browser control via 'inspect', 'browser', 'window', and 'input'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
+        "To interact with an open browser tab or send a message (e.g. on WhatsApp Web):\n"
+        "1. Run inspect with 'browser' (or browser with 'tab whatsapp') to focus the browser and see tabs and UI elements.\n"
+        "2. Run input with 'send <contact_or_entry> | <message>' (or 'click <contact>' then 'submit <message>') to select the conversation, type the text, and press Enter.\n"
+        "After receiving tool results that complete the user's request, always output a brief 1-sentence confirmation to the user (never an empty reply).\n"
+        "When answering the user directly, keep spoken replies concise, natural, and direct.");
 }

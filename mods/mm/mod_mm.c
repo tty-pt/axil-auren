@@ -80,4 +80,6 @@ XY_MODULE_API void xy_install(void) {
 
     ren_register_tool("recall", "recall <query>", do_recall);
     ren_register_tool("record", "record <problem>::<findings>", do_record);
+    ren_register_prompt_hint(
+        "Memory tools are available: use 'recall' to look up prior findings and 'record' to save important facts.");
 }

@@ -1410,6 +1410,25 @@ auren_upstream_build_antigravity_request(
 		json_object_object_add(req, "tools", tools_arr);
 	}
 
+	struct json_object *tool_choice = json_object_object_get(openai_req, "tool_choice");
+	if (tool_choice && json_object_is_type(tool_choice, json_type_string)) {
+		const char *tc_s = json_object_get_string(tool_choice);
+		const char *fc_mode = NULL;
+		if (strcmp(tc_s, "none") == 0)
+			fc_mode = "NONE";
+		else if (strcmp(tc_s, "auto") == 0)
+			fc_mode = "AUTO";
+		else if (strcmp(tc_s, "required") == 0)
+			fc_mode = "ANY";
+		if (fc_mode) {
+			struct json_object *tool_cfg = json_object_new_object();
+			struct json_object *fc_cfg = json_object_new_object();
+			json_object_object_add(fc_cfg, "mode", json_object_new_string(fc_mode));
+			json_object_object_add(tool_cfg, "functionCallingConfig", fc_cfg);
+			json_object_object_add(req, "toolConfig", tool_cfg);
+		}
+	}
+
 	/* Generation Config */
 	struct json_object *gen_cfg = json_object_new_object();
 	int max_out = 65536;

@@ -263,19 +263,19 @@ npm-test: npm-build
 # ren modules
 mods/fs/mod_fs.so: mods/fs/mod_fs.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/fs
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/fs/mod_fs.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libmm/lib
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/fs/mod_fs.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
 mods/bash/mod_bash.so: mods/bash/mod_bash.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/bash
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/mod_bash.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libmm/lib
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/mod_bash.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
 mods/mm/mod_mm.so: mods/mm/mod_mm.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/mm
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/mm/mod_mm.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libmm/lib
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/mm/mod_mm.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' -Wl,-rpath,'$$ORIGIN/../../../libmm/lib'
 
 mods/jarvis/mod_jarvis.so: mods/jarvis/mod_jarvis.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/jarvis
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/jarvis/mod_jarvis.c $(LDFLAGS) -Llib -lren -ljarvis -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libjarvis/lib -L${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libjarvis/lib -Wl,-rpath,${CURDIR}/../libmm/lib
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/jarvis/mod_jarvis.c $(LDFLAGS) -Llib -lren -ljarvis -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libjarvis/lib -L${CURDIR}/../libmm/lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' -Wl,-rpath,'$$ORIGIN/../../../libjarvis/lib' -Wl,-rpath,'$$ORIGIN/../../../libmm/lib'
 
 all: mods/fs/mod_fs.so mods/bash/mod_bash.so mods/mm/mod_mm.so mods/jarvis/mod_jarvis.so
 

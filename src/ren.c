@@ -15,6 +15,45 @@
 
 static char *session_path = NULL;
 static char *listen_sock_path = NULL;
+static volatile sig_atomic_t g_interrupted = 0;
+
+static void on_sigint(int sig) {
+    (void)sig;
+    g_interrupted = 1;
+}
+
+static void print_usage(const char *prog) {
+    printf(
+        "Usage: %s [OPTIONS] [PROMPT]\n"
+        "Options:\n"
+        "  -H <host>                  auren host (default: 127.0.0.1)\n"
+        "  -P <port>                  auren port (default: 4242)\n"
+        "  -p <prompt>                run a single prompt\n"
+        "  -m <mods>                  colon-separated modules to load (e.g. mod_mm:mod_jarvis), repeatable\n"
+        "  --session <name>           session filename under ~/.ren/sessions/\n"
+        "  --listen <socket>          listen on Unix domain socket\n"
+        "  --max-turns <N>            max tool turns before wrap-up (0 = unlimited, default: 0)\n"
+        "  --max-history <bytes>      proactive history byte cap (0 = overflow-driven, default: 0)\n"
+        "  --max-tool-output <bytes>  per-tool output byte cap (0 = unlimited, default: %d)\n"
+        "  -h, --help                 show this help\n",
+        prog, REN_DEFAULT_TOOL_OUTPUT_CHARS);
+}
+
+static void load_mod_spec(const char *spec) {
+    if (!spec || !*spec) return;
+    char *copy = strdup(spec);
+    if (!copy) return;
+    char *p = copy;
+    while (p && *p) {
+        char *sep = strchr(p, ':');
+        if (sep) *sep = '\0';
+        if (*p && ren_load_module(p) != 0) {
+            fprintf(stderr, "[ren] Warning: failed to load module %s\n", p);
+        }
+        p = sep ? (sep + 1) : NULL;
+    }
+    free(copy);
+}
 
 static void ensure_dir(const char *path) {
     char tmp[512];
@@ -127,27 +166,44 @@ int main(int argc, char **argv) {
     const char *prompt = NULL;
     const char *session_name = NULL;
     const char *listen_arg = NULL;
+    int max_turns = 0;
+    size_t max_history = 0;
+    size_t max_tool_output = REN_DEFAULT_TOOL_OUTPUT_CHARS;
+    const char *mod_specs[16];
+    int n_mod_specs = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-H") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "-H") == 0 && i + 1 < argc) {
             host = argv[++i];
         } else if (strcmp(argv[i], "-P") == 0 && i + 1 < argc) {
             port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             prompt = argv[++i];
+        } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+            if (n_mod_specs < 16) mod_specs[n_mod_specs++] = argv[++i];
+            else i++;
+        } else if (strncmp(argv[i], "-m", 2) == 0 && argv[i][2] != '\0') {
+            if (n_mod_specs < 16) mod_specs[n_mod_specs++] = argv[i] + 2;
         } else if (strcmp(argv[i], "--session") == 0 && i + 1 < argc) {
             session_name = argv[++i];
         } else if (strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
             listen_arg = argv[++i];
-        } else if (strcmp(argv[i], "--jarvis") == 0) {
-            if (!session_name) session_name = "jarvis";
-            if (!listen_arg) {
-                const char *u = getenv("USER");
-                if (!u || !*u) u = "quirinpa";
-                static char def_sock[256];
-                snprintf(def_sock, sizeof(def_sock), "/tmp/ren-jarvis-%s.sock", u);
-                listen_arg = def_sock;
-            }
+        } else if (strcmp(argv[i], "--max-turns") == 0 && i + 1 < argc) {
+            max_turns = atoi(argv[++i]);
+            if (max_turns < 0) max_turns = 0;
+        } else if (strcmp(argv[i], "--max-history") == 0 && i + 1 < argc) {
+            long long v = atoll(argv[++i]);
+            max_history = v > 0 ? (size_t)v : 0;
+        } else if (strcmp(argv[i], "--max-tool-output") == 0 && i + 1 < argc) {
+            long long v = atoll(argv[++i]);
+            max_tool_output = v > 0 ? (size_t)v : 0;
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "[ren] Unknown option: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
         } else if (!prompt) {
             prompt = argv[i];
         }
@@ -166,6 +222,12 @@ int main(int argc, char **argv) {
 
     ren_context_t ctx;
     ren_init(&ctx);
+    for (int i = 0; i < n_mod_specs; i++) {
+        load_mod_spec(mod_specs[i]);
+    }
+    ctx.max_turns = max_turns;
+    ctx.max_history_chars = max_history;
+    ctx.max_tool_output = max_tool_output;
     load_session(&ctx, session_path);
 
     int ret = 0;
@@ -174,6 +236,16 @@ int main(int argc, char **argv) {
         save_session(&ctx, session_path);
     } else {
         int interactive = isatty(STDIN_FILENO);
+        if (interactive) {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = on_sigint;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            sigaction(SIGINT, &sa, NULL);
+            ren_set_abort_flag(&g_interrupted);
+        }
+
         int listen_fd = -1;
         if (listen_arg && *listen_arg) {
             listen_sock_path = strdup(listen_arg);
@@ -190,8 +262,10 @@ int main(int argc, char **argv) {
         if (prompt && *prompt) {
             printf("> %s\n", prompt);
             fflush(stdout);
+            g_interrupted = 0;
             if (ren_chat(&ctx, prompt, host, port) < 0)
                 ret = 1;
+            g_interrupted = 0;
             save_session(&ctx, session_path);
         }
 
@@ -228,7 +302,13 @@ int main(int argc, char **argv) {
 
             int prc = poll(pfds, nfds, -1);
             if (prc < 0) {
-                if (errno == EINTR) continue;
+                if (errno == EINTR) {
+                    if (g_interrupted) {
+                        g_interrupted = 0;
+                        if (interactive) printf("\n");
+                    }
+                    continue;
+                }
                 break;
             }
 
@@ -254,10 +334,12 @@ int main(int argc, char **argv) {
                                 sock_event_cb("DONE", "1", "Session reset", &cli);
                             } else {
                                 if (interactive && !stdin_closed) {
-                                    printf("\n[jarvis] > %s\n", req);
+                                    printf("\n[ipc] > %s\n", req);
                                     fflush(stdout);
                                 }
+                                g_interrupted = 0;
                                 ren_chat_ex(&ctx, req, host, port, sock_event_cb, &cli);
+                                g_interrupted = 0;
                                 save_session(&ctx, session_path);
                             }
                         }
@@ -271,6 +353,12 @@ int main(int argc, char **argv) {
             if (stdin_idx >= 0 && (pfds[stdin_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
                 ssize_t nread = getline(&line, &cap, stdin);
                 if (nread <= 0) {
+                    if (errno == EINTR && g_interrupted) {
+                        clearerr(stdin);
+                        g_interrupted = 0;
+                        if (interactive) printf("\n");
+                        continue;
+                    }
                     if (listen_fd >= 0) {
                         stdin_closed = 1;
                         continue;
@@ -290,9 +378,11 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
+                g_interrupted = 0;
                 if (ren_chat(&ctx, line, host, port) < 0) {
                     ret = 1;
                 }
+                g_interrupted = 0;
                 save_session(&ctx, session_path);
             }
         }
@@ -306,6 +396,7 @@ int main(int argc, char **argv) {
         save_session(&ctx, session_path);
     }
 
+    ren_set_abort_flag(NULL);
     ren_free(&ctx);
     free(session_path);
     return ret;

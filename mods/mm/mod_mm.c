@@ -118,6 +118,20 @@ static int do_record(const char *args, char **out_result) {
         *out_result = strdup("Error: mm context not initialized");
         return -1;
     }
+    /* Check if input is a zero-JSON line-delimited distillation block */
+    if (strncmp(args, "PROBLEM:", 8) == 0 || strstr(args, "\nPROBLEM:") != NULL) {
+        mm_tier_t tier = MM_TIER_PROJECT;
+        uint32_t ref = 0;
+        int rc = mm_distill_commit(g_mm_ctx, args, &tier, &ref);
+        if (rc == 0 && ref > 0) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "Distilled & recorded as [%s Ref %u]",
+                     tier == MM_TIER_GLOBAL ? "Global" : "Project", ref);
+            *out_result = strdup(msg);
+            return 0;
+        }
+    }
+
     /* args: problem::findings */
     char *copy = strdup(args);
     char *sep = strstr(copy, "::");
@@ -161,7 +175,7 @@ XY_MODULE_API void xy_install(void) {
     g_mm_ctx = mm_open(&opts);
 
     ren_register_tool("recall", "recall [project:<name>] <query|code:query|symbol:name|trace:name|diff|guardrail:intent|session:query|projects>", do_recall);
-    ren_register_tool("record", "record <problem>::<findings>", do_record);
+    ren_register_tool("record", "record <problem>::<findings> | <line-delimited distillation block>", do_record);
     ren_register_prompt_hint(
         "Memory & code tools are available: use 'recall <query>' for memories, "
         "'recall [project:<name>] code:<query>' to search code, "
@@ -170,5 +184,6 @@ XY_MODULE_API void xy_install(void) {
         "'recall [project:<name>] diff' for git diff blast radius, "
         "'recall guardrail:<intent>' for pre-flight checks, "
         "'recall session:<query>' for past conversations, "
-        "'recall projects' to list projects, and 'record <problem>::<findings>' to save facts.");
+        "'recall projects' to list projects, and 'record <problem>::<findings>' "
+        "(or 'record PROBLEM: ...\\nAPPROACH: ...\\nFINDING: ...') to distill and save facts.");
 }

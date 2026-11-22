@@ -68,7 +68,11 @@ void ren_register_prompt_hint(const char *hint);
 void ren_register_tier0(ren_tier0_func fn);
 void ren_register_context_provider(ren_context_func fn);
 void ren_register_compactor(ren_compact_func fn);
+void ren_set_system_prompt(const char *prompt);
+void ren_set_model(const char *model);
 void ren_set_abort_flag(volatile sig_atomic_t *flag);
+void ren_steer(const char *text);
+void ren_abort(void);
 int ren_load_module(const char *path);
 
 void ren_xy_install(void);

@@ -10,6 +10,9 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
 #include <json-c/json.h>
 #include "ttypt/libren.h"
 
@@ -40,12 +43,19 @@ static ren_tool_entry_t g_tools[MAX_TOOLS];
 static int g_num_tools = 0;
 static char *g_prompt_hints[MAX_PROMPT_HINTS];
 static int g_num_prompt_hints = 0;
+static char *g_custom_identity = NULL;
+static char *g_model_name = NULL;
 static char *g_system_prompt = NULL;
 static int g_tools_loaded = 0;
 static ren_tier0_func g_tier0_fn = NULL;
 static ren_context_func g_context_fn = NULL;
 static ren_compact_func g_compactor_fn = NULL;
 static volatile sig_atomic_t *g_abort_flag = NULL;
+
+static pthread_mutex_t g_ctrl_mtx = PTHREAD_MUTEX_INITIALIZER;
+static int g_wake_pipe[2] = { -1, -1 };
+static char *g_steer_queue = NULL;
+static volatile sig_atomic_t g_local_abort = 0;
 
 static void buf_append(char **buf, size_t *len, size_t *cap, const char *str, size_t slen) {
     if (*len + slen + 1 > *cap) {
@@ -65,8 +75,13 @@ static void rebuild_system_prompt(void) {
     g_system_prompt = malloc(cap);
     g_system_prompt[0] = '\0';
 
-    const char *hdr = "You are ren, a pure-C coding assistant. Available tools:\n";
-    buf_append(&g_system_prompt, &len, &cap, hdr, strlen(hdr));
+    if (g_custom_identity && *g_custom_identity) {
+        buf_append(&g_system_prompt, &len, &cap, g_custom_identity, strlen(g_custom_identity));
+        buf_append(&g_system_prompt, &len, &cap, "\nAvailable tools:\n", 18);
+    } else {
+        const char *hdr = "You are ren, a pure-C coding assistant. Available tools:\n";
+        buf_append(&g_system_prompt, &len, &cap, hdr, strlen(hdr));
+    }
 
     for (int i = 0; i < g_num_tools; i++) {
         buf_append(&g_system_prompt, &len, &cap, "- ", 2);
@@ -114,6 +129,17 @@ void ren_register_prompt_hint(const char *hint) {
     rebuild_system_prompt();
 }
 
+void ren_set_system_prompt(const char *prompt) {
+    free(g_custom_identity);
+    g_custom_identity = (prompt && *prompt) ? strdup(prompt) : NULL;
+    rebuild_system_prompt();
+}
+
+void ren_set_model(const char *model) {
+    free(g_model_name);
+    g_model_name = (model && *model) ? strdup(model) : NULL;
+}
+
 void ren_register_tier0(ren_tier0_func fn) {
     g_tier0_fn = fn;
 }
@@ -128,6 +154,95 @@ void ren_register_compactor(ren_compact_func fn) {
 
 void ren_set_abort_flag(volatile sig_atomic_t *flag) {
     g_abort_flag = flag;
+}
+
+static int ensure_wake_pipe_locked(void) {
+    if (g_wake_pipe[0] >= 0 && g_wake_pipe[1] >= 0) {
+        return g_wake_pipe[0];
+    }
+    int fds[2];
+    if (pipe(fds) < 0) return -1;
+    for (int i = 0; i < 2; i++) {
+        int fl = fcntl(fds[i], F_GETFL, 0);
+        if (fl >= 0) fcntl(fds[i], F_SETFL, fl | O_NONBLOCK);
+        fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+    }
+    g_wake_pipe[0] = fds[0];
+    g_wake_pipe[1] = fds[1];
+    return g_wake_pipe[0];
+}
+
+static void drain_wake_pipe_locked(void) {
+    if (g_wake_pipe[0] < 0) return;
+    char tmp[64];
+    while (read(g_wake_pipe[0], tmp, sizeof(tmp)) > 0) {}
+}
+
+static void wake_poll_locked(void) {
+    if (ensure_wake_pipe_locked() >= 0 && g_wake_pipe[1] >= 0) {
+        char b = 1;
+        ssize_t w = write(g_wake_pipe[1], &b, 1);
+        (void)w;
+    }
+}
+
+void ren_steer(const char *text) {
+    if (!text || !*text) return;
+    pthread_mutex_lock(&g_ctrl_mtx);
+    size_t tlen = strlen(text);
+    if (g_steer_queue) {
+        size_t cur = strlen(g_steer_queue);
+        char *nq = realloc(g_steer_queue, cur + 1 + tlen + 1);
+        if (nq) {
+            nq[cur] = '\n';
+            memcpy(nq + cur + 1, text, tlen);
+            nq[cur + 1 + tlen] = '\0';
+            g_steer_queue = nq;
+        }
+    } else {
+        g_steer_queue = strdup(text);
+    }
+    wake_poll_locked();
+    pthread_mutex_unlock(&g_ctrl_mtx);
+}
+
+void ren_abort(void) {
+    pthread_mutex_lock(&g_ctrl_mtx);
+    g_local_abort = 1;
+    wake_poll_locked();
+    pthread_mutex_unlock(&g_ctrl_mtx);
+}
+
+static int has_pending_steer(void) {
+    pthread_mutex_lock(&g_ctrl_mtx);
+    int pending = (g_steer_queue != NULL && g_steer_queue[0] != '\0');
+    pthread_mutex_unlock(&g_ctrl_mtx);
+    return pending;
+}
+
+static int consume_steer(char **out_text) {
+    if (out_text) *out_text = NULL;
+    pthread_mutex_lock(&g_ctrl_mtx);
+    char *q = g_steer_queue;
+    g_steer_queue = NULL;
+    drain_wake_pipe_locked();
+    pthread_mutex_unlock(&g_ctrl_mtx);
+    if (!q || !*q) {
+        free(q);
+        return 0;
+    }
+    if (out_text) *out_text = q;
+    else free(q);
+    return 1;
+}
+
+static void reset_ctrl_state(void) {
+    pthread_mutex_lock(&g_ctrl_mtx);
+    g_local_abort = 0;
+    free(g_steer_queue);
+    g_steer_queue = NULL;
+    drain_wake_pipe_locked();
+    pthread_mutex_unlock(&g_ctrl_mtx);
 }
 
 static int try_load_so_stem(const char *stem) {
@@ -408,6 +523,7 @@ void ren_init(ren_context_t *ctx) {
 }
 
 void ren_reset(ren_context_t *ctx) {
+    reset_ctrl_state();
     if (!ctx || !ctx->history) return;
     ctx->history_len = 0;
     ctx->history[0] = '\0';
@@ -435,7 +551,10 @@ static struct json_object *build_chat_request_json(ren_context_t *ctx, const cha
         json_object_array_add(msgs, nudge);
     }
 
-    json_object_object_add(req, "model", json_object_new_string("fast"));
+    const char *env_model = getenv("REN_MODEL");
+    const char *eff_model = (g_model_name && *g_model_name) ? g_model_name :
+                            ((env_model && *env_model) ? env_model : "fast");
+    json_object_object_add(req, "model", json_object_new_string(eff_model));
     json_object_object_add(req, "messages", msgs);
     json_object_object_add(req, "stream", json_object_new_boolean(1));
 
@@ -649,7 +768,43 @@ static void emit_error(ren_event_cb cb, void *userdata, const char *msg) {
 }
 
 static int is_aborted(void) {
-    return g_abort_flag && *g_abort_flag;
+    return g_local_abort || (g_abort_flag && *g_abort_flag);
+}
+
+static int poll_sock_or_ctrl(int sock, short events) {
+    pthread_mutex_lock(&g_ctrl_mtx);
+    int wfd = ensure_wake_pipe_locked();
+    pthread_mutex_unlock(&g_ctrl_mtx);
+
+    while (1) {
+        if (is_aborted() || has_pending_steer()) return 0;
+        struct pollfd pfds[2];
+        nfds_t nfds = 1;
+        pfds[0].fd = sock;
+        pfds[0].events = events;
+        pfds[0].revents = 0;
+        if (wfd >= 0) {
+            pfds[1].fd = wfd;
+            pfds[1].events = POLLIN;
+            pfds[1].revents = 0;
+            nfds = 2;
+        }
+        int rc = poll(pfds, nfds, -1);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                if (is_aborted() || has_pending_steer()) return 0;
+                continue;
+            }
+            return -1;
+        }
+        if (wfd >= 0 && (pfds[1].revents & POLLIN)) {
+            return 0;
+        }
+        if (pfds[0].revents & (events | POLLHUP | POLLERR | POLLNVAL)) {
+            if (is_aborted() || has_pending_steer()) return 0;
+            return 1;
+        }
+    }
 }
 
 static int is_context_overflow_error(int http_status, const char *msg) {
@@ -739,6 +894,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         emit_error(cb, userdata, "Invalid prompt or context");
         return -1;
     }
+    reset_ctrl_state();
     sync_system_message(ctx);
 
     /* 1. Tier-0 Fast Deterministic Reflex Check (<1ms) */
@@ -771,6 +927,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             free(t0_op);
             free(t0_out);
             free(t0_spoken);
+            reset_ctrl_state();
             return 0;
         }
         free(t0_op);
@@ -806,7 +963,18 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         if (is_aborted()) {
             free(prev_sig);
             emit_error(cb, userdata, "Interrupted");
+            reset_ctrl_state();
             return -1;
+        }
+
+        char *steer_txt = NULL;
+        if (consume_steer(&steer_txt)) {
+            if (cb) cb("STEER", steer_txt, "", userdata);
+            append_message(ctx, "user", steer_txt);
+            free(steer_txt);
+            overflow_retries = 0;
+            stall_repeats = 0;
+            force_wrapup = NULL;
         }
 
         const char *wrapup_reason = force_wrapup;
@@ -825,6 +993,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             if (req_obj) json_object_put(req_obj);
             free(prev_sig);
             emit_error(cb, userdata, "Failed to serialize request JSON");
+            reset_ctrl_state();
             return -1;
         }
 
@@ -835,6 +1004,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             json_object_put(req_obj);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
+            reset_ctrl_state();
             return -1;
         }
 
@@ -846,6 +1016,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             json_object_put(req_obj);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
+            reset_ctrl_state();
             return -1;
         }
 
@@ -863,6 +1034,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             json_object_put(req_obj);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
+            reset_ctrl_state();
             return -1;
         }
 
@@ -881,6 +1053,10 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         size_t sent = 0;
         int send_failed = 0;
         while (sent < (size_t)req_len) {
+            if (is_aborted()) {
+                send_failed = 1;
+                break;
+            }
             ssize_t n = send(sock, request + sent, (size_t)req_len - sent, 0);
             if (n < 0 && errno == EINTR && !is_aborted()) continue;
             if (n <= 0) {
@@ -900,6 +1076,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             close(sock);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
+            reset_ctrl_state();
             return -1;
         }
 
@@ -913,9 +1090,15 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         int recv_err = 0;
 
         while (!body_start) {
+            if (is_aborted() || has_pending_steer()) break;
+            int prc = poll_sock_or_ctrl(sock, POLLIN);
+            if (prc <= 0) {
+                if (prc < 0) recv_err = errno;
+                break;
+            }
             ssize_t n = recv(sock, buf, sizeof(buf), 0);
             if (n < 0) {
-                if (errno == EINTR && !is_aborted()) continue;
+                if (errno == EINTR && !is_aborted() && !has_pending_steer()) continue;
                 recv_err = errno;
                 break;
             }
@@ -931,10 +1114,28 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         }
 
         if (!body_start) {
-            char emsg[256];
             if (is_aborted()) {
-                snprintf(emsg, sizeof(emsg), "Interrupted");
-            } else if (recv_err) {
+                free(headers);
+                close(sock);
+                free(prev_sig);
+                emit_error(cb, userdata, "Interrupted");
+                reset_ctrl_state();
+                return -1;
+            }
+            char *steer_hdr = NULL;
+            if (consume_steer(&steer_hdr)) {
+                free(headers);
+                close(sock);
+                if (cb) cb("STEER", steer_hdr, "", userdata);
+                append_message(ctx, "user", steer_hdr);
+                free(steer_hdr);
+                overflow_retries = 0;
+                stall_repeats = 0;
+                force_wrapup = NULL;
+                continue;
+            }
+            char emsg[256];
+            if (recv_err) {
                 snprintf(emsg, sizeof(emsg), "recv() from axil-auren failed: %s", strerror(recv_err));
             } else {
                 snprintf(emsg, sizeof(emsg), "axil-auren closed connection before HTTP headers");
@@ -943,6 +1144,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             close(sock);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
+            reset_ctrl_state();
             return -1;
         }
 
@@ -960,14 +1162,34 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             size_t eblen = init_len < sizeof(err_body) - 1 ? init_len : sizeof(err_body) - 1;
             if (eblen > 0) memcpy(err_body, body_start, eblen);
             while (eblen < sizeof(err_body) - 1) {
+                if (is_aborted() || has_pending_steer()) break;
+                if (poll_sock_or_ctrl(sock, POLLIN) <= 0) break;
                 ssize_t n = recv(sock, err_body + eblen, sizeof(err_body) - 1 - eblen, 0);
-                if (n < 0 && errno == EINTR && !is_aborted()) continue;
+                if (n < 0 && errno == EINTR && !is_aborted() && !has_pending_steer()) continue;
                 if (n <= 0) break;
                 eblen += (size_t)n;
             }
             err_body[eblen] = '\0';
             free(headers);
             close(sock);
+
+            if (is_aborted()) {
+                free(prev_sig);
+                emit_error(cb, userdata, "Interrupted");
+                reset_ctrl_state();
+                return -1;
+            }
+
+            char *steer_err = NULL;
+            if (consume_steer(&steer_err)) {
+                if (cb) cb("STEER", steer_err, "", userdata);
+                append_message(ctx, "user", steer_err);
+                free(steer_err);
+                overflow_retries = 0;
+                stall_repeats = 0;
+                force_wrapup = NULL;
+                continue;
+            }
 
             if (is_context_overflow_error(http_status, err_body) &&
                 try_overflow_compact(ctx, &overflow_retries)) {
@@ -982,6 +1204,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             }
             free(prev_sig);
             emit_error(cb, userdata, emsg);
+            reset_ctrl_state();
             return -1;
         }
 
@@ -1014,6 +1237,8 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
 
         char chunk[4096];
         while (1) {
+            if (is_aborted() || has_pending_steer()) break;
+
             /* Parse complete newline-delimited SSE lines */
             char *ptr = event_buf;
             char *nl;
@@ -1150,9 +1375,17 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                 event_buf[event_len] = '\0';
             }
 
+            if (is_aborted() || has_pending_steer()) break;
+            int prc = poll_sock_or_ctrl(sock, POLLIN);
+            if (prc < 0) {
+                stream_recv_err = errno;
+                break;
+            }
+            if (prc == 0) break;
+
             ssize_t n = recv(sock, chunk, sizeof(chunk) - 1, 0);
             if (n < 0) {
-                if (errno == EINTR && !is_aborted()) continue;
+                if (errno == EINTR && !is_aborted() && !has_pending_steer()) continue;
                 stream_recv_err = errno;
                 break;
             }
@@ -1180,7 +1413,21 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             free(full_response);
             free(prev_sig);
             emit_error(cb, userdata, "Interrupted");
+            reset_ctrl_state();
             return -1;
+        }
+
+        char *steer_stream = NULL;
+        if (consume_steer(&steer_stream)) {
+            free_tcs(tcs, n_tcs);
+            free(full_response);
+            if (cb) cb("STEER", steer_stream, "", userdata);
+            append_message(ctx, "user", steer_stream);
+            free(steer_stream);
+            overflow_retries = 0;
+            stall_repeats = 0;
+            force_wrapup = NULL;
+            continue;
         }
 
         if (got_sse_error) {
@@ -1192,6 +1439,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             }
             free(prev_sig);
             emit_error(cb, userdata, sse_err);
+            reset_ctrl_state();
             return -1;
         }
 
@@ -1202,6 +1450,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             free(full_response);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
+            reset_ctrl_state();
             return -1;
         }
 
@@ -1246,6 +1495,19 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             json_object_put(asst);
 
             for (int i = 0; i < n_tcs; i++) {
+                if (is_aborted() || has_pending_steer()) {
+                    const char *skip_msg = is_aborted() ? "Aborted by user." : "Skipped: user steered.";
+                    for (int j = i; j < n_tcs; j++) {
+                        struct json_object *tr = json_object_new_object();
+                        json_object_object_add(tr, "role", json_object_new_string("tool"));
+                        json_object_object_add(tr, "tool_call_id", json_object_new_string(tcs[j].id));
+                        json_object_object_add(tr, "name", json_object_new_string(tcs[j].name));
+                        json_object_object_add(tr, "content", json_object_new_string(skip_msg));
+                        append_json_message(ctx, tr);
+                        json_object_put(tr);
+                    }
+                    break;
+                }
                 char *targs = unpack_tool_args(tcs[i].args);
                 append_tool_result_turn(ctx, tcs[i].name, targs ? targs : "",
                                         tcs[i].id, cb, userdata, 1);
@@ -1254,6 +1516,24 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
 
             free_tcs(tcs, n_tcs);
             free(full_response);
+
+            if (is_aborted()) {
+                free(prev_sig);
+                emit_error(cb, userdata, "Interrupted");
+                reset_ctrl_state();
+                return -1;
+            }
+
+            char *steer_tools = NULL;
+            if (consume_steer(&steer_tools)) {
+                if (cb) cb("STEER", steer_tools, "", userdata);
+                append_message(ctx, "user", steer_tools);
+                free(steer_tools);
+                overflow_retries = 0;
+                stall_repeats = 0;
+                force_wrapup = NULL;
+            }
+
             turn++;
             continue;
         }
@@ -1270,9 +1550,22 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                     emsg = force_wrapup ? "Loop detected: repeated identical tool calls" : "Max tool turns reached";
                 }
                 emit_error(cb, userdata, emsg);
+                reset_ctrl_state();
                 return -1;
             }
             append_message(ctx, "assistant", full_response);
+            char *steer_fin = NULL;
+            if (consume_steer(&steer_fin)) {
+                free(full_response);
+                if (cb) cb("STEER", steer_fin, "", userdata);
+                append_message(ctx, "user", steer_fin);
+                free(steer_fin);
+                overflow_retries = 0;
+                stall_repeats = 0;
+                force_wrapup = NULL;
+                turn++;
+                continue;
+            }
             if (cb) {
                 char *rem = unspoken;
                 while (*rem && isspace((unsigned char)*rem)) rem++;
@@ -1283,6 +1576,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             }
             free(full_response);
             free(prev_sig);
+            reset_ctrl_state();
             return 0;
         }
 
@@ -1318,6 +1612,24 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
 
         append_tool_result_turn(ctx, tname, targs, "", cb, userdata, 0);
         free(full_response);
+
+        if (is_aborted()) {
+            free(prev_sig);
+            emit_error(cb, userdata, "Interrupted");
+            reset_ctrl_state();
+            return -1;
+        }
+
+        char *steer_leg = NULL;
+        if (consume_steer(&steer_leg)) {
+            if (cb) cb("STEER", steer_leg, "", userdata);
+            append_message(ctx, "user", steer_leg);
+            free(steer_leg);
+            overflow_retries = 0;
+            stall_repeats = 0;
+            force_wrapup = NULL;
+        }
+
         turn++;
     }
 }

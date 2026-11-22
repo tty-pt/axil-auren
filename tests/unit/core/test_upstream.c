@@ -357,3 +357,36 @@ TEST(upstream_agy_sse_valid_and_rejected_completions)
 	ASSERT_STR_EQ(fr, "UPSTREAM_ERROR");
 	ASSERT_STR_EQ(fm, "Quota exceeded");
 }
+
+TEST(upstream_hydrogen_thinking_budget_low_and_extra_low)
+{
+	struct auren_upstream_route r;
+	const char *req_str = "{\"model\":\"fast\",\"messages\":[{\"role\":\"user\",\"content\":\"open tab\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"browser\",\"description\":\"browser\",\"parameters\":{\"type\":\"object\",\"properties\":{\"args\":{\"type\":\"string\"}}}}}]}";
+	struct json_object *openai_req = json_tokener_parse(req_str);
+	ASSERT_NOT_NULL(openai_req);
+
+	ASSERT_EQ(auren_upstream_resolve_model("fast", NULL, &r), AUREN_UPSTREAM_ALIAS_FAST);
+	struct json_object *agy_low = auren_upstream_build_antigravity_request(openai_req, &r, "aicode-consumers");
+	ASSERT_NOT_NULL(agy_low);
+	struct json_object *inner_low = json_object_object_get(agy_low, "request");
+	struct json_object *gen_low = json_object_object_get(inner_low, "generationConfig");
+	struct json_object *tc_low = json_object_object_get(gen_low, "thinkingConfig");
+	struct json_object *tb_low = json_object_object_get(tc_low, "thinkingBudget");
+	ASSERT_NOT_NULL(tb_low);
+	ASSERT_EQ(json_object_get_int(tb_low), 256);
+
+	ASSERT_EQ(auren_upstream_resolve_model("gemini-4-hydrogen-extra-low", NULL, &r), AUREN_UPSTREAM_ANTIGRAVITY);
+	ASSERT_STR_EQ(r.runtime_model, "gemini-4-hydrogen-low");
+	struct json_object *agy_xl = auren_upstream_build_antigravity_request(openai_req, &r, "aicode-consumers");
+	ASSERT_NOT_NULL(agy_xl);
+	struct json_object *inner_xl = json_object_object_get(agy_xl, "request");
+	struct json_object *gen_xl = json_object_object_get(inner_xl, "generationConfig");
+	struct json_object *tc_xl = json_object_object_get(gen_xl, "thinkingConfig");
+	struct json_object *tb_xl = json_object_object_get(tc_xl, "thinkingBudget");
+	ASSERT_NOT_NULL(tb_xl);
+	ASSERT_EQ(json_object_get_int(tb_xl), 128);
+
+	json_object_put(openai_req);
+	json_object_put(agy_low);
+	json_object_put(agy_xl);
+}

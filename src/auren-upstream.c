@@ -98,7 +98,7 @@ static const char *g_tier_chains[4][5] = {
 	/* very-fast (index 0) */
 	{ "gemini-3.8-flash-low", "copilot/claude-haiku-4.5", "kilo-auto/free", NULL },
 	/* fast (index 1) */
-	{ "gemini-4-hydrogen-low", "copilot/mai-code-2", "kilo-auto/free", NULL },
+	{ "gemini-4-hydrogen-low", "gemini-3.8-flash-low", "copilot/mai-code-2", "kilo-auto/free", NULL },
 	/* smart (index 2) */
 	{ "gemini-4-hydrogen-high", "claude-sonnet-4-6", "gpt-oss-120b", "copilot/gpt-5.3-codex", NULL },
 	/* genius (index 3) */
@@ -110,10 +110,11 @@ static const char *g_tier_names[4] = { "very-fast", "fast", "smart", "genius" };
 
 /* Ring cache for tool_call_id -> thoughtSignature */
 #define SIG_CACHE_SIZE 4096
+#define SIG_CACHE_SIG_MAX 16384
 
 struct sig_cache_entry {
 	char call_id[128];
-	char sig[2048];
+	char sig[SIG_CACHE_SIG_MAX];
 };
 
 static struct sig_cache_entry g_sig_cache[SIG_CACHE_SIZE];
@@ -496,13 +497,19 @@ antigravity_refresh_token_locked(void)
 	if (g_auth.agy_expires_ms > now + 60000 && g_auth.agy_access[0])
 		return 0; /* token still valid for > 60s */
 
-	if (!g_auth.agy_refresh[0])
+	if (!g_auth.agy_refresh[0]) {
+		stl_syslog(STL_LOG_ERR, "auren-upstream: antigravity refresh token missing in %s", g_auth.auth_path);
 		return -1;
+	}
 
 	const char *cid = getenv("ANTIGRAVITY_CLIENT_ID");
 	if (!cid || !cid[0]) cid = AGY_DEFAULT_CLIENT_ID;
 	const char *csec = getenv("ANTIGRAVITY_CLIENT_SECRET");
 	if (!csec || !csec[0]) csec = AGY_DEFAULT_CLIENT_SECRET;
+	if (!cid[0] || !csec[0]) {
+		stl_syslog(STL_LOG_ERR, "auren-upstream: ANTIGRAVITY_CLIENT_ID/ANTIGRAVITY_CLIENT_SECRET not set in environment");
+		return -1;
+	}
 
 	char post_data[2048];
 	snprintf(post_data, sizeof(post_data),
@@ -525,6 +532,9 @@ antigravity_refresh_token_locked(void)
 	curl_easy_cleanup(curl);
 
 	if (res != CURLE_OK || http_code != 200 || !mb.data) {
+		stl_syslog(STL_LOG_ERR,
+			"auren-upstream: antigravity oauth refresh HTTP error (curl=%d http=%ld body=%.180s)",
+			(int)res, http_code, mb.data ? mb.data : "");
 		free(mb.data);
 		return -1;
 	}
@@ -556,8 +566,10 @@ copilot_refresh_token_locked(void)
 	if (g_auth.copilot_expires_ms > now + 60000 && g_auth.copilot_access[0])
 		return 0;
 
-	if (!g_auth.copilot_refresh[0])
+	if (!g_auth.copilot_refresh[0]) {
+		stl_syslog(STL_LOG_ERR, "auren-upstream: copilot refresh token missing in %s", g_auth.auth_path);
 		return -1;
+	}
 
 	CURL *curl = curl_easy_init();
 	if (!curl) return -1;
@@ -586,6 +598,9 @@ copilot_refresh_token_locked(void)
 	curl_easy_cleanup(curl);
 
 	if (res != CURLE_OK || http_code != 200 || !mb.data) {
+		stl_syslog(STL_LOG_ERR,
+			"auren-upstream: copilot token refresh HTTP error (curl=%d http=%ld body=%.180s)",
+			(int)res, http_code, mb.data ? mb.data : "");
 		free(mb.data);
 		return -1;
 	}
@@ -1077,7 +1092,7 @@ auren_upstream_build_antigravity_request(
 					struct json_object *first_tc = json_object_array_get_idx(tc_arr, 0);
 					struct json_object *first_id_o = first_tc ? json_object_object_get(first_tc, "id") : NULL;
 					const char *first_id = first_id_o ? json_object_get_string(first_id_o) : "";
-					char sig_probe[2048] = {0};
+					char sig_probe[SIG_CACHE_SIG_MAX] = {0};
 					if (!auren_upstream_lookup_thought_sig(first_id, sig_probe, sizeof(sig_probe)))
 						turn_dropped = 1;
 				}
@@ -1180,7 +1195,7 @@ auren_upstream_build_antigravity_request(
 						struct json_object *first_tc = json_object_array_get_idx(tc_arr, 0);
 						struct json_object *first_id_o = first_tc ? json_object_object_get(first_tc, "id") : NULL;
 						const char *first_id = first_id_o ? json_object_get_string(first_id_o) : "";
-						char sig_probe[2048] = {0};
+						char sig_probe[SIG_CACHE_SIG_MAX] = {0};
 						if (!auren_upstream_lookup_thought_sig(first_id, sig_probe, sizeof(sig_probe)))
 							turn_dropped = 1;
 					}
@@ -1205,7 +1220,7 @@ auren_upstream_build_antigravity_request(
 							const char *args_str = fn_args ? json_object_get_string(fn_args) : "{}";
 							const char *id_str = fn_id ? json_object_get_string(fn_id) : "";
 
-							char sig_buf[2048] = {0};
+							char sig_buf[SIG_CACHE_SIG_MAX] = {0};
 							int has_sig = auren_upstream_lookup_thought_sig(id_str, sig_buf, sizeof(sig_buf));
 
 							struct json_object *part = json_object_new_object();
@@ -1441,18 +1456,18 @@ auren_upstream_build_antigravity_request(
 		struct json_object *tc = json_object_new_object();
 		int budget = -1;
 		if (strcmp(route->effort, "extra-low") == 0) budget = 128;
-		else if (strcmp(route->effort, "low") == 0) budget = 1000;
+		else if (strcmp(route->effort, "low") == 0) budget = 256;
 		else if (strcmp(route->effort, "medium") == 0) budget = 4000;
 		else if (strcmp(route->effort, "high") == 0 || strcmp(route->effort, "xhigh") == 0) budget = -1;
 
 		/* If caller explicitly requests <= 1024 max_tokens with no tool definitions
 		 * on a low-effort flash route (e.g. Jarvis voice agent), cap thinkingBudget
-		 * at 128 tokens so it routes directly to Gemini 3.8 Flash low without thinking overhead.
+		 * at 128 tokens so it routes directly without thinking overhead.
 		 */
 		struct json_object *req_mt = json_object_object_get(openai_req, "max_tokens");
 		if (req_mt && json_object_is_type(req_mt, json_type_int)) {
 			int mt_val = json_object_get_int(req_mt);
-			if (mt_val > 0 && mt_val <= 1024 && budget == 1000 && !openai_tools)
+			if (mt_val > 0 && mt_val <= 1024 && budget == 256 && !openai_tools)
 				budget = 128;
 		}
 

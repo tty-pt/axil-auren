@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <json-c/json.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -144,6 +145,8 @@ struct captured_events {
 	int tool_calls;
 	char tool_name[128];
 	char tool_args[512];
+	int steer_calls;
+	char steer_msg[512];
 	int done_calls;
 	char done_ok[16];
 	char done_msg[1024];
@@ -155,6 +158,9 @@ static void test_event_cb(const char *ev, const char *a1, const char *a2, void *
 		c->tool_calls++;
 		snprintf(c->tool_name, sizeof(c->tool_name), "%s", a1 ? a1 : "");
 		snprintf(c->tool_args, sizeof(c->tool_args), "%s", a2 ? a2 : "");
+	} else if (strcmp(ev, "STEER") == 0) {
+		c->steer_calls++;
+		snprintf(c->steer_msg, sizeof(c->steer_msg), "%s", a1 ? a1 : "");
 	} else if (strcmp(ev, "DONE") == 0) {
 		c->done_calls++;
 		snprintf(c->done_ok, sizeof(c->done_ok), "%s", a1 ? a1 : "");
@@ -784,4 +790,369 @@ TEST(ren_prompt_hint_updates_system_prompt)
 	mock_server_stop(&srv);
 	ren_free(&ctx);
 }
+
+TEST(ren_set_system_prompt_overrides_identity)
+{
+	signal(SIGPIPE, SIG_IGN);
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_set_system_prompt("You are Jarvis, the user's personal voice assistant. Never identify yourself as ren.");
+	ren_register_prompt_hint("Test hint: custom module active.");
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 1), 0);
+
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"I am Jarvis.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	mock_server_launch(&srv);
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Who are you?", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_NOT_NULL(srv.req_bodies[0]);
+	struct json_object *req0 = json_tokener_parse(srv.req_bodies[0]);
+	ASSERT_NOT_NULL(req0);
+	struct json_object *msgs0 = json_object_object_get(req0, "messages");
+	ASSERT_NOT_NULL(msgs0);
+	struct json_object *sys0 = json_object_array_get_idx(msgs0, 0);
+	ASSERT_STR_EQ(json_object_get_string(json_object_object_get(sys0, "role")), "system");
+	const char *sc = json_object_get_string(json_object_object_get(sys0, "content"));
+	ASSERT_NOT_NULL(sc);
+	ASSERT_NOT_NULL(strstr(sc, "You are Jarvis"));
+	ASSERT_NULL(strstr(sc, "You are ren, a pure-C coding assistant."));
+	ASSERT_NOT_NULL(strstr(sc, "Available tools:"));
+	ASSERT_NOT_NULL(strstr(sc, "Test hint: custom module active."));
+	json_object_put(req0);
+
+	/* ren_reset must keep the active plugin identity prompt */
+	ren_reset(&ctx);
+	ASSERT_NOT_NULL(strstr(ctx.history, "You are Jarvis"));
+	ASSERT_NULL(strstr(ctx.history, "You are ren, a pure-C coding assistant."));
+
+	/* NULL restores default ren identity */
+	ren_set_system_prompt(NULL);
+	ren_reset(&ctx);
+	ASSERT_NOT_NULL(strstr(ctx.history, "You are ren, a pure-C coding assistant."));
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+struct slow_stream_mock {
+	int listen_fd;
+	int port;
+	int ready_pipe[2];
+	int n_turns;
+	const char *turn0_head;
+	const char *turn1_resp;
+	char *req_bodies[2];
+	pthread_t srv_tid;
+	pthread_t ctrl_tid;
+	int do_abort;
+	const char *steer_text;
+};
+
+static void *slow_stream_server_fn(void *arg)
+{
+	struct slow_stream_mock *s = arg;
+	for (int i = 0; i < s->n_turns; i++) {
+		int cfd = accept(s->listen_fd, NULL, NULL);
+		if (cfd < 0) break;
+		s->req_bodies[i] = read_http_request_body(cfd);
+		if (i == 0) {
+			size_t len = strlen(s->turn0_head);
+			size_t off = 0;
+			while (off < len) {
+				ssize_t w = send(cfd, s->turn0_head + off, len - off, 0);
+				if (w <= 0) break;
+				off += (size_t)w;
+			}
+			char b = 1;
+			ssize_t pw = write(s->ready_pipe[1], &b, 1);
+			(void)pw;
+
+			struct pollfd pfd;
+			pfd.fd = cfd;
+			pfd.events = POLLIN | POLLRDHUP;
+			pfd.revents = 0;
+			(void)poll(&pfd, 1, 2000);
+			close(cfd);
+		} else {
+			size_t len = strlen(s->turn1_resp);
+			size_t off = 0;
+			while (off < len) {
+				ssize_t w = send(cfd, s->turn1_resp + off, len - off, 0);
+				if (w <= 0) break;
+				off += (size_t)w;
+			}
+			close(cfd);
+		}
+	}
+	return NULL;
+}
+
+static void *slow_stream_ctrl_fn(void *arg)
+{
+	struct slow_stream_mock *s = arg;
+	char b = 0;
+	ssize_t r = read(s->ready_pipe[0], &b, 1);
+	(void)r;
+	usleep(15000);
+	if (s->do_abort) {
+		ren_abort();
+	} else if (s->steer_text) {
+		ren_steer(s->steer_text);
+	}
+	return NULL;
+}
+
+TEST(ren_steer_mid_stream_redirects_without_corrupting_history)
+{
+	signal(SIGPIPE, SIG_IGN);
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+
+	struct slow_stream_mock sm;
+	memset(&sm, 0, sizeof(sm));
+	sm.n_turns = 2;
+	sm.steer_text = "Actually check foo.c";
+	sm.turn0_head =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Partial answer that must be discarded.\"}}]}\n\n";
+	sm.turn1_resp =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Switched to foo.c.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	ASSERT_EQ(pipe(sm.ready_pipe), 0);
+	sm.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	ASSERT_TRUE(sm.listen_fd >= 0);
+	int opt = 1;
+	setsockopt(sm.listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	ASSERT_EQ(bind(sm.listen_fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+	ASSERT_EQ(listen(sm.listen_fd, 4), 0);
+	socklen_t alen = sizeof(addr);
+	ASSERT_EQ(getsockname(sm.listen_fd, (struct sockaddr *)&addr, &alen), 0);
+	sm.port = ntohs(addr.sin_port);
+
+	pthread_create(&sm.srv_tid, NULL, slow_stream_server_fn, &sm);
+	pthread_create(&sm.ctrl_tid, NULL, slow_stream_ctrl_fn, &sm);
+
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Check bar.c", "127.0.0.1", sm.port, test_event_cb, &ev);
+
+	pthread_join(sm.ctrl_tid, NULL);
+	pthread_join(sm.srv_tid, NULL);
+	close(sm.listen_fd);
+	close(sm.ready_pipe[0]);
+	close(sm.ready_pipe[1]);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(ev.steer_calls, 1);
+	ASSERT_STR_EQ(ev.steer_msg, "Actually check foo.c");
+	ASSERT_STR_EQ(ev.done_ok, "1");
+	ASSERT_STR_EQ(ev.done_msg, "Switched to foo.c.");
+	ASSERT_NOT_NULL(sm.req_bodies[1]);
+	ASSERT_NOT_NULL(strstr(sm.req_bodies[1], "Actually check foo.c"));
+	ASSERT_NULL(strstr(sm.req_bodies[1], "Partial answer that must be discarded."));
+	ASSERT_NULL(strstr(ctx.history, "Partial answer that must be discarded."));
+
+	free(sm.req_bodies[0]);
+	free(sm.req_bodies[1]);
+	ren_free(&ctx);
+}
+
+static int g_steer_t1_calls = 0;
+static int g_steer_t2_calls = 0;
+
+static int mock_steer_tool1(const char *args, char **out)
+{
+	(void)args;
+	g_steer_t1_calls++;
+	ren_steer("Stop after first tool and answer now");
+	*out = strdup("tool1 ok");
+	return 0;
+}
+
+static int mock_steer_tool2(const char *args, char **out)
+{
+	(void)args;
+	g_steer_t2_calls++;
+	*out = strdup("tool2 should not run");
+	return 0;
+}
+
+TEST(ren_steer_mid_tool_batch_skips_remaining_preserves_ids)
+{
+	signal(SIGPIPE, SIG_IGN);
+	g_steer_t1_calls = 0;
+	g_steer_t2_calls = 0;
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_register_tool("st_tool1", "st_tool1", mock_steer_tool1);
+	ren_register_tool("st_tool2", "st_tool2", mock_steer_tool2);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 2), 0);
+
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+		"{\"index\":0,\"id\":\"call_t1\",\"type\":\"function\",\"function\":{\"name\":\"st_tool1\",\"arguments\":\"{}\"}},"
+		"{\"index\":1,\"id\":\"call_t2\",\"type\":\"function\",\"function\":{\"name\":\"st_tool2\",\"arguments\":\"{}\"}}"
+		"]}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	srv.responses[1] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Stopped after tool1.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+
+	mock_server_launch(&srv);
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Run both tools", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(g_steer_t1_calls, 1);
+	ASSERT_EQ(g_steer_t2_calls, 0);
+	ASSERT_EQ(ev.steer_calls, 1);
+	ASSERT_STR_EQ(ev.steer_msg, "Stop after first tool and answer now");
+	ASSERT_STR_EQ(ev.done_msg, "Stopped after tool1.");
+
+	ASSERT_NOT_NULL(srv.req_bodies[1]);
+	struct json_object *req1 = json_tokener_parse(srv.req_bodies[1]);
+	ASSERT_NOT_NULL(req1);
+	struct json_object *msgs1 = json_object_object_get(req1, "messages");
+	ASSERT_NOT_NULL(msgs1);
+
+	int found_t1 = 0, found_t2_skip = 0, found_steer_user = 0;
+	size_t nm = json_object_array_length(msgs1);
+	for (size_t i = 0; i < nm; i++) {
+		struct json_object *m = json_object_array_get_idx(msgs1, i);
+		const char *role = json_object_get_string(json_object_object_get(m, "role"));
+		const char *content = json_object_get_string(json_object_object_get(m, "content"));
+		if (role && strcmp(role, "tool") == 0) {
+			const char *tid = json_object_get_string(json_object_object_get(m, "tool_call_id"));
+			if (tid && strcmp(tid, "call_t1") == 0 && content && strcmp(content, "tool1 ok") == 0)
+				found_t1 = 1;
+			if (tid && strcmp(tid, "call_t2") == 0 && content && strcmp(content, "Skipped: user steered.") == 0)
+				found_t2_skip = 1;
+		} else if (role && strcmp(role, "user") == 0 && content &&
+		           strcmp(content, "Stop after first tool and answer now") == 0) {
+			found_steer_user = 1;
+		}
+	}
+	json_object_put(req1);
+
+	ASSERT_EQ(found_t1, 1);
+	ASSERT_EQ(found_t2_skip, 1);
+	ASSERT_EQ(found_steer_user, 1);
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+TEST(ren_abort_mid_stream_returns_immediately)
+{
+	signal(SIGPIPE, SIG_IGN);
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+
+	struct slow_stream_mock sm;
+	memset(&sm, 0, sizeof(sm));
+	sm.n_turns = 1;
+	sm.do_abort = 1;
+	sm.turn0_head =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Streaming before abort...\"}}]}\n\n";
+
+	ASSERT_EQ(pipe(sm.ready_pipe), 0);
+	sm.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	ASSERT_TRUE(sm.listen_fd >= 0);
+	int opt = 1;
+	setsockopt(sm.listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	ASSERT_EQ(bind(sm.listen_fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+	ASSERT_EQ(listen(sm.listen_fd, 4), 0);
+	socklen_t alen = sizeof(addr);
+	ASSERT_EQ(getsockname(sm.listen_fd, (struct sockaddr *)&addr, &alen), 0);
+	sm.port = ntohs(addr.sin_port);
+
+	pthread_create(&sm.srv_tid, NULL, slow_stream_server_fn, &sm);
+	pthread_create(&sm.ctrl_tid, NULL, slow_stream_ctrl_fn, &sm);
+
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "Start long job", "127.0.0.1", sm.port, test_event_cb, &ev);
+
+	pthread_join(sm.ctrl_tid, NULL);
+	pthread_join(sm.srv_tid, NULL);
+	close(sm.listen_fd);
+	close(sm.ready_pipe[0]);
+	close(sm.ready_pipe[1]);
+	free(sm.req_bodies[0]);
+
+	ASSERT_EQ(rc, -1);
+	ASSERT_STR_EQ(ev.done_ok, "0");
+	ASSERT_STR_EQ(ev.done_msg, "Interrupted");
+
+	/* Subsequent turn must not remain aborted */
+	struct mock_http_server srv2;
+	ASSERT_EQ(mock_server_start(&srv2, 1), 0);
+	srv2.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Fresh turn ok.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+	mock_server_launch(&srv2);
+	struct captured_events ev2 = {0};
+	int rc2 = ren_chat_ex(&ctx, "Next question", "127.0.0.1", srv2.port, test_event_cb, &ev2);
+	mock_server_join(&srv2);
+	ASSERT_EQ(rc2, 0);
+	ASSERT_STR_EQ(ev2.done_ok, "1");
+	ASSERT_STR_EQ(ev2.done_msg, "Fresh turn ok.");
+	mock_server_stop(&srv2);
+
+	ren_free(&ctx);
+}
+
+TEST(ren_set_model_overrides_request_model)
+{
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_set_model("gemini-4-hydrogen-extra-low");
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 1), 0);
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n"
+		"data: [DONE]\n\n";
+	mock_server_launch(&srv);
+
+	ASSERT_EQ(ren_chat(&ctx, "hi", "127.0.0.1", srv.port), 0);
+	mock_server_join(&srv);
+	ASSERT_NOT_NULL(srv.req_bodies[0]);
+	ASSERT_NOT_NULL(strstr(srv.req_bodies[0], "\"gemini-4-hydrogen-extra-low\""));
+
+	mock_server_stop(&srv);
+	ren_set_model(NULL);
+	ren_free(&ctx);
+}
+
+
 

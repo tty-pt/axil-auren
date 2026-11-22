@@ -23,8 +23,8 @@ libaxil-auren-obj-y-Darwin := src/metal.o
 
 LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lstele -ljson-c -lcurl \
 	-lllama -lpthread -lm
-LDLIBS-libren := -lxylem -ldl -ljson-c
-LDLIBS-ren := -Llib -lren -lxylem -ldl -ljson-c
+LDLIBS-libren := -lxylem -ldl -ljson-c -lpthread
+LDLIBS-ren := -Llib -lren -lxylem -ldl -ljson-c -lpthread
 LDLIBS-libaxil-auren-Unix := -lggml -lggml-cpu -lggml-base
 LDLIBS-libaxil-auren-Linux := -ldl -lstdc++ -lgomp -lvulkan -lggml-vulkan
 LDLIBS-libaxil-auren-Darwin := -ldl -lc++ -lggml-metal -lggml-blas -lomp \

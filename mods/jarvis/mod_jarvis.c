@@ -444,8 +444,48 @@ static int tool_input(const char *args, char **out_result) {
     return exec_dsl(&dsl, out_result);
 }
 
+static void set_jarvis_identity_prompt(void) {
+    char custom_prompt[4096] = {0};
+    if (jarvis_rc_get("initial_prompt", NULL, custom_prompt, sizeof(custom_prompt)) && custom_prompt[0]) {
+        ren_set_system_prompt(custom_prompt);
+        return;
+    }
+
+    const jarvis_ontology_t *ont = jarvis_engine_get_ontology(g_eng);
+    const char *ont_wake = ont ? jarvis_ontology_get_wake_word(ont) : NULL;
+    if (!ont_wake || !*ont_wake) ont_wake = "jarvis";
+    char wake_buf[64] = {0};
+    jarvis_rc_get("wake_word", ont_wake, wake_buf, sizeof(wake_buf));
+    if (!wake_buf[0]) snprintf(wake_buf, sizeof(wake_buf), "%s", ont_wake);
+
+    char identity[1024];
+    if (strcasecmp(wake_buf, "jarvis") != 0) {
+        snprintf(identity, sizeof(identity),
+                 "You are Jarvis (%s), the user's personal voice and desktop AI assistant. "
+                 "Never identify yourself as ren. Help the user with desktop automation, "
+                 "browser control, file operations, and memory using the available tools.",
+                 wake_buf);
+    } else {
+        snprintf(identity, sizeof(identity),
+                 "You are Jarvis, the user's personal voice and desktop AI assistant. "
+                 "Never identify yourself as ren. Help the user with desktop automation, "
+                 "browser control, file operations, and memory using the available tools.");
+    }
+    ren_set_system_prompt(identity);
+}
+
+static void set_jarvis_model(void) {
+    char model_buf[128] = {0};
+    jarvis_rc_get("model", "fast", model_buf, sizeof(model_buf));
+    if (model_buf[0]) {
+        ren_set_model(model_buf);
+    }
+}
+
 XY_MODULE_API void xy_install(void) {
     ensure_jarvis_engine();
+    set_jarvis_identity_prompt();
+    set_jarvis_model();
     ren_register_tier0(jarvis_tier0_hook);
     ren_register_context_provider(jarvis_context_hook);
 
@@ -453,16 +493,16 @@ XY_MODULE_API void xy_install(void) {
     ren_register_tool("window", "window <close | fullscreen | float | focus <class_or_title|other|next|previous>>", tool_window);
     ren_register_tool("open_terminal", "open_terminal [command]", tool_open_terminal);
     ren_register_tool("open_app", "open_app <application_name>", tool_open_app);
-    ren_register_tool("browser", "browser <tab <name> | url <https://...> | search <query>>", tool_browser);
+    ren_register_tool("browser", "browser <tab <title_or_url_substring> | url <https://...> | search <query>>", tool_browser);
     ren_register_tool("media", "media <play [query] | pause | next | prev | volume_up | volume_down | mute>", tool_media);
     ren_register_tool("inspect", "inspect <terminal [focused|other] | browser [filter_query] | windows | clipboard | system [aspect]>", tool_inspect);
     ren_register_tool("input", "input <send <contact_or_entry> | <text> | submit <text> | type <text> | key <combo> | click <x y | element_label> | scroll <up|down|left|right> [amount]>", tool_input);
 
     ren_register_prompt_hint(
-        "You also act as Jarvis's desktop assistant with live GUI and browser control via 'inspect', 'browser', 'window', and 'input'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
+        "You have live GUI and browser control via 'inspect', 'browser', 'window', and 'input'. Never claim you cannot access or interact with browser tabs, WhatsApp Web, or desktop apps.\n"
         "To interact with an open browser tab or send a message (e.g. on WhatsApp Web):\n"
-        "1. Run inspect with 'browser' (or browser with 'tab whatsapp') to focus the browser and see tabs and UI elements.\n"
-        "2. Run input with 'send <contact_or_entry> | <message>' (or 'click <contact>' then 'submit <message>') to select the conversation, type the text, and press Enter.\n"
+        "1. Run 'browser' with 'tab whatsapp' (a title/URL substring, NEVER a numeric index) or 'inspect' with 'browser' to focus the tab and inspect UI elements.\n"
+        "2. Prefer a single 'input' call with 'send <contact_or_entry> | <message>' (or 'click <contact>' then 'submit <message>') to select the conversation, type, and press Enter without extra sleeps.\n"
         "After receiving tool results that complete the user's request, always output a brief 1-sentence confirmation to the user (never an empty reply).\n"
         "When answering the user directly, keep spoken replies concise, natural, and direct.");
 }

@@ -23,8 +23,8 @@ libaxil-auren-obj-y-Darwin := src/metal.o
 
 LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lstele -ljson-c -lcurl \
 	-lllama -lpthread -lm
-LDLIBS-libren := -lxylem -lstele -lcorm -ldl -lmm -ljson-c -lm
-LDLIBS-ren := -Llib -lren -lxylem -lstele -lcorm -ldl -lmm -ljson-c -lm
+LDLIBS-libren := -lxylem -ldl -ljson-c
+LDLIBS-ren := -Llib -lren -lxylem -ldl -ljson-c
 LDLIBS-libaxil-auren-Unix := -lggml -lggml-cpu -lggml-base
 LDLIBS-libaxil-auren-Linux := -ldl -lstdc++ -lgomp -lvulkan -lggml-vulkan
 LDLIBS-libaxil-auren-Darwin := -ldl -lc++ -lggml-metal -lggml-blas -lomp \
@@ -72,17 +72,22 @@ omp-version := $(shell ls ${omp} 2>/dev/null | head -n 1)
 omp-version != ls ${omp} 2>/dev/null | head -n 1 || true
 omp := ${omp}/${omp-version}
 
-CFLAGS := -g -I${llamacpp}/../include -I${llamacpp}/../ggml/include -I${vulkan}/include -I../libxylem/include -I../libstele/include -I../libcorm/include -I../libmm/include -I../libjarvis/include -Iinclude
+sib_inc := $(shell for d in ../libxylem ../libstele ../libcorm ../libsepal ../axil; do [ -d "$$d/include" ] && echo "-I$$d/include"; done || true)
+sib_inc != for d in ../libxylem ../libstele ../libcorm ../libsepal ../axil; do [ -d "$$d/include" ] && echo "-I$$d/include"; done || true
+sib_lib := $(shell for d in ../libxylem ../libstele ../libcorm ../libsepal ../axil; do [ -d "$$d/lib" ] && echo "-L${CURDIR}/$$d/lib"; done || true)
+sib_lib != for d in ../libxylem ../libstele ../libcorm ../libsepal ../axil; do [ -d "$$d/lib" ] && echo "-L${CURDIR}/$$d/lib"; done || true
+
+CFLAGS := -g -Iinclude -I${llamacpp}/../include -I${llamacpp}/../ggml/include -I${vulkan}/include ${sib_inc}
 CFLAGS-Darwin := -I${omp}/include
 
 ggmlp := ${llamacpp}/ggml/src
 
+LDFLAGS := ${sib_lib}
 LDFLAGS-libaxil-auren := -L${llamacpp}/src -L${ggmlp} -L${ggmlp}/ggml-cpu -L${ggmlp}/ggml-base
 LDFLAGS-libaxil-auren-Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN'
 LDFLAGS-libaxil-auren-Windows := -Wl,--export-all-symbols
 LDFLAGS-Linux := -L${ggmlp}/ggml-vulkan -L${vulkan}/lib
 LDFLAGS-libren-Linux := -Wl,-rpath,'$$ORIGIN'
-LDFLAGS-ren := -L${CURDIR}/../libmm/lib -L${CURDIR}/../libxylem/lib -L${CURDIR}/../libstele/lib -L${CURDIR}/../libcorm/lib -L${HOME}/.local/lib
 LDFLAGS-ren-Linux := -Wl,-rpath,'$$ORIGIN/../lib' -Wl,-rpath,'$$ORIGIN'
 LDFLAGS-Darwin := -L${ggmlp}/ggml-metal -L${ggmlp}/ggml-blas -L${omp}/lib
 
@@ -261,31 +266,44 @@ npm-test: npm-build
 	@node --test npm/tests/auren-client.test.mjs
 
 # ren modules
+mm_prefix := $(shell for d in ../libmm ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/mm.h" ] && { [ -f "$$d/lib/libmm.${SO}" ] || [ -f "$$d/lib64/libmm.${SO}" ]; } && echo "$$d" && break; done || true)
+mm_prefix != for d in ../libmm ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/mm.h" ] && { [ -f "$$d/lib/libmm.${SO}" ] || [ -f "$$d/lib64/libmm.${SO}" ]; } && echo "$$d" && break; done || true
+
+jarvis_prefix := $(shell for d in ../libjarvis ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/jarvis.h" ] && { [ -f "$$d/lib/libjarvis.${SO}" ] || [ -f "$$d/lib64/libjarvis.${SO}" ]; } && echo "$$d" && break; done || true)
+jarvis_prefix != for d in ../libjarvis ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/jarvis.h" ] && { [ -f "$$d/lib/libjarvis.${SO}" ] || [ -f "$$d/lib64/libjarvis.${SO}" ]; } && echo "$$d" && break; done || true
+
+mm_rpath_dev-../libmm := -Wl,-rpath,'$$ORIGIN/../../../libmm/lib'
+jarvis_rpath_dev-../libjarvis := -Wl,-rpath,'$$ORIGIN/../../../libjarvis/lib'
+mm_lib_flag := $(shell [ -n "${mm_prefix}" ] && echo "-L${mm_prefix}/lib" || true)
+mm_lib_flag != [ -n "${mm_prefix}" ] && echo "-L${mm_prefix}/lib" || true
+
+REN_CORE_MODS := mods/fs/mod_fs.so mods/bash/mod_bash.so
+REN_OPT_MODS := $(shell [ -n "${mm_prefix}" ] && echo mods/mm/mod_mm.so; [ -n "${jarvis_prefix}" ] && echo mods/jarvis/mod_jarvis.so)
+REN_OPT_MODS != [ -n "${mm_prefix}" ] && echo mods/mm/mod_mm.so; [ -n "${jarvis_prefix}" ] && echo mods/jarvis/mod_jarvis.so
+REN_MODS := ${REN_CORE_MODS} ${REN_OPT_MODS}
+
 mods/fs/mod_fs.so: mods/fs/mod_fs.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/fs
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/fs/mod_fs.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/fs/mod_fs.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
 mods/bash/mod_bash.so: mods/bash/mod_bash.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/bash
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/mod_bash.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/mod_bash.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
 mods/mm/mod_mm.so: mods/mm/mod_mm.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/mm
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/mm/mod_mm.c $(LDFLAGS) -Llib -lren -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libmm/lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' -Wl,-rpath,'$$ORIGIN/../../../libmm/lib'
+	$(CC) $(CFLAGS) -I${mm_prefix}/include -fPIC -shared -o $@ mods/mm/mod_mm.c $(LDFLAGS) -Llib -lren -L${mm_prefix}/lib -lmm -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' ${mm_rpath_dev-${mm_prefix}}
 
 mods/jarvis/mod_jarvis.so: mods/jarvis/mod_jarvis.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/jarvis
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/jarvis/mod_jarvis.c $(LDFLAGS) -Llib -lren -ljarvis -lxylem -lstele -lcorm -lmm -L${CURDIR}/../libjarvis/lib -L${CURDIR}/../libmm/lib -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' -Wl,-rpath,'$$ORIGIN/../../../libjarvis/lib' -Wl,-rpath,'$$ORIGIN/../../../libmm/lib'
+	$(CC) $(CFLAGS) -I${jarvis_prefix}/include -fPIC -shared -o $@ mods/jarvis/mod_jarvis.c $(LDFLAGS) -Llib -lren -L${jarvis_prefix}/lib ${mm_lib_flag} -ljarvis -lxylem -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib' ${jarvis_rpath_dev-${jarvis_prefix}} ${mm_rpath_dev-${mm_prefix}}
 
-all: mods/fs/mod_fs.so mods/bash/mod_bash.so mods/mm/mod_mm.so mods/jarvis/mod_jarvis.so
+all: ${REN_MODS}
 
 install: install-ren-mods
 .PHONY: install-ren-mods
-install-ren-mods: lib/libren.so mods/fs/mod_fs.so mods/bash/mod_bash.so mods/mm/mod_mm.so mods/jarvis/mod_jarvis.so
+install-ren-mods: lib/libren.so ${REN_MODS}
 	mkdir -p $(DESTDIR)$(PREFIX)/lib/ren
-	install -m 755 mods/fs/mod_fs.so $(DESTDIR)$(PREFIX)/lib/ren/mod_fs.so
-	install -m 755 mods/bash/mod_bash.so $(DESTDIR)$(PREFIX)/lib/ren/mod_bash.so
-	install -m 755 mods/mm/mod_mm.so $(DESTDIR)$(PREFIX)/lib/ren/mod_mm.so
-	install -m 755 mods/jarvis/mod_jarvis.so $(DESTDIR)$(PREFIX)/lib/ren/mod_jarvis.so
+	for m in ${REN_MODS}; do install -m 755 "$$m" "$(DESTDIR)$(PREFIX)/lib/ren/$$(basename "$$m")"; done
 
 bin/ren: lib/libren.so

@@ -159,6 +159,17 @@ int ren_load_module(const char *path) {
         int has_mod_prefix = (strncmp(base, "mod_", 4) == 0);
         char candidate[2048];
 
+        const char *mod_dir = getenv("REN_MOD_DIR");
+        if (mod_dir && *mod_dir) {
+            snprintf(candidate, sizeof(candidate), "%s/%s", mod_dir, base);
+            if (try_load_so_stem(candidate) == 0) return 0;
+
+            if (!has_mod_prefix) {
+                snprintf(candidate, sizeof(candidate), "%s/mod_%s", mod_dir, base);
+                if (try_load_so_stem(candidate) == 0) return 0;
+            }
+        }
+
         const char *home = getenv("HOME");
         if (home && *home) {
             snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/%s", home, base);
@@ -166,14 +177,6 @@ int ren_load_module(const char *path) {
 
             if (!has_mod_prefix) {
                 snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/mod_%s", home, base);
-                if (try_load_so_stem(candidate) == 0) return 0;
-            }
-
-            snprintf(candidate, sizeof(candidate), "%s/site/external/axil-auren/%s", home, clean);
-            if (try_load_so_stem(candidate) == 0) return 0;
-
-            if (!has_mod_prefix) {
-                snprintf(candidate, sizeof(candidate), "%s/site/external/axil-auren/mods/%s/mod_%s", home, base, base);
                 if (try_load_so_stem(candidate) == 0) return 0;
             }
         }

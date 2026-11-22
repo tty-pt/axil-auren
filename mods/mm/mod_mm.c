@@ -74,6 +74,29 @@ static int do_recall(const char *args, char **out_result) {
         *out_result = (rc == 0 && buf) ? buf : strdup("No call graph edges found.");
         return 0;
     }
+    if (strcmp(rest, "diff") == 0) {
+        mm_project_info_t pinfo;
+        const char *target = proj ? proj : ".";
+        if (mm_project_resolve(target, &pinfo) == 0) {
+            mm_code_index_t idx;
+            if (mm_project_open_index(&pinfo, &idx) == 0) {
+                rc = mm_code_diff_impact(&idx, 2, &buf, &len);
+                mm_code_index_free(&idx);
+            }
+        }
+        *out_result = (rc == 0 && buf) ? buf : strdup("No git diff impact found.");
+        return 0;
+    }
+    if (strncmp(rest, "guardrail:", 10) == 0) {
+        rc = mm_evaluate_guardrail(g_mm_ctx, rest + 10, NULL, NULL, &buf, &len);
+        *out_result = (rc == 0 && buf) ? buf : strdup("No guardrail warnings.");
+        return 0;
+    }
+    if (strncmp(rest, "session:", 8) == 0) {
+        rc = mm_session_recall(g_mm_ctx, MM_TIER_BOTH, NULL, rest + 8, 0, 0, 0, 5, &buf, &len);
+        *out_result = (rc == 0 && buf) ? buf : strdup("No session history found.");
+        return 0;
+    }
 
     mm_recall_req_t req;
     memset(&req, 0, sizeof(req));
@@ -137,12 +160,15 @@ XY_MODULE_API void xy_install(void) {
     opts.semantic_search = false;
     g_mm_ctx = mm_open(&opts);
 
-    ren_register_tool("recall", "recall [project:<name>] <query|code:query|symbol:name|trace:name|projects>", do_recall);
+    ren_register_tool("recall", "recall [project:<name>] <query|code:query|symbol:name|trace:name|diff|guardrail:intent|session:query|projects>", do_recall);
     ren_register_tool("record", "record <problem>::<findings>", do_record);
     ren_register_prompt_hint(
         "Memory & code tools are available: use 'recall <query>' for memories, "
         "'recall [project:<name>] code:<query>' to search code, "
         "'recall [project:<name>] symbol:<name>' to read a symbol, "
         "'recall [project:<name>] trace:<name>' for call graphs, "
+        "'recall [project:<name>] diff' for git diff blast radius, "
+        "'recall guardrail:<intent>' for pre-flight checks, "
+        "'recall session:<query>' for past conversations, "
         "'recall projects' to list projects, and 'record <problem>::<findings>' to save facts.");
 }

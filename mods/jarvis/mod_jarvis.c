@@ -85,15 +85,7 @@ static bool prompt_needs_tier1(const jarvis_ontology_t *ont, const char *prompt)
             return true;
         }
     }
-    /* Coding / file / repo / multi-step GUI terms belong to Tier-1 ren tools */
-    if (strstr(clean, "file") || strstr(clean, "ficheiro") ||
-        strstr(clean, "code") || strstr(clean, "codigo") ||
-        strstr(clean, "read ") || strstr(clean, "edit ") ||
-        strstr(clean, "compile") || strstr(clean, "commit") ||
-        strstr(clean, "explain") || strstr(clean, "explica") ||
-        strstr(clean, "why ") || strstr(clean, "porque ") ||
-        strstr(clean, "whatsapp") || strstr(clean, "message") ||
-        strstr(clean, "mensagem")) {
+    if (ont && jarvis_ontology_matches_tier1_trigger(ont, clean)) {
         return true;
     }
     return false;
@@ -453,24 +445,22 @@ static void set_jarvis_identity_prompt(void) {
 
     const jarvis_ontology_t *ont = jarvis_engine_get_ontology(g_eng);
     const char *ont_wake = ont ? jarvis_ontology_get_wake_word(ont) : NULL;
-    if (!ont_wake || !*ont_wake) ont_wake = "jarvis";
+    if (!ont_wake || !*ont_wake) ont_wake = "assistant";
     char wake_buf[64] = {0};
     jarvis_rc_get("wake_word", ont_wake, wake_buf, sizeof(wake_buf));
     if (!wake_buf[0]) snprintf(wake_buf, sizeof(wake_buf), "%s", ont_wake);
 
+    char wake_title[64] = {0};
+    snprintf(wake_title, sizeof(wake_title), "%s", wake_buf);
+    if (wake_title[0])
+        wake_title[0] = (char)toupper((unsigned char)wake_title[0]);
+
     char identity[1024];
-    if (strcasecmp(wake_buf, "jarvis") != 0) {
-        snprintf(identity, sizeof(identity),
-                 "You are Jarvis (%s), the user's personal voice and desktop AI assistant. "
-                 "Never identify yourself as ren. Help the user with desktop automation, "
-                 "browser control, file operations, and memory using the available tools.",
-                 wake_buf);
-    } else {
-        snprintf(identity, sizeof(identity),
-                 "You are Jarvis, the user's personal voice and desktop AI assistant. "
-                 "Never identify yourself as ren. Help the user with desktop automation, "
-                 "browser control, file operations, and memory using the available tools.");
-    }
+    snprintf(identity, sizeof(identity),
+             "You are %s, the user's personal voice and desktop AI assistant. "
+             "Never identify yourself as ren. Help the user with desktop automation, "
+             "browser control, file operations, and memory using the available tools.",
+             wake_title[0] ? wake_title : "Assistant");
     ren_set_system_prompt(identity);
 }
 

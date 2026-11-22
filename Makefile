@@ -81,10 +81,9 @@ LDFLAGS-libaxil-auren := -L${llamacpp}/src -L${ggmlp} -L${ggmlp}/ggml-cpu -L${gg
 LDFLAGS-libaxil-auren-Linux := -Wl,--disable-new-dtags -Wl,-rpath,'$$ORIGIN'
 LDFLAGS-libaxil-auren-Windows := -Wl,--export-all-symbols
 LDFLAGS-Linux := -L${ggmlp}/ggml-vulkan -L${vulkan}/lib
-LDFLAGS-libren := -L${CURDIR}/../libmm/lib -L${CURDIR}/../libxylem/lib -L${CURDIR}/../libstele/lib -L${CURDIR}/../libcorm/lib
-LDFLAGS-libren-Linux := -Wl,-rpath,${CURDIR}/lib -Wl,-rpath,${CURDIR}/../libmm/lib -Wl,-rpath,${CURDIR}/../libxylem/lib -Wl,-rpath,${CURDIR}/../libstele/lib -Wl,-rpath,${CURDIR}/../libcorm/lib
-LDFLAGS-ren := -L${CURDIR}/../libmm/lib -L${CURDIR}/../libxylem/lib -L${CURDIR}/../libstele/lib -L${CURDIR}/../libcorm/lib
-LDFLAGS-ren-Linux := $(LDFLAGS-libren-Linux)
+LDFLAGS-libren-Linux := -Wl,-rpath,'$$ORIGIN'
+LDFLAGS-ren := -L${CURDIR}/../libmm/lib -L${CURDIR}/../libxylem/lib -L${CURDIR}/../libstele/lib -L${CURDIR}/../libcorm/lib -L${HOME}/.local/lib
+LDFLAGS-ren-Linux := -Wl,-rpath,'$$ORIGIN/../lib' -Wl,-rpath,'$$ORIGIN'
 LDFLAGS-Darwin := -L${ggmlp}/ggml-metal -L${ggmlp}/ggml-blas -L${omp}/lib
 
 CMAKE_FLAGS-Linux := -DGGML_VULKAN=ON

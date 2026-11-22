@@ -38,6 +38,7 @@ typedef struct {
 } ren_tc_accum_t;
 
 #define MAX_PROMPT_HINTS 16
+#define MAX_CONTEXT_PROVIDERS 16
 
 static ren_tool_entry_t g_tools[MAX_TOOLS];
 static int g_num_tools = 0;
@@ -48,7 +49,8 @@ static char *g_model_name = NULL;
 static char *g_system_prompt = NULL;
 static int g_tools_loaded = 0;
 static ren_tier0_func g_tier0_fn = NULL;
-static ren_context_func g_context_fn = NULL;
+static ren_context_func g_context_fns[MAX_CONTEXT_PROVIDERS];
+static int g_num_context_fns = 0;
 static ren_compact_func g_compactor_fn = NULL;
 static volatile sig_atomic_t *g_abort_flag = NULL;
 
@@ -145,7 +147,15 @@ void ren_register_tier0(ren_tier0_func fn) {
 }
 
 void ren_register_context_provider(ren_context_func fn) {
-    g_context_fn = fn;
+    if (!fn) {
+        g_num_context_fns = 0;
+        return;
+    }
+    for (int i = 0; i < g_num_context_fns; i++) {
+        if (g_context_fns[i] == fn) return;
+    }
+    if (g_num_context_fns >= MAX_CONTEXT_PROVIDERS) return;
+    g_context_fns[g_num_context_fns++] = fn;
 }
 
 void ren_register_compactor(ren_compact_func fn) {
@@ -271,7 +281,7 @@ int ren_load_module(const char *path) {
     if (path[0] != '/') {
         const char *base = strrchr(clean, '/');
         base = base ? (base + 1) : clean;
-        int has_mod_prefix = (strncmp(base, "mod_", 4) == 0);
+        int has_ren_prefix = (strncmp(base, "ren-", 4) == 0);
         char candidate[2048];
 
         const char *mod_dir = getenv("REN_MOD_DIR");
@@ -279,8 +289,8 @@ int ren_load_module(const char *path) {
             snprintf(candidate, sizeof(candidate), "%s/%s", mod_dir, base);
             if (try_load_so_stem(candidate) == 0) return 0;
 
-            if (!has_mod_prefix) {
-                snprintf(candidate, sizeof(candidate), "%s/mod_%s", mod_dir, base);
+            if (!has_ren_prefix) {
+                snprintf(candidate, sizeof(candidate), "%s/ren-%s", mod_dir, base);
                 if (try_load_so_stem(candidate) == 0) return 0;
             }
         }
@@ -290,8 +300,8 @@ int ren_load_module(const char *path) {
             snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/%s", home, base);
             if (try_load_so_stem(candidate) == 0) return 0;
 
-            if (!has_mod_prefix) {
-                snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/mod_%s", home, base);
+            if (!has_ren_prefix) {
+                snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/ren-%s", home, base);
                 if (try_load_so_stem(candidate) == 0) return 0;
             }
         }
@@ -300,8 +310,8 @@ int ren_load_module(const char *path) {
         for (int i = 0; sys_dirs[i]; i++) {
             snprintf(candidate, sizeof(candidate), "%s/%s", sys_dirs[i], base);
             if (try_load_so_stem(candidate) == 0) return 0;
-            if (!has_mod_prefix) {
-                snprintf(candidate, sizeof(candidate), "%s/mod_%s", sys_dirs[i], base);
+            if (!has_ren_prefix) {
+                snprintf(candidate, sizeof(candidate), "%s/ren-%s", sys_dirs[i], base);
                 if (try_load_so_stem(candidate) == 0) return 0;
             }
         }
@@ -319,12 +329,26 @@ static int dispatch_tool(const char *name, const char *args, char **out) {
     return -1;
 }
 
+int ren_call_tool(const char *name, const char *args, char **out_result) {
+    char *dummy = NULL;
+    char **dst = out_result ? out_result : &dummy;
+    *dst = NULL;
+    if (!name || !*name) {
+        *dst = strdup("Error: unknown tool");
+        if (!out_result) free(dummy);
+        return -1;
+    }
+    int rc = dispatch_tool(name, args, dst);
+    if (!out_result) free(dummy);
+    return rc;
+}
+
 static void load_default_tools(void) {
     if (g_tools_loaded) return;
     g_tools_loaded = 1;
     xy_init();
-    ren_load_module("mods/fs/mod_fs");
-    ren_load_module("mods/bash/mod_bash");
+    ren_load_module("mods/fs/ren-fs");
+    ren_load_module("mods/bash/ren-bash");
 }
 
 static const char *msg_role(struct json_object *msg) {
@@ -936,19 +960,28 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
     }
 
     /* 2. Tier-1 Multi-Turn Agent Loop (axil-auren) */
-    if (g_context_fn) {
-        char *dctx = g_context_fn();
+    if (g_num_context_fns > 0) {
+        char *dctx = NULL;
+        size_t dlen = 0;
+        size_t dcap = 0;
+        for (int i = 0; i < g_num_context_fns; i++) {
+            char *part = g_context_fns[i]();
+            if (part && *part) {
+                if (dlen > 0) buf_append(&dctx, &dlen, &dcap, " ", 1);
+                buf_append(&dctx, &dlen, &dcap, part, strlen(part));
+            }
+            free(part);
+        }
         if (dctx && *dctx) {
-            size_t ucap = strlen(dctx) + strlen(prompt) + 64;
+            size_t ucap = dlen + strlen(prompt) + 64;
             char *umsg = malloc(ucap);
             snprintf(umsg, ucap, "[Live Desktop State: %s]\n%s", dctx, prompt);
             append_message(ctx, "user", umsg);
             free(umsg);
-            free(dctx);
         } else {
-            free(dctx);
             append_message(ctx, "user", prompt);
         }
+        free(dctx);
     } else {
         append_message(ctx, "user", prompt);
     }

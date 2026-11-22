@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MAX_MOCK_TURNS 40
@@ -145,6 +146,11 @@ struct captured_events {
 	int tool_calls;
 	char tool_name[128];
 	char tool_args[512];
+	int tier0_calls;
+	char tier0_op[128];
+	char tier0_out[512];
+	int clause_calls;
+	char clause_text[512];
 	int steer_calls;
 	char steer_msg[512];
 	int done_calls;
@@ -154,10 +160,17 @@ struct captured_events {
 
 static void test_event_cb(const char *ev, const char *a1, const char *a2, void *ud) {
 	struct captured_events *c = ud;
-	if (strcmp(ev, "TOOL") == 0) {
+	if (strcmp(ev, "TIER0") == 0) {
+		c->tier0_calls++;
+		snprintf(c->tier0_op, sizeof(c->tier0_op), "%s", a1 ? a1 : "");
+		snprintf(c->tier0_out, sizeof(c->tier0_out), "%s", a2 ? a2 : "");
+	} else if (strcmp(ev, "TOOL") == 0) {
 		c->tool_calls++;
 		snprintf(c->tool_name, sizeof(c->tool_name), "%s", a1 ? a1 : "");
 		snprintf(c->tool_args, sizeof(c->tool_args), "%s", a2 ? a2 : "");
+	} else if (strcmp(ev, "CLAUSE") == 0) {
+		c->clause_calls++;
+		snprintf(c->clause_text, sizeof(c->clause_text), "%s", a1 ? a1 : "");
 	} else if (strcmp(ev, "STEER") == 0) {
 		c->steer_calls++;
 		snprintf(c->steer_msg, sizeof(c->steer_msg), "%s", a1 ? a1 : "");
@@ -1151,6 +1164,184 @@ TEST(ren_set_model_overrides_request_model)
 
 	mock_server_stop(&srv);
 	ren_set_model(NULL);
+	ren_free(&ctx);
+}
+
+static char *mock_ctx_a(void) { return strdup("x11_focused='Firefox'"); }
+static char *mock_ctx_empty(void) { return strdup(""); }
+static char *mock_ctx_b(void) { return strdup("browser_tabs=2"); }
+
+TEST(ren_multiple_context_providers_joined)
+{
+	signal(SIGPIPE, SIG_IGN);
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_register_context_provider(NULL);
+	ren_register_context_provider(mock_ctx_a);
+	ren_register_context_provider(mock_ctx_a); /* duplicate ignored */
+	ren_register_context_provider(mock_ctx_empty);
+	ren_register_context_provider(mock_ctx_b);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 1), 0);
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Noted.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+	mock_server_launch(&srv);
+
+	struct captured_events ev = {0};
+	int rc = ren_chat_ex(&ctx, "What is open?", "127.0.0.1", srv.port, test_event_cb, &ev);
+	mock_server_join(&srv);
+
+	ren_register_context_provider(NULL);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_NOT_NULL(srv.req_bodies[0]);
+	ASSERT_NOT_NULL(strstr(srv.req_bodies[0], "[Live Desktop State: x11_focused='Firefox' browser_tabs=2]"));
+	/* Deduplicated: should appear once */
+	const char *hit1 = strstr(srv.req_bodies[0], "x11_focused='Firefox'");
+	ASSERT_NOT_NULL(hit1);
+	ASSERT_NULL(strstr(hit1 + 1, "x11_focused='Firefox'"));
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+extern void xy_install(void);
+
+static char g_reflex_last_ws[128] = {0};
+static char g_reflex_last_media[128] = {0};
+static int g_reflex_fail_ws = 0;
+
+static int mock_reflex_ws(const char *args, char **out) {
+	if (g_reflex_fail_ws) {
+		*out = strdup("Error: simulated workspace failure");
+		return -1;
+	}
+	snprintf(g_reflex_last_ws, sizeof(g_reflex_last_ws), "%s", args ? args : "");
+	*out = strdup("switched");
+	return 0;
+}
+
+static int mock_reflex_media(const char *args, char **out) {
+	snprintf(g_reflex_last_media, sizeof(g_reflex_last_media), "%s", args ? args : "");
+	*out = strdup("media_ok");
+	return 0;
+}
+
+static int g_reflex_fail_open_app = 0;
+
+static int mock_reflex_open_app(const char *args, char **out) {
+	if (g_reflex_fail_open_app || !args || strcmp(args, "firefox") != 0) {
+		*out = strdup("Error: unknown application");
+		return -1;
+	}
+	*out = strdup("launched");
+	return 0;
+}
+
+TEST(ren_reflex_deterministic_and_fallthrough)
+{
+	signal(SIGPIPE, SIG_IGN);
+	g_reflex_last_ws[0] = '\0';
+	g_reflex_last_media[0] = '\0';
+	g_reflex_fail_ws = 0;
+	g_reflex_fail_open_app = 0;
+
+	/* Seed custom user TSV rule inside test HOME */
+	const char *home = getenv("HOME");
+	ASSERT_NOT_NULL(home);
+	char cfg_dir[512], ren_dir[512], tsv_path[512];
+	snprintf(cfg_dir, sizeof(cfg_dir), "%s/.config", home);
+	snprintf(ren_dir, sizeof(ren_dir), "%s/.config/ren", home);
+	snprintf(tsv_path, sizeof(tsv_path), "%s/.config/ren/reflex.tsv", home);
+	mkdir(cfg_dir, 0755);
+	mkdir(ren_dir, 0755);
+	FILE *f = fopen(tsv_path, "w");
+	ASSERT_NOT_NULL(f);
+	fprintf(f, "# user override\nswitch tag {n}\tworkspace\tmove {n}\tCustom tag {n} -> {n}.\n");
+	fclose(f);
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_register_tool("workspace", "workspace <1..9 | move 1..9>", mock_reflex_ws);
+	ren_register_tool("media", "media <play|pause|volume_up>", mock_reflex_media);
+	ren_register_tool("open_app", "open_app <app>", mock_reflex_open_app);
+	xy_install();
+
+	/* 1. Built-in exact/number word match (never contacts server) */
+	struct captured_events ev1 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Go to workspace tres!", "127.0.0.1", 1, test_event_cb, &ev1), 0);
+	ASSERT_EQ(ev1.tier0_calls, 1);
+	ASSERT_STR_EQ(ev1.tier0_op, "workspace");
+	ASSERT_STR_EQ(g_reflex_last_ws, "3");
+
+	/* 2. Portuguese move workspace match */
+	struct captured_events ev2 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Manda para a área de trabalho dois.", "127.0.0.1", 1, test_event_cb, &ev2), 0);
+	ASSERT_EQ(ev2.tier0_calls, 1);
+	ASSERT_STR_EQ(g_reflex_last_ws, "move 2");
+
+	/* 3. Custom TSV rule match with repeated placeholders */
+	struct captured_events ev3 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "switch tag 4", "127.0.0.1", 1, test_event_cb, &ev3), 0);
+	ASSERT_EQ(ev3.tier0_calls, 1);
+	ASSERT_STR_EQ(g_reflex_last_ws, "move 4");
+	ASSERT_STR_EQ(ev3.clause_text, "Custom tag 4 -> 4.");
+
+	/* 4. media_play suppresses CLAUSE TTS */
+	struct captured_events ev4 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "resume music", "127.0.0.1", 1, test_event_cb, &ev4), 0);
+	ASSERT_EQ(ev4.tier0_calls, 1);
+	ASSERT_STR_EQ(ev4.tier0_op, "media_play");
+	ASSERT_STR_EQ(g_reflex_last_media, "play");
+	ASSERT_EQ(ev4.clause_calls, 0);
+
+	/* 5. Builtin conversation_control runs without external tool */
+	struct captured_events ev_conv = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "fim de conversa", "127.0.0.1", 1, test_event_cb, &ev_conv), 0);
+	ASSERT_EQ(ev_conv.tier0_calls, 1);
+	ASSERT_STR_EQ(ev_conv.tier0_op, "conversation_control");
+	ASSERT_STR_EQ(ev_conv.clause_text, "Certo.");
+
+	/* 6. Question, multi-clause, non-app 'open ...', failed open_app, and failed tool fail open to Tier-1 LLM */
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 5), 0);
+	for (int i = 0; i < 5; i++) {
+		srv.responses[i] =
+			"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+			"data: {\"choices\":[{\"delta\":{\"content\":\"LLM handled.\"}}]}\n\n"
+			"data: [DONE]\n\n";
+	}
+	mock_server_launch(&srv);
+
+	struct captured_events ev5 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "workspace 2?", "127.0.0.1", srv.port, test_event_cb, &ev5), 0);
+	ASSERT_EQ(ev5.tier0_calls, 0);
+
+	struct captured_events ev6 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "pause and workspace 5", "127.0.0.1", srv.port, test_event_cb, &ev6), 0);
+	ASSERT_EQ(ev6.tier0_calls, 0);
+
+	struct captured_events ev7 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "open the architecture docs link", "127.0.0.1", srv.port, test_event_cb, &ev7), 0);
+	ASSERT_EQ(ev7.tier0_calls, 0);
+
+	struct captured_events ev_unknown_app = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "launch my dev server", "127.0.0.1", srv.port, test_event_cb, &ev_unknown_app), 0);
+	ASSERT_EQ(ev_unknown_app.tier0_calls, 0);
+
+	g_reflex_fail_ws = 1;
+	struct captured_events ev8 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "workspace 6", "127.0.0.1", srv.port, test_event_cb, &ev8), 0);
+	ASSERT_EQ(ev8.tier0_calls, 0);
+	g_reflex_fail_ws = 0;
+
+	mock_server_stop(&srv);
+	ren_register_tier0(NULL);
+	unlink(tsv_path);
 	ren_free(&ctx);
 }
 

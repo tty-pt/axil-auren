@@ -1,12 +1,12 @@
-# ren `mod_mm`: Pure-C Multi-Project Memory & Codebase Intelligence
+# ren `ren-mm`: Pure-C Multi-Project Memory & Codebase Intelligence
 
-`mod_mm.so` is a dynamically loaded Xylem extension for `ren` (built from `mods/mm/mod_mm.c`). It connects `ren` to `libmm.so`, giving the LLM agent access to persistent memory lore, multi-project code search, AST-bound symbol inspection, call-graph tracing, git diff blast-radius analysis, and zero-JSON distillation.
+`ren-mm.so` is a dynamically loaded Xylem extension for `ren` (installed from `external/libmm`). It connects `ren` to `libmm.so`, giving the LLM agent access to persistent memory lore, multi-project code search, AST-bound symbol inspection, call-graph tracing, git diff blast-radius analysis, and zero-JSON distillation.
 
 ---
 
 ## 1. Available Tools
 
-`mod_mm` registers two high-density, low-overhead tools with `ren`: `recall` and `record`.
+`ren-mm` registers two high-density, low-overhead tools with `ren`: `recall` and `record`.
 
 ### `recall`
 Universal retrieval tool supporting multiple specialized query formats:
@@ -48,15 +48,15 @@ Memory storage and distillation tool:
 
 ## 2. Usage with `ren`
 
-Load `mod_mm.so` when starting `ren`:
+Load `ren-mm.so` when starting `ren`:
 
 ```bash
 # Direct CLI run
-ren -m mods/mm/mod_mm.so -p "Search for aec_process in libjarvis"
+ren -m ren-mm -p "Search for aec_process in libjarvis"
 
 # Background socket listener (used by Jarvis)
 ren --session jarvis \
     --listen /tmp/ren-jarvis-$USER.sock \
     --max-turns 16 \
-    -m mod_jarvis:mod_mm
+    -m ren-jarvis:ren-reflex:ren-mm
 ```

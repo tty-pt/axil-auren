@@ -267,16 +267,20 @@ npm-test: npm-build
 
 # ren modules
 mm_prefix := $(shell for d in ../libmm ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/mm.h" ] && { [ -f "$$d/lib/libmm.${SO}" ] || [ -f "$$d/lib64/libmm.${SO}" ]; } && echo "$$d" && break; done || true)
-REN_CORE_MODS := mods/fs/mod_fs.so mods/bash/mod_bash.so
+REN_CORE_MODS := mods/fs/ren-fs.so mods/bash/ren-bash.so mods/reflex/ren-reflex.so
 REN_MODS := ${REN_CORE_MODS}
 
-mods/fs/mod_fs.so: mods/fs/mod_fs.c include/ttypt/libren.h lib/libren.so
+mods/fs/ren-fs.so: mods/fs/ren-fs.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/fs
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/fs/mod_fs.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/fs/ren-fs.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
-mods/bash/mod_bash.so: mods/bash/mod_bash.c include/ttypt/libren.h lib/libren.so
+mods/bash/ren-bash.so: mods/bash/ren-bash.c include/ttypt/libren.h lib/libren.so
 	@mkdir -p mods/bash
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/mod_bash.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/ren-bash.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+
+mods/reflex/ren-reflex.so: mods/reflex/ren-reflex.c include/ttypt/libren.h lib/libren.so
+	@mkdir -p mods/reflex
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/reflex/ren-reflex.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
 all: ${REN_MODS}
 
@@ -284,6 +288,7 @@ install: install-ren-mods
 .PHONY: install-ren-mods
 install-ren-mods: lib/libren.so ${REN_MODS}
 	mkdir -p $(DESTDIR)$(PREFIX)/lib/ren
+	@rm -f $(DESTDIR)$(PREFIX)/lib/ren/mod_fs.so $(DESTDIR)$(PREFIX)/lib/ren/mod_bash.so $(DESTDIR)$(PREFIX)/lib/mod_fs.so $(DESTDIR)$(PREFIX)/lib/mod_bash.so
 	for m in ${REN_MODS}; do install -m 755 "$$m" "$(DESTDIR)$(PREFIX)/lib/ren/$$(basename "$$m")"; done
 
 bin/ren: lib/libren.so

@@ -44,7 +44,7 @@ static void print_usage(const char *prog) {
         "  -H <host>                  auren host (default: 127.0.0.1)\n"
         "  -P <port>                  auren port (default: 4242)\n"
         "  -p <prompt>                run a single prompt\n"
-        "  -m <mods>                  colon-separated modules to load (e.g. mod_mm:mod_jarvis), repeatable\n"
+        "  -m <mods>                  colon-separated modules to load (e.g. ren-mm:ren-jarvis), repeatable\n"
         "  --session <name>           session filename under ~/.ren/sessions/\n"
         "  --listen <socket>          listen on Unix domain socket\n"
         "  --max-turns <N>            max tool turns before wrap-up (0 = unlimited, default: 0)\n"

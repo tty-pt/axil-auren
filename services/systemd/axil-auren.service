@@ -1,0 +1,15 @@
+[Unit]
+Description=Axil Auren Neural Inference Server (:4242)
+After=network.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@PREFIX@/bin/axil -A -d -p 4242 -m @PREFIX@/lib/libaxil-auren
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

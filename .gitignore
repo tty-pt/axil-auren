@@ -8,3 +8,4 @@
 /bin
 /stage
 /tests/test_runner
+!services/rc.d/

@@ -124,9 +124,40 @@ ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc: axil-auren.pc
 	install -d ${DESTDIR}${PREFIX}/lib/pkgconfig
 	install -m 644 axil-auren.pc $@
 
-install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc install-hook
+install: ${DESTDIR}${PREFIX}/lib/pkgconfig/auren.pc ${DESTDIR}${PREFIX}/lib/pkgconfig/axil-auren.pc install-hook install-services
 
-.PHONY: install-hook
+.PHONY: install-hook install-services
+install-services:
+	@if [ "${uname}" = "Linux" ] || [ -d /run/systemd/system ]; then \
+		echo "[INFO] Installing systemd services for axil-auren..."; \
+		install -d ${DESTDIR}${PREFIX}/lib/systemd/user; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/systemd/axil-auren.service > ${DESTDIR}${PREFIX}/lib/systemd/user/axil-auren.service; \
+		if [ -d $(HOME)/.config/systemd/user ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; then \
+			mkdir -p $(HOME)/.config/systemd/user; \
+			sed 's|@PREFIX@|${PREFIX}|g' services/systemd/axil-auren.service > $(HOME)/.config/systemd/user/axil-auren.service; \
+		fi; \
+	elif [ "${uname}" = "OpenBSD" ]; then \
+		echo "[INFO] Installing OpenBSD rc.d service for axil-auren..."; \
+		install -d ${DESTDIR}${PREFIX}/share/examples/rc.d; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/rc.d/axil_auren > ${DESTDIR}${PREFIX}/share/examples/rc.d/axil_auren; \
+		chmod 755 ${DESTDIR}${PREFIX}/share/examples/rc.d/axil_auren; \
+		if [ -w /etc/rc.d ]; then \
+			install -m 755 ${DESTDIR}${PREFIX}/share/examples/rc.d/axil_auren /etc/rc.d/axil_auren; \
+		fi; \
+	elif [ "${uname}" = "Darwin" ]; then \
+		echo "[INFO] Installing launchd service for axil-auren..."; \
+		install -d ${DESTDIR}${PREFIX}/share/launchd; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.axil-auren.plist > ${DESTDIR}${PREFIX}/share/launchd/pt.tty.axil-auren.plist; \
+		if [ -d $(HOME)/Library/LaunchAgents ]; then \
+			sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.axil-auren.plist > $(HOME)/Library/LaunchAgents/pt.tty.axil-auren.plist; \
+		fi; \
+	elif [ "${SYS}" = "Windows" ] || [ "${uname}" = "MinGW64" ] || [ "${uname}" = "Msys" ] || [ "${uname}" = "MingW" ]; then \
+		echo "[INFO] Installing Windows services for axil-auren..."; \
+		install -d ${DESTDIR}${PREFIX}/share/windows; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/windows/axil-auren.xml > ${DESTDIR}${PREFIX}/share/windows/axil-auren.xml; \
+		install -m 755 services/windows/install-service.ps1 ${DESTDIR}${PREFIX}/share/windows/install-axil-auren-service.ps1; \
+	fi
+
 install-hook:
 	@if [ "${uname}" = "MinGW64" ] && [ ! -f /mingw64/bin/libcrypto-3-x64.dll ]; then \
 		curl -fsSL https://registry.npmjs.org/@tty-pt/axil/-/axil-1.8.4.tgz | tar -xzf - --strip-components=3 -C /mingw64/bin package/prebuilds/win32-x64/libcrypto-3-x64.dll package/prebuilds/win32-x64/libssl-3-x64.dll; \

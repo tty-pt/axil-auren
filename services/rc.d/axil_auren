@@ -1,0 +1,13 @@
+#!/bin/ksh
+#
+# $OpenBSD: axil_auren,v 1.0 2026/11/22 $
+
+daemon="@PREFIX@/bin/axil"
+daemon_flags="-A -d -p 4242 -m @PREFIX@/lib/libaxil-auren.so"
+
+. /etc/rc.d/rc.subr
+
+rc_bg=YES
+rc_reload=NO
+
+rc_cmd $1

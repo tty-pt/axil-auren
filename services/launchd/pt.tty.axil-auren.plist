@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>pt.tty.axil-auren</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@PREFIX@/bin/axil</string>
+		<string>-A</string>
+		<string>-d</string>
+		<string>-p</string>
+		<string>4242</string>
+		<string>-m</string>
+		<string>@PREFIX@/lib/libaxil-auren</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/axil-auren.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/axil-auren.err</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>@PREFIX@/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+</dict>
+</plist>

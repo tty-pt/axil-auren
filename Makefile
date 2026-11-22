@@ -23,8 +23,8 @@ libaxil-auren-obj-y-Darwin := src/metal.o
 
 LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lstele -ljson-c -lcurl \
 	-lllama -lpthread -lm
-LDLIBS-libren := -lxylem -lstele -lcorm -ldl -lmm -lm
-LDLIBS-ren := -Llib -lren -lxylem -lstele -lcorm -ldl -lmm -lm
+LDLIBS-libren := -lxylem -lstele -lcorm -ldl -lmm -ljson-c -lm
+LDLIBS-ren := -Llib -lren -lxylem -lstele -lcorm -ldl -lmm -ljson-c -lm
 LDLIBS-libaxil-auren-Unix := -lggml -lggml-cpu -lggml-base
 LDLIBS-libaxil-auren-Linux := -ldl -lstdc++ -lgomp -lvulkan -lggml-vulkan
 LDLIBS-libaxil-auren-Darwin := -ldl -lc++ -lggml-metal -lggml-blas -lomp \
@@ -136,6 +136,23 @@ install-services:
 			mkdir -p $(HOME)/.config/systemd/user; \
 			sed 's|@PREFIX@|${PREFIX}|g' services/systemd/axil-auren.service > $(HOME)/.config/systemd/user/axil-auren.service; \
 		fi; \
+	fi
+	@if [ -d /etc/init.d ] || [ -x /sbin/openrc-run ] || [ "${distro}" = "alpine" ] || [ "${distro}" = "gentoo" ]; then \
+		echo "[INFO] Installing OpenRC service for axil-auren..."; \
+		install -d ${DESTDIR}${PREFIX}/share/examples/openrc; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/openrc/axil-auren > ${DESTDIR}${PREFIX}/share/examples/openrc/axil-auren; \
+		chmod 755 ${DESTDIR}${PREFIX}/share/examples/openrc/axil-auren; \
+		if [ -w /etc/init.d ]; then \
+			install -m 755 ${DESTDIR}${PREFIX}/share/examples/openrc/axil-auren /etc/init.d/axil-auren; \
+		fi; \
+	fi
+	@if [ "${uname}" = "FreeBSD" ] || [ "${uname}" = "NetBSD" ] || [ "${uname}" = "DragonFly" ]; then \
+		echo "[INFO] Installing FreeBSD rc.d service for axil-auren..."; \
+		install -d ${DESTDIR}${PREFIX}/etc/rc.d ${DESTDIR}${PREFIX}/share/examples/freebsd; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/freebsd/axil-auren > ${DESTDIR}${PREFIX}/share/examples/freebsd/axil-auren; \
+		chmod 755 ${DESTDIR}${PREFIX}/share/examples/freebsd/axil-auren; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/freebsd/axil-auren > ${DESTDIR}${PREFIX}/etc/rc.d/axil_auren; \
+		chmod 755 ${DESTDIR}${PREFIX}/etc/rc.d/axil_auren; \
 	elif [ "${uname}" = "OpenBSD" ]; then \
 		echo "[INFO] Installing OpenBSD rc.d service for axil-auren..."; \
 		install -d ${DESTDIR}${PREFIX}/share/examples/rc.d; \
@@ -157,6 +174,16 @@ install-services:
 		sed 's|@PREFIX@|${PREFIX}|g' services/windows/axil-auren.xml > ${DESTDIR}${PREFIX}/share/windows/axil-auren.xml; \
 		install -m 755 services/windows/install-service.ps1 ${DESTDIR}${PREFIX}/share/windows/install-axil-auren-service.ps1; \
 	fi
+	@if [ -f services/xdg/axil-auren.desktop ]; then \
+		install -d ${DESTDIR}${PREFIX}/etc/xdg/autostart ${DESTDIR}${PREFIX}/share/applications; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/xdg/axil-auren.desktop > ${DESTDIR}${PREFIX}/etc/xdg/autostart/axil-auren.desktop; \
+		sed 's|@PREFIX@|${PREFIX}|g' services/xdg/axil-auren.desktop > ${DESTDIR}${PREFIX}/share/applications/axil-auren.desktop; \
+		if [ -d $(HOME)/.config/autostart ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; then \
+			mkdir -p $(HOME)/.config/autostart; \
+			sed 's|@PREFIX@|${PREFIX}|g' services/xdg/axil-auren.desktop > $(HOME)/.config/autostart/axil-auren.desktop; \
+		fi; \
+	fi
+
 
 install-hook:
 	@if [ "${uname}" = "MinGW64" ] && [ ! -f /mingw64/bin/libcrypto-3-x64.dll ]; then \

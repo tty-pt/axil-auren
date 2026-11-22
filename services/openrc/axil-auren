@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+# OpenRC service script for axil-auren
+
+name="axil-auren"
+description="Axil Auren Neural Inference Server"
+
+command="@PREFIX@/bin/axil"
+command_args="-A -p 4242 -m @PREFIX@/lib/libaxil-auren.so"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+	need net
+	after firewall
+}

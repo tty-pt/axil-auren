@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Axil Auren
+Comment=Axil Auren Neural Inference Server
+Exec=@PREFIX@/bin/axil -A -p 4242 -m @PREFIX@/lib/libaxil-auren.so
+Terminal=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true

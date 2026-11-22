@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# $FreeBSD$
+#
+# PROVIDE: axil_auren
+# REQUIRE: LOGIN cleanvar
+# KEYWORD: shutdown
+#
+# Add the following line to /etc/rc.conf to enable axil-auren:
+# axil_auren_enable="YES"
+#
+
+. /etc/rc.subr
+
+name="axil_auren"
+rcvar="axil_auren_enable"
+
+command="@PREFIX@/bin/axil"
+command_args="-A -d -p 4242 -m @PREFIX@/lib/libaxil-auren.so"
+
+load_rc_config $name
+: ${axil_auren_enable:="NO"}
+
+run_rc_command "$1"

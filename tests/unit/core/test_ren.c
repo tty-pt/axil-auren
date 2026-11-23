@@ -1474,6 +1474,55 @@ TEST(ren_is_interrupted_reflects_abort_and_steer_and_resets)
 	ren_free(&ctx);
 }
 
+struct clause_log {
+	int count;
+	char clauses[16][512];
+};
 
+static void clause_capture_cb(const char *ev, const char *a1, const char *a2, void *ud)
+{
+	(void)a2;
+	struct clause_log *cl = ud;
+	if (strcmp(ev, "CLAUSE") == 0 && cl->count < 16) {
+		snprintf(cl->clauses[cl->count++], sizeof(cl->clauses[0]), "%s", a1 ? a1 : "");
+	}
+}
 
+TEST(ren_clause_comma_boundary_no_midphrase_cut)
+{
+	signal(SIGPIPE, SIG_IGN);
+	ren_context_t ctx;
+	ren_init(&ctx);
 
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 1), 0);
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Não, sou o Jarbas! \"}}]}\n\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Quanto à física quântica, é o ramo da física que estuda o comportamento \"}}]}\n\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"da matéria e da energia à escala atómica e subatómica, \"}}]}\n\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"onde as partículas se comportam também como ondas.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+	mock_server_launch(&srv);
+
+	struct clause_log cl = {0};
+	int rc = ren_chat_ex(&ctx, "És a Maria?", "127.0.0.1", srv.port, clause_capture_cb, &cl);
+	mock_server_join(&srv);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_TRUE(cl.count >= 3);
+	ASSERT_STR_EQ(cl.clauses[0], "Não, sou o Jarbas!");
+	/* Second clause must split at a comma boundary, never mid-verb ("onde as partículas se") */
+	for (int i = 0; i < cl.count; i++) {
+		size_t n = strlen(cl.clauses[i]);
+		ASSERT_TRUE(n > 0);
+		if (i + 1 < cl.count) {
+			char last = cl.clauses[i][n - 1];
+			ASSERT_TRUE(last == '!' || last == '.' || last == '?' || last == ',' || last == ';' || last == ':');
+		}
+	}
+	ASSERT_NOT_NULL(strstr(cl.clauses[cl.count - 1], "partículas se comportam"));
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}

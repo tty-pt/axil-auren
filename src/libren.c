@@ -708,9 +708,17 @@ static int pop_spoken_clause(char *unspoken, bool is_first, char *out_clause, si
             cut = i + 1;
             break;
         }
-        if (is_first && i >= 28 && c == ',' && next == ' ') {
+        if (c == ',' && next == ' ' && i >= (is_first ? 28 : 72)) {
             cut = i + 1;
             break;
+        }
+    }
+    if (cut == 0 && len >= max_cut) {
+        for (size_t i = max_cut; i > min_cut; i--) {
+            if (unspoken[i] == ',' && (unspoken[i + 1] == ' ' || unspoken[i + 1] == '\n')) {
+                cut = i + 1;
+                break;
+            }
         }
     }
     if (cut == 0 && len >= max_cut) {

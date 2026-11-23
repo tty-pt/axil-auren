@@ -233,7 +233,7 @@ qllm_backend_mem_check(int gpu, size_t *free_b, size_t *total_b);
 extern int
 qllm_backend_get_vram(size_t *free_b, size_t *total_b, int max_devices);
 
-#if !defined(MOCK_BUILD) && !defined(__linux__) && !defined(__APPLE__)
+#if !defined(MOCK_BUILD) && !defined(__linux__) && !defined(__APPLE__) && !defined(AUREN_HAVE_VULKAN)
 void
 qllm_backend_mem_check(int gpu, size_t *free_b, size_t *total_b)
 {

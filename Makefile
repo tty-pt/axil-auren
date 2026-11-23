@@ -100,6 +100,11 @@ CMAKE_FLAGS-Darwin := -DGGML_METAL=ON
 CMAKE_FLAGS-OpenBSD := -DGGML_VULKAN=OFF -DGGML_OPENMP=OFF
 ifneq ($(and $(filter MinGW64 Msys MingW Windows,${uname}),$(VULKAN_SDK)),)
 CMAKE_FLAGS-MinGW64 := -G "MSYS Makefiles" -DGGML_VULKAN=ON -DGGML_OPENMP=OFF
+CFLAGS += -I"$(VULKAN_SDK)/Include" -DAUREN_HAVE_VULKAN
+libaxil-auren-obj-y-MinGW64 := src/vulkan.o
+libaxil-auren-obj-y-Msys := src/vulkan.o
+libaxil-auren-obj-y-MingW := src/vulkan.o
+libaxil-auren-obj-y-Windows := src/vulkan.o
 LDFLAGS-libaxil-auren-Windows += -L${ggmlp}/ggml-vulkan -L"${VULKAN_SDK}/Lib"
 LDLIBS-libaxil-auren-Windows += -l:ggml-vulkan.a -lvulkan-1
 else

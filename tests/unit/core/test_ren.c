@@ -1232,6 +1232,7 @@ static int mock_reflex_media(const char *args, char **out) {
 }
 
 static int g_reflex_fail_open_app = 0;
+static char g_reflex_last_browser[128] = {0};
 
 static int mock_reflex_open_app(const char *args, char **out) {
 	if (g_reflex_fail_open_app || !args || strcmp(args, "firefox") != 0) {
@@ -1242,11 +1243,18 @@ static int mock_reflex_open_app(const char *args, char **out) {
 	return 0;
 }
 
+static int mock_reflex_browser(const char *args, char **out) {
+	snprintf(g_reflex_last_browser, sizeof(g_reflex_last_browser), "%s", args ? args : "");
+	*out = strdup("browser_ok");
+	return 0;
+}
+
 TEST(ren_reflex_deterministic_and_fallthrough)
 {
 	signal(SIGPIPE, SIG_IGN);
 	g_reflex_last_ws[0] = '\0';
 	g_reflex_last_media[0] = '\0';
+	g_reflex_last_browser[0] = '\0';
 	g_reflex_fail_ws = 0;
 	g_reflex_fail_open_app = 0;
 
@@ -1267,8 +1275,9 @@ TEST(ren_reflex_deterministic_and_fallthrough)
 	ren_context_t ctx;
 	ren_init(&ctx);
 	ren_register_tool("workspace", "workspace <1..9 | move 1..9>", mock_reflex_ws);
-	ren_register_tool("media", "media <play|pause|volume_up>", mock_reflex_media);
+	ren_register_tool("media", "media <play|pause|mute|volume_up>", mock_reflex_media);
 	ren_register_tool("open_app", "open_app <app>", mock_reflex_open_app);
+	ren_register_tool("browser", "browser <close>", mock_reflex_browser);
 	xy_install();
 
 	/* 1. Built-in exact/number word match (never contacts server) */
@@ -1278,11 +1287,17 @@ TEST(ren_reflex_deterministic_and_fallthrough)
 	ASSERT_STR_EQ(ev1.tier0_op, "workspace");
 	ASSERT_STR_EQ(g_reflex_last_ws, "3");
 
-	/* 2. Portuguese move workspace match */
+	/* 2. Portuguese move workspace & concise shortcuts */
 	struct captured_events ev2 = {0};
 	ASSERT_EQ(ren_chat_ex(&ctx, "Manda para a área de trabalho dois.", "127.0.0.1", 1, test_event_cb, &ev2), 0);
 	ASSERT_EQ(ev2.tier0_calls, 1);
 	ASSERT_STR_EQ(g_reflex_last_ws, "move 2");
+
+	struct captured_events ev_ws_short = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Vai para a 2.", "127.0.0.1", 1, test_event_cb, &ev_ws_short), 0);
+	ASSERT_EQ(ev_ws_short.tier0_calls, 1);
+	ASSERT_STR_EQ(ev_ws_short.tier0_op, "workspace");
+	ASSERT_STR_EQ(g_reflex_last_ws, "2");
 
 	/* 3. Custom TSV rule match with repeated placeholders */
 	struct captured_events ev3 = {0};
@@ -1291,13 +1306,37 @@ TEST(ren_reflex_deterministic_and_fallthrough)
 	ASSERT_STR_EQ(g_reflex_last_ws, "move 4");
 	ASSERT_STR_EQ(ev3.clause_text, "Custom tag 4 -> 4.");
 
-	/* 4. media_play suppresses CLAUSE TTS */
+	/* 4. media_play suppresses CLAUSE TTS; tira o som + browser close + abre o browser hit Tier-0 */
 	struct captured_events ev4 = {0};
 	ASSERT_EQ(ren_chat_ex(&ctx, "resume music", "127.0.0.1", 1, test_event_cb, &ev4), 0);
 	ASSERT_EQ(ev4.tier0_calls, 1);
 	ASSERT_STR_EQ(ev4.tier0_op, "media_play");
 	ASSERT_STR_EQ(g_reflex_last_media, "play");
 	ASSERT_EQ(ev4.clause_calls, 0);
+
+	struct captured_events ev_mute = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "tira o som", "127.0.0.1", 1, test_event_cb, &ev_mute), 0);
+	ASSERT_EQ(ev_mute.tier0_calls, 1);
+	ASSERT_STR_EQ(ev_mute.tier0_op, "media");
+	ASSERT_STR_EQ(g_reflex_last_media, "mute");
+
+	struct captured_events ev_tab1 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "close tab", "127.0.0.1", 1, test_event_cb, &ev_tab1), 0);
+	ASSERT_EQ(ev_tab1.tier0_calls, 1);
+	ASSERT_STR_EQ(ev_tab1.tier0_op, "browser");
+	ASSERT_STR_EQ(g_reflex_last_browser, "close");
+
+	struct captured_events ev_tab2 = {0};
+	g_reflex_last_browser[0] = '\0';
+	ASSERT_EQ(ren_chat_ex(&ctx, "fecha o separador!", "127.0.0.1", 1, test_event_cb, &ev_tab2), 0);
+	ASSERT_EQ(ev_tab2.tier0_calls, 1);
+	ASSERT_STR_EQ(ev_tab2.tier0_op, "browser");
+	ASSERT_STR_EQ(g_reflex_last_browser, "close");
+
+	struct captured_events ev_browser_open = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "abre o browser", "127.0.0.1", 1, test_event_cb, &ev_browser_open), 0);
+	ASSERT_EQ(ev_browser_open.tier0_calls, 1);
+	ASSERT_STR_EQ(ev_browser_open.tier0_op, "open_app");
 
 	/* 5. Builtin conversation_control runs without external tool */
 	struct captured_events ev_conv = {0};

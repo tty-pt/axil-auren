@@ -141,9 +141,21 @@ static const reflex_rule_t g_builtin_rules[] = {
 	{ "open firefox",          "open_app",      "firefox", "Opening Firefox.",   NULL },
 	{ "open browser",          "open_app",      "firefox", "Opening browser.",   NULL },
 	{ "abre o firefox",        "open_app",      "firefox", "A abrir o Firefox.", NULL },
+	{ "abre o browser",        "open_app",      "firefox", "A abrir o browser.", NULL },
+	{ "abre o navegador",      "open_app",      "firefox", "A abrir o navegador.", NULL },
 	{ "open app {arg}",        "open_app",      "{arg}",   "Opening {arg}.",     NULL },
 	{ "launch {arg}",          "open_app",      "{arg}",   "Launching {arg}.",   NULL },
 	{ "abre app {arg}",        "open_app",      "{arg}",   "A abrir {arg}.",     NULL },
+
+	/* Browser tab close */
+	{ "close tab",             "browser",       "close",   "Closed tab.",        NULL },
+	{ "close this tab",        "browser",       "close",   "Closed tab.",        NULL },
+	{ "fecha o separador",     "browser",       "close",   "Separador fechado.", NULL },
+	{ "fecha a aba",           "browser",       "close",   "Aba fechada.",       NULL },
+
+	/* Additional concise Portuguese media/workspace shortcuts */
+	{ "tira o som",            "media",         "mute",    "\xc3\x81udio silenciado.", NULL },
+	{ "vai para a {n}",        "workspace",     "{n}",     "\xc3\x81rea de trabalho {n}.", NULL },
 };
 
 static void free_user_rules(void)

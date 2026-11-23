@@ -2,21 +2,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <time.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <io.h>
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#endif
+#define isatty _isatty
+#else
+#include <unistd.h>
+#endif
+#include <ttypt/stele.h>
 #include "ttypt/libren.h"
 
 static char *session_path = NULL;
 static char *listen_sock_path = NULL;
+static stl_ipc_listener_t g_listener = { STL_INVALID_SOCKET, 0, {0}, 0 };
 static volatile sig_atomic_t g_interrupted = 0;
 static const char *initial_prompts[16];
 static int n_initial_prompts = 0;
@@ -25,9 +29,10 @@ static pthread_mutex_t g_turn_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int g_turn_active = 0;
 static int g_turn_finished_pending = 0;
 static pthread_t g_turn_tid;
-static int g_turn_done_pipe[2] = {-1, -1};
+static stl_wake_t g_turn_done_wake = { STL_INVALID_SOCKET, STL_INVALID_SOCKET };
+static int g_turn_done_ready = 0;
 static char g_turn_prompt[4096];
-static int g_turn_cli = -1;
+static stl_socket_t g_turn_cli = STL_INVALID_SOCKET;
 static ren_context_t *g_turn_ctx = NULL;
 static const char *g_turn_host = NULL;
 static int g_turn_port = 0;
@@ -46,7 +51,7 @@ static void print_usage(const char *prog) {
         "  -p <prompt>                run a single prompt\n"
         "  -m <mods>                  colon-separated modules to load (e.g. ren-mm:ren-jarvis), repeatable\n"
         "  --session <name>           session filename under ~/.ren/sessions/\n"
-        "  --listen <socket>          listen on Unix domain socket\n"
+        "  --listen <socket>          listen on Unix socket, tcp://host:port, or service name\n"
         "  --max-turns <N>            max tool turns before wrap-up (0 = unlimited, default: 0)\n"
         "  --max-history <bytes>      proactive history byte cap (0 = overflow-driven, default: 0)\n"
         "  --max-tool-output <bytes>  per-tool output byte cap (0 = unlimited, default: %d)\n"
@@ -72,19 +77,6 @@ static void load_mod_spec(const char *spec) {
     free(copy);
 }
 
-static void ensure_dir(const char *path) {
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "%s", path);
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
-    }
-    mkdir(tmp, 0755);
-}
-
 static char *default_session_name(void) {
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
@@ -103,11 +95,11 @@ static void load_session(ren_context_t *ctx, const char *path) {
     fseek(f, 0, SEEK_SET);
     if (size <= 0) { fclose(f); return; }
     free(ctx->history);
-    ctx->history = malloc(size + 1);
-    (void)fread(ctx->history, 1, size, f);
+    ctx->history = malloc((size_t)size + 1);
+    (void)fread(ctx->history, 1, (size_t)size, f);
     ctx->history[size] = '\0';
-    ctx->history_len = size;
-    ctx->history_cap = size + 1;
+    ctx->history_len = (size_t)size;
+    ctx->history_cap = (size_t)size + 1;
     fclose(f);
 }
 
@@ -139,60 +131,25 @@ static void sanitize_line(const char *in, char *out, size_t cap) {
 }
 
 static void sock_event_cb(const char *event_type, const char *arg1, const char *arg2, void *userdata) {
-    int fd = *(int *)userdata;
-    if (fd < 0) return;
+    stl_socket_t fd = *(stl_socket_t *)userdata;
+    if (fd == STL_INVALID_SOCKET) return;
     char a1[1024], a2[2048], line[3200];
     sanitize_line(arg1, a1, sizeof(a1));
     sanitize_line(arg2, a2, sizeof(a2));
     int n = snprintf(line, sizeof(line), "%s\t%s\t%s\n", event_type, a1, a2);
     if (n > 0) {
-        (void)write(fd, line, (size_t)n);
+        (void)stl_sock_send(fd, line, (size_t)n, 0);
     }
-}
-
-static int setup_unix_listener(const char *path) {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) {
-        fprintf(stderr, "[ren] Error: socket(%s) failed: %s\n", path, strerror(errno));
-        return -1;
-    }
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
-    unlink(path);
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "[ren] Error: bind(%s) failed: %s\n", path, strerror(errno));
-        close(fd);
-        return -1;
-    }
-    chmod(path, 0600);
-    if (listen(fd, 8) < 0) {
-        fprintf(stderr, "[ren] Error: listen(%s) failed: %s\n", path, strerror(errno));
-        close(fd);
-        unlink(path);
-        return -1;
-    }
-    return fd;
 }
 
 static void setup_done_pipe(void) {
-    if (g_turn_done_pipe[0] >= 0) return;
-    int fds[2];
-    if (pipe(fds) < 0) return;
-    for (int i = 0; i < 2; i++) {
-        int fl = fcntl(fds[i], F_GETFL, 0);
-        if (fl >= 0) fcntl(fds[i], F_SETFL, fl | O_NONBLOCK);
-        fcntl(fds[i], F_SETFD, FD_CLOEXEC);
-    }
-    g_turn_done_pipe[0] = fds[0];
-    g_turn_done_pipe[1] = fds[1];
+    if (g_turn_done_ready) return;
+    if (stl_wake_init(&g_turn_done_wake) == 0)
+        g_turn_done_ready = 1;
 }
 
 static void drain_done_pipe(void) {
-    if (g_turn_done_pipe[0] < 0) return;
-    char tmp[64];
-    while (read(g_turn_done_pipe[0], tmp, sizeof(tmp)) > 0) {}
+    if (g_turn_done_ready) stl_wake_drain(&g_turn_done_wake);
 }
 
 static int join_finished_worker(int abort_if_running) {
@@ -218,28 +175,53 @@ static int join_finished_worker(int abort_if_running) {
 
 static void *ren_ipc_worker(void *arg) {
     (void)arg;
-    int cli = g_turn_cli;
+    stl_socket_t cli = g_turn_cli;
     g_interrupted = 0;
     ren_chat_ex(g_turn_ctx, g_turn_prompt, g_turn_host, g_turn_port, sock_event_cb, &cli);
     g_interrupted = 0;
     save_session(g_turn_ctx, session_path);
-    close(cli);
+    stl_sock_close(cli);
 
     pthread_mutex_lock(&g_turn_mtx);
-    g_turn_cli = -1;
+    g_turn_cli = STL_INVALID_SOCKET;
     g_turn_active = 0;
     g_turn_finished_pending = 1;
-    if (g_turn_done_pipe[1] >= 0) {
-        char b = 1;
-        ssize_t wr = write(g_turn_done_pipe[1], &b, 1);
-        (void)wr;
+    if (g_turn_done_ready) {
+        stl_wake_signal(&g_turn_done_wake);
     }
     pthread_mutex_unlock(&g_turn_mtx);
     return NULL;
 }
 
+static ssize_t ren_read_line(char **buf, size_t *cap, FILE *fp) {
+    if (!*buf || *cap == 0) {
+        *cap = 256;
+        *buf = malloc(*cap);
+        if (!*buf) return -1;
+    }
+    size_t len = 0;
+    for (;;) {
+        int c = fgetc(fp);
+        if (c == EOF) {
+            if (len == 0) return -1;
+            break;
+        }
+        if (len + 2 > *cap) {
+            size_t ncap = (*cap) * 2;
+            char *nb = realloc(*buf, ncap);
+            if (!nb) return -1;
+            *buf = nb;
+            *cap = ncap;
+        }
+        (*buf)[len++] = (char)c;
+        if (c == '\n') break;
+    }
+    (*buf)[len] = '\0';
+    return (ssize_t)len;
+}
+
 int main(int argc, char **argv) {
-    signal(SIGPIPE, SIG_IGN);
+    stl_ignore_pipe();
     const char *host = "127.0.0.1";
     int port = 4242;
     const char *prompt = NULL;
@@ -297,10 +279,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    const char *home = getenv("HOME");
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s/.ren/sessions", home ? home : ".");
-    ensure_dir(dir);
+    char home[512];
+    stl_home_dir(home, sizeof(home));
+    char dir[560];
+    snprintf(dir, sizeof(dir), "%s/.ren/sessions", home);
+    stl_mkdir_p(dir);
 
     if (!session_name) {
         session_name = default_session_name();
@@ -355,29 +338,27 @@ int main(int argc, char **argv) {
     } else {
         int interactive = isatty(STDIN_FILENO);
         if (interactive) {
-            struct sigaction sa;
-            memset(&sa, 0, sizeof(sa));
-            sa.sa_handler = on_sigint;
-            sigemptyset(&sa.sa_mask);
-            sa.sa_flags = 0;
-            sigaction(SIGINT, &sa, NULL);
+            stl_stop_on_signal(on_sigint);
             ren_set_abort_flag(&g_interrupted);
         }
 
-        int listen_fd = -1;
+        int have_listener = 0;
         if (listen_arg && *listen_arg) {
             listen_sock_path = strdup(listen_arg);
-            listen_fd = setup_unix_listener(listen_sock_path);
-            if (listen_fd >= 0) {
+            if (stl_ipc_listen(listen_sock_path, 8, &g_listener) == 0) {
+                have_listener = 1;
                 setup_done_pipe();
+            } else {
+                fprintf(stderr, "[ren] Error: listen(%s) failed: %s\n",
+                        listen_sock_path, stl_sock_strerror());
             }
         }
 
         if (interactive) {
             printf("ren (auren %s:%d) session: %s%s%s\n",
                    host, port, session_path,
-                   listen_sock_path ? " socket: " : "",
-                   listen_sock_path ? listen_sock_path : "");
+                   have_listener ? " socket: " : "",
+                   have_listener ? (g_listener.path[0] ? g_listener.path : listen_sock_path) : "");
         }
 
         if (prompt && *prompt) {
@@ -393,6 +374,11 @@ int main(int argc, char **argv) {
         char *line = NULL;
         size_t cap = 0;
         int stdin_closed = 0;
+#ifdef _WIN32
+        if (have_listener && !interactive) {
+            stdin_closed = 1;
+        }
+#endif
         int need_prompt = (interactive && !stdin_closed);
 
         while (1) {
@@ -410,66 +396,87 @@ int main(int argc, char **argv) {
                 need_prompt = 0;
             }
 
-            struct pollfd pfds[3];
-            int nfds = 0;
-            int stdin_idx = -1;
-            int listen_idx = -1;
-            int done_idx = -1;
+            int handle_stdin = 0;
+            int handle_listener = 0;
+            int handle_done = 0;
 
-            if (!stdin_closed && !turn_busy) {
-                stdin_idx = nfds;
-                pfds[nfds].fd = STDIN_FILENO;
-                pfds[nfds].events = POLLIN;
-                pfds[nfds].revents = 0;
-                nfds++;
-            }
+#ifdef _WIN32
+            if (!have_listener) {
+                if (stdin_closed) break;
+                handle_stdin = 1;
+            } else
+#endif
+            {
+                struct pollfd pfds[3];
+                int nfds = 0;
+                int stdin_idx = -1;
+                int listen_idx = -1;
+                int done_idx = -1;
 
-            if (listen_fd >= 0) {
-                listen_idx = nfds;
-                pfds[nfds].fd = listen_fd;
-                pfds[nfds].events = POLLIN;
-                pfds[nfds].revents = 0;
-                nfds++;
-            }
-
-            if (turn_busy && g_turn_done_pipe[0] >= 0) {
-                done_idx = nfds;
-                pfds[nfds].fd = g_turn_done_pipe[0];
-                pfds[nfds].events = POLLIN;
-                pfds[nfds].revents = 0;
-                nfds++;
-            }
-
-            if (nfds == 0) break;
-
-            int prc = poll(pfds, nfds, -1);
-            if (prc < 0) {
-                if (errno == EINTR) {
-                    if (g_interrupted) {
-                        g_interrupted = 0;
-                        if (turn_busy) {
-                            ren_abort();
-                        } else if (interactive) {
-                            printf("\n");
-                            need_prompt = !stdin_closed;
-                        }
-                    }
-                    continue;
+#ifndef _WIN32
+                if (!stdin_closed && !turn_busy) {
+                    stdin_idx = nfds;
+                    pfds[nfds].fd = STDIN_FILENO;
+                    pfds[nfds].events = POLLIN;
+                    pfds[nfds].revents = 0;
+                    nfds++;
                 }
-                break;
+#endif
+
+                if (have_listener) {
+                    listen_idx = nfds;
+                    pfds[nfds].fd = g_listener.fd;
+                    pfds[nfds].events = POLLIN;
+                    pfds[nfds].revents = 0;
+                    nfds++;
+                }
+
+                if (turn_busy && g_turn_done_ready) {
+                    done_idx = nfds;
+                    pfds[nfds].fd = stl_wake_fd(&g_turn_done_wake);
+                    pfds[nfds].events = POLLIN;
+                    pfds[nfds].revents = 0;
+                    nfds++;
+                }
+
+                if (nfds == 0) break;
+
+                int prc = stl_poll(pfds, (nfds_t)nfds, -1);
+                if (prc < 0) {
+                    if (errno == EINTR) {
+                        if (g_interrupted) {
+                            g_interrupted = 0;
+                            if (turn_busy) {
+                                ren_abort();
+                            } else if (interactive) {
+                                printf("\n");
+                                need_prompt = !stdin_closed;
+                            }
+                        }
+                        continue;
+                    }
+                    break;
+                }
+
+                if (done_idx >= 0 && (pfds[done_idx].revents & POLLIN))
+                    handle_done = 1;
+                if (listen_idx >= 0 && (pfds[listen_idx].revents & POLLIN))
+                    handle_listener = 1;
+                if (stdin_idx >= 0 && (pfds[stdin_idx].revents & (POLLIN | POLLHUP | POLLERR)))
+                    handle_stdin = 1;
             }
 
-            if (done_idx >= 0 && (pfds[done_idx].revents & POLLIN)) {
+            if (handle_done) {
                 join_finished_worker(0);
                 need_prompt = (interactive && !stdin_closed);
             }
 
-            /* 1. Handle Unix Domain Socket connection from jarvisd / CLI */
-            if (listen_idx >= 0 && (pfds[listen_idx].revents & POLLIN)) {
-                int cli = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
-                if (cli >= 0) {
+            /* 1. Handle IPC socket connection from jarvisd / CLI */
+            if (handle_listener) {
+                stl_socket_t cli = stl_ipc_accept(&g_listener);
+                if (cli != STL_INVALID_SOCKET) {
                     char req[4096];
-                    ssize_t n = read(cli, req, sizeof(req) - 1);
+                    ssize_t n = stl_sock_recv(cli, req, sizeof(req) - 1, 0);
                     if (n > 0) {
                         req[n] = '\0';
                         while (n > 0 && (req[n - 1] == '\n' || req[n - 1] == '\r')) {
@@ -495,16 +502,13 @@ int main(int argc, char **argv) {
                                         fflush(stdout);
                                     }
                                     ren_steer(stext);
-                                    ssize_t wr = write(cli, "OK\n", 3);
-                                    (void)wr;
+                                    (void)stl_sock_send(cli, "OK\n", 3, 0);
                                 } else if (!active) {
-                                    ssize_t wr = write(cli, "IDLE\n", 5);
-                                    (void)wr;
+                                    (void)stl_sock_send(cli, "IDLE\n", 5, 0);
                                 } else {
-                                    ssize_t wr = write(cli, "ERR\n", 4);
-                                    (void)wr;
+                                    (void)stl_sock_send(cli, "ERR\n", 4, 0);
                                 }
-                                close(cli);
+                                stl_sock_close(cli);
                             } else if (is_stop) {
                                 join_finished_worker(0);
                                 pthread_mutex_lock(&g_turn_mtx);
@@ -518,9 +522,8 @@ int main(int argc, char **argv) {
                                     }
                                     ren_abort();
                                 }
-                                ssize_t wr = write(cli, "OK\n", 3);
-                                (void)wr;
-                                close(cli);
+                                (void)stl_sock_send(cli, "OK\n", 3, 0);
+                                stl_sock_close(cli);
                             } else if (is_reset) {
                                 join_finished_worker(1);
                                 ren_reset(&ctx);
@@ -530,7 +533,7 @@ int main(int argc, char **argv) {
                                     fflush(stdout);
                                 }
                                 sock_event_cb("DONE", "1", "Session reset", &cli);
-                                close(cli);
+                                stl_sock_close(cli);
                                 need_prompt = (interactive && !stdin_closed);
                             } else {
                                 join_finished_worker(0);
@@ -540,7 +543,7 @@ int main(int argc, char **argv) {
 
                                 if (active) {
                                     sock_event_cb("DONE", "0", "Busy", &cli);
-                                    close(cli);
+                                    stl_sock_close(cli);
                                 } else {
                                     if (interactive && !stdin_closed) {
                                         printf("\n[ipc] > %s\n", req);
@@ -559,26 +562,26 @@ int main(int argc, char **argv) {
                                     if (pthread_create(&g_turn_tid, NULL, ren_ipc_worker, NULL) != 0) {
                                         pthread_mutex_lock(&g_turn_mtx);
                                         g_turn_active = 0;
-                                        g_turn_cli = -1;
+                                        g_turn_cli = STL_INVALID_SOCKET;
                                         pthread_mutex_unlock(&g_turn_mtx);
                                         sock_event_cb("DONE", "0", "Failed to start worker thread", &cli);
-                                        close(cli);
+                                        stl_sock_close(cli);
                                     }
                                 }
                             }
                         } else {
-                            close(cli);
+                            stl_sock_close(cli);
                         }
                     } else {
-                        close(cli);
+                        stl_sock_close(cli);
                     }
                 }
                 continue;
             }
 
-            /* 2. Handle interactive STDIN line in tmux / terminal */
-            if (stdin_idx >= 0 && (pfds[stdin_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
-                ssize_t nread = getline(&line, &cap, stdin);
+            /* 2. Handle interactive STDIN line in terminal */
+            if (handle_stdin) {
+                ssize_t nread = ren_read_line(&line, &cap, stdin);
                 if (nread <= 0) {
                     if (errno == EINTR && g_interrupted) {
                         clearerr(stdin);
@@ -587,7 +590,7 @@ int main(int argc, char **argv) {
                         need_prompt = !stdin_closed;
                         continue;
                     }
-                    if (listen_fd >= 0) {
+                    if (have_listener) {
                         stdin_closed = 1;
                         continue;
                     }
@@ -616,18 +619,13 @@ int main(int argc, char **argv) {
             }
         }
         join_finished_worker(1);
-        if (g_turn_done_pipe[0] >= 0) {
-            close(g_turn_done_pipe[0]);
-            g_turn_done_pipe[0] = -1;
-        }
-        if (g_turn_done_pipe[1] >= 0) {
-            close(g_turn_done_pipe[1]);
-            g_turn_done_pipe[1] = -1;
+        if (g_turn_done_ready) {
+            stl_wake_close(&g_turn_done_wake);
+            g_turn_done_ready = 0;
         }
         free(line);
-        if (listen_fd >= 0) {
-            close(listen_fd);
-            if (listen_sock_path) unlink(listen_sock_path);
+        if (have_listener) {
+            stl_ipc_close_listener(&g_listener);
         }
         free(listen_sock_path);
         if (interactive) printf("\n");

@@ -3,18 +3,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <unistd.h>
-#include <dlfcn.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <pthread.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#include <netinet/tcp.h>
+#endif
 #include <json-c/json.h>
+#include <ttypt/stele.h>
 #include "ttypt/libren.h"
 
 #define MAX_RESPONSE 65536
@@ -56,7 +54,8 @@ static ren_compact_func g_compactor_fn = NULL;
 static volatile sig_atomic_t *g_abort_flag = NULL;
 
 static pthread_mutex_t g_ctrl_mtx = PTHREAD_MUTEX_INITIALIZER;
-static int g_wake_pipe[2] = { -1, -1 };
+static stl_wake_t g_wake = { STL_INVALID_SOCKET, STL_INVALID_SOCKET };
+static int g_wake_ready = 0;
 static char *g_steer_queue = NULL;
 static volatile sig_atomic_t g_local_abort = 0;
 
@@ -167,33 +166,22 @@ void ren_set_abort_flag(volatile sig_atomic_t *flag) {
     g_abort_flag = flag;
 }
 
-static int ensure_wake_pipe_locked(void) {
-    if (g_wake_pipe[0] >= 0 && g_wake_pipe[1] >= 0) {
-        return g_wake_pipe[0];
+static stl_socket_t ensure_wake_pipe_locked(void) {
+    if (g_wake_ready) {
+        return stl_wake_fd(&g_wake);
     }
-    int fds[2];
-    if (pipe(fds) < 0) return -1;
-    for (int i = 0; i < 2; i++) {
-        int fl = fcntl(fds[i], F_GETFL, 0);
-        if (fl >= 0) fcntl(fds[i], F_SETFL, fl | O_NONBLOCK);
-        fcntl(fds[i], F_SETFD, FD_CLOEXEC);
-    }
-    g_wake_pipe[0] = fds[0];
-    g_wake_pipe[1] = fds[1];
-    return g_wake_pipe[0];
+    if (stl_wake_init(&g_wake) != 0) return STL_INVALID_SOCKET;
+    g_wake_ready = 1;
+    return stl_wake_fd(&g_wake);
 }
 
 static void drain_wake_pipe_locked(void) {
-    if (g_wake_pipe[0] < 0) return;
-    char tmp[64];
-    while (read(g_wake_pipe[0], tmp, sizeof(tmp)) > 0) {}
+    if (g_wake_ready) stl_wake_drain(&g_wake);
 }
 
 static void wake_poll_locked(void) {
-    if (ensure_wake_pipe_locked() >= 0 && g_wake_pipe[1] >= 0) {
-        char b = 1;
-        ssize_t w = write(g_wake_pipe[1], &b, 1);
-        (void)w;
+    if (ensure_wake_pipe_locked() != STL_INVALID_SOCKET) {
+        stl_wake_signal(&g_wake);
     }
 }
 
@@ -263,9 +251,23 @@ static void reset_ctrl_state(void) {
 
 static int try_load_so_stem(const char *stem) {
     char probe[2100];
-    snprintf(probe, sizeof(probe), "%s.so", stem);
-    if (access(probe, R_OK) == 0) {
+    snprintf(probe, sizeof(probe), "%s.%s", stem, stl_so_ext());
+    FILE *f = fopen(probe, "rb");
+    if (f) {
+        fclose(f);
         return xy_load((char *)stem);
+    }
+    return -1;
+}
+
+static int try_load_in_dir(const char *dir, const char *base, int has_ren_prefix) {
+    if (!dir || !*dir) return -1;
+    char candidate[2048];
+    snprintf(candidate, sizeof(candidate), "%s/%s", dir, base);
+    if (try_load_so_stem(candidate) == 0) return 0;
+    if (!has_ren_prefix) {
+        snprintf(candidate, sizeof(candidate), "%s/ren-%s", dir, base);
+        if (try_load_so_stem(candidate) == 0) return 0;
     }
     return -1;
 }
@@ -278,49 +280,46 @@ int ren_load_module(const char *path) {
     size_t len = strlen(clean);
     if (len > 3 && strcmp(clean + len - 3, ".so") == 0) {
         clean[len - 3] = '\0';
+    } else if (len > 4 && strcmp(clean + len - 4, ".dll") == 0) {
+        clean[len - 4] = '\0';
     }
 
     if (try_load_so_stem(clean) == 0) {
         return 0;
     }
 
-    if (path[0] != '/') {
-        const char *base = strrchr(clean, '/');
-        base = base ? (base + 1) : clean;
+    int is_abs = (path[0] == '/' || path[0] == '\\' ||
+                  (isalpha((unsigned char)path[0]) && path[1] == ':'));
+    if (!is_abs) {
+        const char *s1 = strrchr(clean, '/');
+        const char *s2 = strrchr(clean, '\\');
+        const char *sep = s1 > s2 ? s1 : s2;
+        const char *base = sep ? (sep + 1) : clean;
         int has_ren_prefix = (strncmp(base, "ren-", 4) == 0);
-        char candidate[2048];
 
         const char *mod_dir = getenv("REN_MOD_DIR");
-        if (mod_dir && *mod_dir) {
-            snprintf(candidate, sizeof(candidate), "%s/%s", mod_dir, base);
-            if (try_load_so_stem(candidate) == 0) return 0;
+        if (try_load_in_dir(mod_dir, base, has_ren_prefix) == 0) return 0;
 
-            if (!has_ren_prefix) {
-                snprintf(candidate, sizeof(candidate), "%s/ren-%s", mod_dir, base);
-                if (try_load_so_stem(candidate) == 0) return 0;
-            }
+        char exe_dir[512], rel_dir[640];
+        if (stl_exe_dir(exe_dir, sizeof(exe_dir))) {
+            snprintf(rel_dir, sizeof(rel_dir), "%s/../lib/ren", exe_dir);
+            if (try_load_in_dir(rel_dir, base, has_ren_prefix) == 0) return 0;
+            snprintf(rel_dir, sizeof(rel_dir), "%s/ren", exe_dir);
+            if (try_load_in_dir(rel_dir, base, has_ren_prefix) == 0) return 0;
         }
 
-        const char *home = getenv("HOME");
-        if (home && *home) {
-            snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/%s", home, base);
-            if (try_load_so_stem(candidate) == 0) return 0;
-
-            if (!has_ren_prefix) {
-                snprintf(candidate, sizeof(candidate), "%s/.local/lib/ren/ren-%s", home, base);
-                if (try_load_so_stem(candidate) == 0) return 0;
-            }
+        char home[512];
+        if (stl_home_dir(home, sizeof(home))) {
+            snprintf(rel_dir, sizeof(rel_dir), "%s/.local/lib/ren", home);
+            if (try_load_in_dir(rel_dir, base, has_ren_prefix) == 0) return 0;
         }
 
+#ifndef _WIN32
         static const char *const sys_dirs[] = { "/usr/local/lib/ren", "/usr/lib/ren", NULL };
         for (int i = 0; sys_dirs[i]; i++) {
-            snprintf(candidate, sizeof(candidate), "%s/%s", sys_dirs[i], base);
-            if (try_load_so_stem(candidate) == 0) return 0;
-            if (!has_ren_prefix) {
-                snprintf(candidate, sizeof(candidate), "%s/ren-%s", sys_dirs[i], base);
-                if (try_load_so_stem(candidate) == 0) return 0;
-            }
+            if (try_load_in_dir(sys_dirs[i], base, has_ren_prefix) == 0) return 0;
         }
+#endif
     }
     return xy_load(clean);
 }
@@ -809,9 +808,9 @@ static int is_aborted(void) {
     return g_local_abort || (g_abort_flag && *g_abort_flag);
 }
 
-static int poll_sock_or_ctrl(int sock, short events) {
+static int poll_sock_or_ctrl(stl_socket_t sock, short events) {
     pthread_mutex_lock(&g_ctrl_mtx);
-    int wfd = ensure_wake_pipe_locked();
+    stl_socket_t wfd = ensure_wake_pipe_locked();
     pthread_mutex_unlock(&g_ctrl_mtx);
 
     while (1) {
@@ -821,13 +820,13 @@ static int poll_sock_or_ctrl(int sock, short events) {
         pfds[0].fd = sock;
         pfds[0].events = events;
         pfds[0].revents = 0;
-        if (wfd >= 0) {
+        if (wfd != STL_INVALID_SOCKET) {
             pfds[1].fd = wfd;
             pfds[1].events = POLLIN;
             pfds[1].revents = 0;
             nfds = 2;
         }
-        int rc = poll(pfds, nfds, -1);
+        int rc = stl_poll(pfds, nfds, -1);
         if (rc < 0) {
             if (errno == EINTR) {
                 if (is_aborted() || has_pending_steer()) return 0;
@@ -835,7 +834,7 @@ static int poll_sock_or_ctrl(int sock, short events) {
             }
             return -1;
         }
-        if (wfd >= 0 && (pfds[1].revents & POLLIN)) {
+        if (wfd != STL_INVALID_SOCKET && (pfds[1].revents & POLLIN)) {
             return 0;
         }
         if (pfds[0].revents & (events | POLLHUP | POLLERR | POLLNVAL)) {
@@ -844,6 +843,24 @@ static int poll_sock_or_ctrl(int sock, short events) {
         }
     }
 }
+
+#ifdef _WIN32
+static const char *ci_strstr(const char *hay, const char *needle) {
+    if (!needle || !*needle) return hay;
+    size_t nlen = strlen(needle);
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (i < nlen && hay[i] &&
+               tolower((unsigned char)hay[i]) == tolower((unsigned char)needle[i])) {
+            i++;
+        }
+        if (i == nlen) return hay;
+    }
+    return NULL;
+}
+#else
+#define ci_strstr strcasestr
+#endif
 
 static int is_context_overflow_error(int http_status, const char *msg) {
     if (http_status == 413) return 1;
@@ -864,7 +881,7 @@ static int is_context_overflow_error(int http_status, const char *msg) {
         NULL
     };
     for (int i = 0; needles[i]; i++) {
-        if (strcasestr(msg, needles[i]) != NULL) return 1;
+        if (ci_strstr(msg, needles[i]) != NULL) return 1;
     }
     return 0;
 }
@@ -1010,6 +1027,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
     socklen_t resolved_addr_len = 0;
     int resolved_family = AF_INET;
     {
+        stl_sock_init();
         struct addrinfo hints, *res = NULL;
         char port_str[16];
         memset(&hints, 0, sizeof(hints));
@@ -1068,10 +1086,10 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             return -1;
         }
 
-        int sock = socket(resolved_family, SOCK_STREAM, 0);
-        if (sock < 0) {
+        stl_socket_t sock = stl_sock_create(resolved_family, SOCK_STREAM, 0);
+        if (sock == STL_INVALID_SOCKET) {
             char emsg[256];
-            snprintf(emsg, sizeof(emsg), "socket() failed: %s", strerror(errno));
+            snprintf(emsg, sizeof(emsg), "socket() failed: %s", stl_sock_strerror());
             json_object_put(req_obj);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
@@ -1079,13 +1097,13 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             return -1;
         }
         int nodelay = 1;
-        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
 
-        if (connect(sock, (struct sockaddr *)&resolved_addr, resolved_addr_len) < 0) {
+        if (stl_sock_connect(sock, (struct sockaddr *)&resolved_addr, resolved_addr_len) < 0) {
             char emsg[256];
             snprintf(emsg, sizeof(emsg), "Failed to connect to axil-auren (%s:%d): %s",
-                     host, port, strerror(errno));
-            close(sock);
+                     host, port, stl_sock_strerror());
+            stl_sock_close(sock);
             json_object_put(req_obj);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
@@ -1112,7 +1130,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                 send_failed = 1;
                 break;
             }
-            ssize_t n = send(sock, request + sent, (size_t)req_len - sent, 0);
+            ssize_t n = stl_sock_send(sock, request + sent, (size_t)req_len - sent, 0);
             if (n < 0 && errno == EINTR && !is_aborted()) continue;
             if (n <= 0) {
                 send_failed = 1;
@@ -1126,9 +1144,9 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             if (is_aborted()) {
                 snprintf(emsg, sizeof(emsg), "Interrupted");
             } else {
-                snprintf(emsg, sizeof(emsg), "send() to axil-auren failed: %s", strerror(errno));
+                snprintf(emsg, sizeof(emsg), "send() to axil-auren failed: %s", stl_sock_strerror());
             }
-            close(sock);
+            stl_sock_close(sock);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
             reset_ctrl_state();
@@ -1148,13 +1166,13 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             if (is_aborted() || has_pending_steer()) break;
             int prc = poll_sock_or_ctrl(sock, POLLIN);
             if (prc <= 0) {
-                if (prc < 0) recv_err = errno;
+                if (prc < 0) recv_err = errno ? errno : 1;
                 break;
             }
-            ssize_t n = recv(sock, buf, sizeof(buf), 0);
+            ssize_t n = stl_sock_recv(sock, buf, sizeof(buf), 0);
             if (n < 0) {
                 if (errno == EINTR && !is_aborted() && !has_pending_steer()) continue;
-                recv_err = errno;
+                recv_err = errno ? errno : 1;
                 break;
             }
             if (n == 0) break;
@@ -1171,7 +1189,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         if (!body_start) {
             if (is_aborted()) {
                 free(headers);
-                close(sock);
+                stl_sock_close(sock);
                 free(prev_sig);
                 emit_error(cb, userdata, "Interrupted");
                 reset_ctrl_state();
@@ -1180,7 +1198,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             char *steer_hdr = NULL;
             if (consume_steer(&steer_hdr)) {
                 free(headers);
-                close(sock);
+                stl_sock_close(sock);
                 if (cb) cb("STEER", steer_hdr, "", userdata);
                 append_message(ctx, "user", steer_hdr);
                 free(steer_hdr);
@@ -1196,7 +1214,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                 snprintf(emsg, sizeof(emsg), "axil-auren closed connection before HTTP headers");
             }
             free(headers);
-            close(sock);
+            stl_sock_close(sock);
             free(prev_sig);
             emit_error(cb, userdata, emsg);
             reset_ctrl_state();
@@ -1219,14 +1237,14 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             while (eblen < sizeof(err_body) - 1) {
                 if (is_aborted() || has_pending_steer()) break;
                 if (poll_sock_or_ctrl(sock, POLLIN) <= 0) break;
-                ssize_t n = recv(sock, err_body + eblen, sizeof(err_body) - 1 - eblen, 0);
+                ssize_t n = stl_sock_recv(sock, err_body + eblen, sizeof(err_body) - 1 - eblen, 0);
                 if (n < 0 && errno == EINTR && !is_aborted() && !has_pending_steer()) continue;
                 if (n <= 0) break;
                 eblen += (size_t)n;
             }
             err_body[eblen] = '\0';
             free(headers);
-            close(sock);
+            stl_sock_close(sock);
 
             if (is_aborted()) {
                 free(prev_sig);
@@ -1438,10 +1456,10 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             }
             if (prc == 0) break;
 
-            ssize_t n = recv(sock, chunk, sizeof(chunk) - 1, 0);
+            ssize_t n = stl_sock_recv(sock, chunk, sizeof(chunk) - 1, 0);
             if (n < 0) {
                 if (errno == EINTR && !is_aborted() && !has_pending_steer()) continue;
-                stream_recv_err = errno;
+                stream_recv_err = errno ? errno : 1;
                 break;
             }
             if (n == 0) {
@@ -1455,7 +1473,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             buf_append(&event_buf, &event_len, &event_cap, chunk, (size_t)n);
         }
 
-        close(sock);
+        stl_sock_close(sock);
         free(event_buf);
 
         if (full_len > 0) {

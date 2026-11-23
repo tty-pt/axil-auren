@@ -1,11 +1,11 @@
 uname := $(shell test "${cross}" = "" && uname || echo ${cross})
 uname != test "${cross}" = "" && uname || echo ${cross}
 
-all-MinGW64 := libaxil-auren
+all-MinGW64 := libaxil-auren libren ren
 all-${uname} ?= libaxil-auren libren ren
 all := ${all-${uname}}
 
-INSTALL_BIN-MinGW64 :=
+INSTALL_BIN-MinGW64 := ren
 INSTALL_BIN-${uname} ?= ren auren-path auren-list
 INSTALL_BIN := ${INSTALL_BIN-${uname}}
 
@@ -23,8 +23,12 @@ libaxil-auren-obj-y-Darwin := src/metal.o
 
 LDLIBS-libaxil-auren := -laxil -lxylem -lcorm -lsepal -lstele -ljson-c -lcurl \
 	-lllama -lpthread -lm
-LDLIBS-libren := -lxylem -ldl -ljson-c -lpthread
-LDLIBS-ren := -Llib -lren -lxylem -ldl -ljson-c -lpthread
+LDLIBS-libren := -lxylem -lstele -ljson-c -lpthread
+LDLIBS-libren-Unix := -ldl
+LDLIBS-libren-Windows := -lws2_32
+LDLIBS-ren := -Llib -lren -lxylem -lstele -ljson-c -lpthread
+LDLIBS-ren-Unix := -ldl
+LDLIBS-ren-Windows := -lws2_32
 LDLIBS-libaxil-auren-Unix := -lggml -lggml-cpu -lggml-base
 LDLIBS-libaxil-auren-Linux := -ldl -lstdc++ -lgomp -lvulkan -lggml-vulkan
 LDLIBS-libaxil-auren-Darwin := -ldl -lc++ -lggml-metal -lggml-blas -lomp \
@@ -268,28 +272,29 @@ npm-test: npm-build
 
 # ren modules
 mm_prefix := $(shell for d in ../libmm ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/mm.h" ] && { [ -f "$$d/lib/libmm.${SO}" ] || [ -f "$$d/lib64/libmm.${SO}" ]; } && echo "$$d" && break; done || true)
-REN_CORE_MODS := mods/fs/ren-fs.so mods/bash/ren-bash.so mods/reflex/ren-reflex.so
+REN_CORE_MODS := mods/fs/ren-fs.${SO} mods/bash/ren-bash.${SO} mods/reflex/ren-reflex.${SO}
 REN_MODS := ${REN_CORE_MODS}
+MOD_RPATH-Linux := -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
-mods/fs/ren-fs.so: mods/fs/ren-fs.c include/ttypt/libren.h lib/libren.so
+mods/fs/ren-fs.${SO}: mods/fs/ren-fs.c include/ttypt/libren.h lib/libren.${SO}
 	@mkdir -p mods/fs
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/fs/ren-fs.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+	$(cc) $(CFLAGS) -fPIC -shared -o $@ mods/fs/ren-fs.c $(LDFLAGS) -Llib -lren -lstele ${MOD_RPATH-${uname}}
 
-mods/bash/ren-bash.so: mods/bash/ren-bash.c include/ttypt/libren.h lib/libren.so
+mods/bash/ren-bash.${SO}: mods/bash/ren-bash.c include/ttypt/libren.h lib/libren.${SO}
 	@mkdir -p mods/bash
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/bash/ren-bash.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+	$(cc) $(CFLAGS) -fPIC -shared -o $@ mods/bash/ren-bash.c $(LDFLAGS) -Llib -lren -lstele ${MOD_RPATH-${uname}}
 
-mods/reflex/ren-reflex.so: mods/reflex/ren-reflex.c include/ttypt/libren.h lib/libren.so
+mods/reflex/ren-reflex.${SO}: mods/reflex/ren-reflex.c include/ttypt/libren.h lib/libren.${SO}
 	@mkdir -p mods/reflex
-	$(CC) $(CFLAGS) -fPIC -shared -o $@ mods/reflex/ren-reflex.c $(LDFLAGS) -Llib -lren -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
+	$(cc) $(CFLAGS) -fPIC -shared -o $@ mods/reflex/ren-reflex.c $(LDFLAGS) -Llib -lren -lstele ${MOD_RPATH-${uname}}
 
 all: ${REN_MODS}
 
 install: install-ren-mods
 .PHONY: install-ren-mods
-install-ren-mods: lib/libren.so ${REN_MODS}
+install-ren-mods: lib/libren.${SO} ${REN_MODS}
 	mkdir -p $(DESTDIR)$(PREFIX)/lib/ren
 	@rm -f $(DESTDIR)$(PREFIX)/lib/ren/mod_fs.so $(DESTDIR)$(PREFIX)/lib/ren/mod_bash.so $(DESTDIR)$(PREFIX)/lib/mod_fs.so $(DESTDIR)$(PREFIX)/lib/mod_bash.so
 	for m in ${REN_MODS}; do install -m 755 "$$m" "$(DESTDIR)$(PREFIX)/lib/ren/$$(basename "$$m")"; done
 
-bin/ren: lib/libren.so
+bin/ren${EXE}: lib/libren.${SO}

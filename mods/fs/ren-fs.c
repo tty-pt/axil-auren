@@ -2,18 +2,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/stat.h>
+#include <ttypt/stele.h>
 #include "ttypt/libren.h"
 #include <ttypt/xy.h>
 
 static const char *expand_tilde(const char *path, char *buf, size_t sz) {
-    if (path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
-        const char *home = getenv("HOME");
-        if (home) {
-            snprintf(buf, sz, "%s%s", home, path + 1);
-            return buf;
-        }
+    if (path[0] == '~' && (path[1] == '/' || path[1] == '\\' || path[1] == '\0')) {
+        char home[512];
+        stl_home_dir(home, sizeof(home));
+        snprintf(buf, sz, "%s%s", home, path + 1);
+        return buf;
     }
     return path;
 }

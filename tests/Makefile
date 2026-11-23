@@ -1,6 +1,6 @@
 CC := gcc
-CFLAGS := -g -Wall -Wextra -Wno-unused-parameter -I./framework -I./mocks -I../include -I../src -DMOCK_BUILD
-LDFLAGS := -lpthread -lm -ljson-c -lcurl
+CFLAGS := -g -Wall -Wextra -Wno-unused-parameter -I./framework -I../../libstele/include -I./mocks -I../include -I../src -DMOCK_BUILD
+LDFLAGS := -L../../libstele/lib -Wl,-rpath,../../libstele/lib -lstele -lpthread -lm -ljson-c -lcurl
 
 TEST_SRC := $(wildcard unit/core/*.c edge/*.c stress/*.c)
 

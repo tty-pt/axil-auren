@@ -98,7 +98,15 @@ LDFLAGS-Darwin := -L${ggmlp}/ggml-metal -L${ggmlp}/ggml-blas -L${omp}/lib
 CMAKE_FLAGS-Linux := -DGGML_VULKAN=ON
 CMAKE_FLAGS-Darwin := -DGGML_METAL=ON
 CMAKE_FLAGS-OpenBSD := -DGGML_VULKAN=OFF -DGGML_OPENMP=OFF
+ifneq ($(and $(filter MinGW64 Msys MingW Windows,${uname}),$(VULKAN_SDK)),)
+CMAKE_FLAGS-MinGW64 := -G "MSYS Makefiles" -DGGML_VULKAN=ON -DGGML_OPENMP=OFF
+LDFLAGS-libaxil-auren-Windows += -L${ggmlp}/ggml-vulkan -L"${VULKAN_SDK}/Lib"
+LDLIBS-libaxil-auren-Windows += -l:ggml-vulkan.a -lvulkan-1
+else
 CMAKE_FLAGS-MinGW64 := -G "MSYS Makefiles" -DGGML_VULKAN=OFF -DGGML_OPENMP=OFF
+endif
+CMAKE_FLAGS-Msys := ${CMAKE_FLAGS-MinGW64}
+CMAKE_FLAGS-MingW := ${CMAKE_FLAGS-MinGW64}
 
 WASM := auren.wasm
 WASM_SRCS := npm/wasm/auren_wasm.c

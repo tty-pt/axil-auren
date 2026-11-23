@@ -7,6 +7,7 @@
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <errno.h>
@@ -997,6 +998,30 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
     char *prev_sig = NULL;
     int stall_repeats = 0;
 
+    struct sockaddr_storage resolved_addr;
+    socklen_t resolved_addr_len = 0;
+    int resolved_family = AF_INET;
+    {
+        struct addrinfo hints, *res = NULL;
+        char port_str[16];
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        snprintf(port_str, sizeof(port_str), "%d", port);
+        if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+            char emsg[256];
+            snprintf(emsg, sizeof(emsg), "Failed to resolve host %s", host);
+            free(prev_sig);
+            emit_error(cb, userdata, emsg);
+            reset_ctrl_state();
+            return -1;
+        }
+        memcpy(&resolved_addr, res->ai_addr, res->ai_addrlen);
+        resolved_addr_len = (socklen_t)res->ai_addrlen;
+        resolved_family = res->ai_family;
+        freeaddrinfo(res);
+    }
+
     while (1) {
         if (is_aborted()) {
             free(prev_sig);
@@ -1035,7 +1060,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             return -1;
         }
 
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        int sock = socket(resolved_family, SOCK_STREAM, 0);
         if (sock < 0) {
             char emsg[256];
             snprintf(emsg, sizeof(emsg), "socket() failed: %s", strerror(errno));
@@ -1045,26 +1070,10 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             reset_ctrl_state();
             return -1;
         }
+        int nodelay = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-        struct hostent *he = gethostbyname(host);
-        if (!he) {
-            char emsg[256];
-            snprintf(emsg, sizeof(emsg), "Failed to resolve host %s", host);
-            close(sock);
-            json_object_put(req_obj);
-            free(prev_sig);
-            emit_error(cb, userdata, emsg);
-            reset_ctrl_state();
-            return -1;
-        }
-
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons((uint16_t)port);
-        memcpy(&addr.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
-
-        if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        if (connect(sock, (struct sockaddr *)&resolved_addr, resolved_addr_len) < 0) {
             char emsg[256];
             snprintf(emsg, sizeof(emsg), "Failed to connect to axil-auren (%s:%d): %s",
                      host, port, strerror(errno));

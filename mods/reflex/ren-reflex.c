@@ -57,7 +57,6 @@ static const reflex_rule_t g_builtin_rules[] = {
 	{ "fim de conversa",        "_builtin", "Conversa terminada.", "Certo.", "conversation_control" },
 	{ "terminar conversa",      "_builtin", "Conversa terminada.", "Certo.", "conversation_control" },
 	{ "esquece",                "_builtin", "Conversa terminada.", "Certo.", "conversation_control" },
-	{ "por agora \xc3\xa9 tudo","_builtin", "Conversa terminada.", "Certo.", "conversation_control" },
 	{ "por agora e tudo",       "_builtin", "Conversa terminada.", "Certo.", "conversation_control" },
 
 	/* Media playback & volume */
@@ -75,11 +74,9 @@ static const reflex_rule_t g_builtin_rules[] = {
 	{ "next track",            "media", "next",        "Next track.",            NULL },
 	{ "next song",             "media", "next",        "Next track.",            NULL },
 	{ "skip track",            "media", "next",        "Next track.",            NULL },
-	{ "pr\xc3\xb3xima m\xc3\xbasica", "media", "next", "Pr\xc3\xb3xima m\xc3\xbasica.", NULL },
 	{ "proxima musica",        "media", "next",        "Pr\xc3\xb3xima m\xc3\xbasica.", NULL },
 	{ "previous track",        "media", "prev",        "Previous track.",        NULL },
 	{ "previous song",         "media", "prev",        "Previous track.",        NULL },
-	{ "m\xc3\xbasica anterior", "media", "prev",       "M\xc3\xbasica anterior.", NULL },
 	{ "musica anterior",       "media", "prev",        "M\xc3\xbasica anterior.", NULL },
 	{ "volume up",             "media", "volume_up",   "Volume up.",             NULL },
 	{ "turn up the volume",    "media", "volume_up",   "Volume up.",             NULL },
@@ -102,15 +99,13 @@ static const reflex_rule_t g_builtin_rules[] = {
 	{ "switch to workspace {n}",          "workspace", "{n}",      "Workspace {n}.",           NULL },
 	{ "tag {n}",                          "workspace", "{n}",      "Workspace {n}.",           NULL },
 	{ "desktop {n}",                      "workspace", "{n}",      "Workspace {n}.",           NULL },
-	{ "\xc3\xa1rea de trabalho {n}",      "workspace", "{n}",      "\xc3\x81rea de trabalho {n}.", NULL },
 	{ "area de trabalho {n}",             "workspace", "{n}",      "\xc3\x81rea de trabalho {n}.", NULL },
-	{ "vai para a \xc3\xa1rea de trabalho {n}", "workspace", "{n}", "\xc3\x81rea de trabalho {n}.", NULL },
 	{ "vai para a area de trabalho {n}",  "workspace", "{n}",      "\xc3\x81rea de trabalho {n}.", NULL },
 	{ "move to workspace {n}",            "workspace", "move {n}", "Moved to workspace {n}.",  NULL },
 	{ "move window to workspace {n}",     "workspace", "move {n}", "Moved to workspace {n}.",  NULL },
 	{ "send to workspace {n}",            "workspace", "move {n}", "Moved to workspace {n}.",  NULL },
-	{ "manda para a \xc3\xa1rea de trabalho {n}", "workspace", "move {n}", "Movido para a \xc3\xa1rea {n}.", NULL },
-	{ "move para a \xc3\xa1rea de trabalho {n}",  "workspace", "move {n}", "Movido para a \xc3\xa1rea {n}.", NULL },
+	{ "manda para a area de trabalho {n}", "workspace", "move {n}", "Movido para a \xc3\xa1rea {n}.", NULL },
+	{ "move para a area de trabalho {n}",  "workspace", "move {n}", "Movido para a \xc3\xa1rea {n}.", NULL },
 
 	/* Window management */
 	{ "close window",          "window", "close",          "Closed window.",     NULL },
@@ -118,7 +113,6 @@ static const reflex_rule_t g_builtin_rules[] = {
 	{ "fecha a janela",        "window", "close",          "Janela fechada.",    NULL },
 	{ "fullscreen",            "window", "fullscreen",     "Toggled fullscreen.", NULL },
 	{ "toggle fullscreen",     "window", "fullscreen",     "Toggled fullscreen.", NULL },
-	{ "ecr\xc3\xa3 inteiro",   "window", "fullscreen",     "Ecr\xc3\xa3 inteiro.", NULL },
 	{ "ecra inteiro",          "window", "fullscreen",     "Ecr\xc3\xa3 inteiro.", NULL },
 	{ "float window",          "window", "float",          "Toggled floating.",  NULL },
 	{ "toggle floating",       "window", "float",          "Toggled floating.",  NULL },
@@ -126,7 +120,7 @@ static const reflex_rule_t g_builtin_rules[] = {
 	{ "switch window",         "window", "focus other",    "Switched window.",   NULL },
 	{ "outra janela",          "window", "focus other",    "Janela alternada.",  NULL },
 	{ "next window",           "window", "focus next",     "Next window.",       NULL },
-	{ "pr\xc3\xb3xima janela", "window", "focus next",     "Pr\xc3\xb3xima janela.", NULL },
+	{ "proxima janela",        "window", "focus next",     "Pr\xc3\xb3xima janela.", NULL },
 	{ "previous window",       "window", "focus previous", "Previous window.",   NULL },
 	{ "focus master",          "window", "focus master",   "Focused master.",    NULL },
 	{ "focus other",           "window", "focus other",    "Switched window.",   NULL },
@@ -153,10 +147,37 @@ static const reflex_rule_t g_builtin_rules[] = {
 	{ "fecha o separador",     "browser",       "close",   "Separador fechado.", NULL },
 	{ "fecha a aba",           "browser",       "close",   "Aba fechada.",       NULL },
 
-	/* Additional concise Portuguese media/workspace shortcuts */
-	{ "tira o som",            "media",         "mute",    "\xc3\x81udio silenciado.", NULL },
-	{ "vai para a {n}",        "workspace",     "{n}",     "\xc3\x81rea de trabalho {n}.", NULL },
+	/* Additional concise Portuguese media/workspace/window shortcuts */
+	{ "tira o som",                      "media",         "mute",        "\xc3\x81udio silenciado.", NULL },
+	{ "vai para a {n}",                  "workspace",     "{n}",         "\xc3\x81rea de trabalho {n}.", NULL },
+	{ "muda para a area de trabalho {n}","workspace",     "{n}",         "\xc3\x81rea de trabalho {n}.", NULL },
+	{ "mudar para a area de trabalho {n}","workspace",    "{n}",         "\xc3\x81rea de trabalho {n}.", NULL },
+	{ "muda para o workspace {n}",       "workspace",     "{n}",         "\xc3\x81rea de trabalho {n}.", NULL },
+	{ "ir para a area de trabalho {n}",  "workspace",     "{n}",         "\xc3\x81rea de trabalho {n}.", NULL },
+	{ "aumentar o volume",               "media",         "volume_up",   "Volume aumentado.",        NULL },
+	{ "diminuir o volume",               "media",         "volume_down", "Volume reduzido.",         NULL },
+	{ "baixar o volume",                 "media",         "volume_down", "Volume reduzido.",         NULL },
+	{ "abrir terminal",                  "open_terminal", "",            "A abrir terminal.",        NULL },
+	{ "abrir o terminal",                "open_terminal", "",            "A abrir terminal.",        NULL },
+	{ "fechar janela",                   "window",        "close",       "Janela fechada.",          NULL },
+	{ "fechar a janela",                 "window",        "close",       "Janela fechada.",          NULL },
+	{ "fechar separador",                "browser",       "close",       "Separador fechado.",       NULL },
+	{ "fechar aba",                      "browser",       "close",       "Aba fechada.",             NULL },
+	{ "maximizar janela",                "window",        "fullscreen",  "Ecr\xc3\xa3 inteiro.",     NULL },
 };
+
+static char fold_latin1_byte(unsigned char b)
+{
+	if ((b >= 0x80 && b <= 0x85) || (b >= 0xA0 && b <= 0xA5)) return 'a';
+	if (b == 0x87 || b == 0xA7) return 'c';
+	if ((b >= 0x88 && b <= 0x8B) || (b >= 0xA8 && b <= 0xAB)) return 'e';
+	if ((b >= 0x8C && b <= 0x8F) || (b >= 0xAC && b <= 0xAF)) return 'i';
+	if (b == 0x91 || b == 0xB1) return 'n';
+	if ((b >= 0x92 && b <= 0x96) || (b >= 0xB2 && b <= 0xB6)) return 'o';
+	if ((b >= 0x99 && b <= 0x9C) || (b >= 0xB9 && b <= 0xBC)) return 'u';
+	if (b == 0x9D || b == 0xBD || b == 0xBF) return 'y';
+	return 0;
+}
 
 static void free_user_rules(void)
 {
@@ -242,9 +263,21 @@ static void ensure_user_rules_loaded(void)
 		free(copy);
 
 		if (pat && *pat && tool && *tool) {
-			for (char *c = pat; *c; c++) {
-				if ((unsigned char)*c < 0x80) *c = (char)tolower((unsigned char)*c);
+			char *r = pat, *w = pat;
+			while (*r) {
+				unsigned char c = (unsigned char)*r;
+				if (c == 0xC3 && r[1] != '\0') {
+					char folded = fold_latin1_byte((unsigned char)r[1]);
+					if (folded) {
+						*w++ = folded;
+						r += 2;
+						continue;
+					}
+				}
+				*w++ = (c < 0x80) ? (char)tolower(c) : *r;
+				r++;
 			}
+			*w = '\0';
 			g_user_rules[g_num_user_rules].pattern = pat;
 			g_user_rules[g_num_user_rules].tool = tool;
 			g_user_rules[g_num_user_rules].args_fmt = args ? args : strdup("");
@@ -277,6 +310,15 @@ static int normalize_prompt(const char *raw, char *out, size_t out_sz)
 	int prev_space = 1;
 	for (size_t i = 0; i < rlen && o + 1 < out_sz; i++) {
 		unsigned char c = (unsigned char)raw[i];
+		if (c == 0xC3 && i + 1 < rlen) {
+			char folded = fold_latin1_byte((unsigned char)raw[i + 1]);
+			if (folded) {
+				out[o++] = folded;
+				prev_space = 0;
+				i++;
+				continue;
+			}
+		}
 		if (isspace(c)) {
 			if (!prev_space) {
 				out[o++] = ' ';
@@ -289,6 +331,19 @@ static int normalize_prompt(const char *raw, char *out, size_t out_sz)
 	}
 	while (o > 0 && out[o - 1] == ' ') o--;
 	out[o] = '\0';
+
+	static const char *const polite_prefixes[] = {
+		"please ", "can you ", "could you ", "por favor ",
+		"se faz favor ", "faz favor de ", "podes ", "pode ", NULL
+	};
+	for (int pi = 0; polite_prefixes[pi]; pi++) {
+		size_t plen = strlen(polite_prefixes[pi]);
+		if (strncmp(out, polite_prefixes[pi], plen) == 0 && out[plen] != '\0') {
+			memmove(out, out + plen, strlen(out + plen) + 1);
+			o = strlen(out);
+			break;
+		}
+	}
 	return o > 0;
 }
 
@@ -321,7 +376,7 @@ static int parse_number_token(const char *tok, char *out_num, size_t out_sz)
 	static const struct { const char *word; int val; } words[] = {
 		{ "one",    1 }, { "first",  1 }, { "um",     1 }, { "uma",     1 },
 		{ "two",    2 }, { "second", 2 }, { "dois",   2 }, { "duas",    2 },
-		{ "three",  3 }, { "third",  3 }, { "tres",   3 }, { "tr\xc3\xaas", 3 },
+		{ "three",  3 }, { "third",  3 }, { "tres",   3 },
 		{ "four",   4 }, { "fourth", 4 }, { "quatro", 4 },
 		{ "five",   5 }, { "fifth",  5 }, { "cinco",  5 },
 		{ "six",    6 }, { "sixth",  6 }, { "seis",   6 },

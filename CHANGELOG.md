@@ -1,3 +1,19 @@
+## [1.6.0] - 2026-11-23
+
+- **Zero-Config `~/.models/*.gguf` Auto-Discovery (`src/auren-registry.c`, `src/libaxil-auren.c`)**:
+  - Automatically scans `$AUREN_MODELS_DIR` or `~/.models/` for `.gguf` files when no JSON config or `AUREN_MODEL_PATH` is set, deduplicates symlinks via `realpath()`, classifies embedding filenames (`bge`, `embed`, `nomic`, `minilm`, `e5-`) as `embed|judge` and generative models as `chat|judge`, and assigns default roles automatically.
+  - Updated `auren_init()` to allow daemon startup without an explicit config file whenever `~/.models/*.gguf` contains valid models.
+- **Standalone Upstream Auth Discovery (`src/auren-upstream.c`)**:
+  - Added `$AUREN_AUTH_PATH` and `~/.config/auren/auth.json` lookup ahead of `~/.pi/agent/auth.json` fallback for cloud upstream routing (`very-fast`, `fast`, `smart`, `genius`, `antigravity/*`, `kilo/*`), circuit breaker, and session affinity.
+- **`ren` Agent CLI, IPC Socket Server & `libren` Runtime (`src/libren.c`, `src/ren.c`, `include/ttypt/libren.h`)**:
+  - Built pure-C streaming agent runtime (`libren.so`) and `ren --listen` Unix-socket IPC daemon with extensible `libxylem` modules (`ren-fs`, `ren-bash`, `ren-reflex`), multi-context providers, cooperative `ren_is_interrupted()` cancellation, mid-stream steer/abort, stall detection, and overflow compaction.
+  - Replaced per-turn `gethostbyname()` in `ren_chat_ex()` with pre-loop `getaddrinfo()` resolution and enabled `TCP_NODELAY`, eliminating DNS and Nagle latency on multi-turn tool loops.
+- **Tier-0 Deterministic `ren-reflex` Router (`mods/reflex/ren-reflex.c`)**:
+  - Added sub-millisecond `<1 ms` deterministic EN/PT command matching for workspaces, windows, media/volume, browser tab open/close, terminal launch, and conversation control, plus custom TSV overrides via `~/.config/ren/reflex.tsv` and fail-open to Tier-1 LLM on questions or multi-clause input.
+  - Added UTF-8 Latin diacritic folding (`área` -> `area`, `próxima` -> `proxima`), polite filler prefix stripping (`please`, `can you`, `por favor`, `podes`, etc.), and expanded natural Portuguese shortcuts.
+- **Documentation (`README.md`, `docs/USAGE.md`, `docs/API.md`)**:
+  - Documented zero-config `~/.models/*.gguf` auto-discovery, `~/.config/auren/auth.json` credential resolution, `ren-reflex`, and replaced user-specific paths with `$HOME` / `$PREFIX`.
+
 ## [1.5.3] - 2026-11-16
 
 - **7-OS Native Packaging & 4-Platform Node-API Prebuilds (`Makefile`, `.github/workflows/ci.yml`, `scripts/vkgen-repair.sh`, `src/*.c`)**:

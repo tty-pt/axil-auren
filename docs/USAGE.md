@@ -36,16 +36,16 @@ AUREN_PORT=8000 ./scripts/auren-server
 ```
 
 ### Running Directly via Axil
-If `axil` is installed system-wide:
+If `axil` is installed under `$PREFIX` (e.g. `~/.local`):
 ```bash
-LD_LIBRARY_PATH=/home/quirinpa/axil-auren/lib \
-axil -A -d -p 4242 -m /home/quirinpa/axil-auren/lib/libaxil-auren
+LD_LIBRARY_PATH="$HOME/.local/lib" \
+axil -A -d -p 4242 -m "$HOME/.local/lib/libaxil-auren"
 ```
 
 ### Background Daemon Execution
 To run in the background as a daemon:
 ```bash
-nohup /home/quirinpa/axil-auren/scripts/auren-server > /tmp/auren.log 2>&1 &
+nohup ./scripts/auren-server > /tmp/auren.log 2>&1 &
 ```
 
 To stop a running daemon:
@@ -55,9 +55,13 @@ pkill -f "axil.*4242"
 
 ---
 
-## 2. Model Configuration (`auren.json`)
+## 2. Zero-Config Auto-Discovery & Optional `auren.json`
 
-`axil-auren` uses a declarative JSON configuration file (`auren.json`) to define model paths, capabilities, context limits, and hardware acceleration:
+`axil-auren` starts cleanly with **no configuration file**:
+- **Local GGUF Models**: If no `auren.json` or `AUREN_MODEL_PATH` is set, `$AUREN_MODELS_DIR` (default `~/.models/*.gguf`) is scanned automatically, symlinks are deduplicated via `realpath()`, embedding models (`bge`, `embed`, `nomic`, `minilm`, `e5-`) are tagged `embed|judge`, generative models are tagged `chat|judge`, and default roles are assigned automatically.
+- **Cloud Upstream Auth**: Reads `$AUREN_AUTH_PATH`, `~/.config/auren/auth.json`, or falls back to `~/.pi/agent/auth.json` for cloud router aliases (`very-fast`, `fast`, `smart`, `genius`).
+
+To override discovery order, context sizes, or GPU layer counts explicitly, create an `auren.json` file:
 
 ```json
 {
@@ -205,7 +209,7 @@ On standard stateless servers, the server wipes its KV cache on every turn. Proc
 `axil-auren` is designed to be the primary local inference backend for the [Pi coding agent](https://github.com/earendil-works/pi).
 
 ### Step 1: Configure `~/.pi/agent/models.json`
-Add the `auren` provider to `/home/quirinpa/.pi/agent/models.json`:
+Add the `auren` provider to `~/.pi/agent/models.json`:
 
 ```json
 {
@@ -540,8 +544,8 @@ cc app.c $(pkg-config --cflags --libs axil-auren)
 Run the standalone native driver to verify inference, embedding dimensions, and multi-turn session persistence without HTTP or external daemons:
 
 ```bash
-LD_LIBRARY_PATH=/home/quirinpa/axil-auren/lib \
-/home/quirinpa/axil-auren/bin/engine-test ~/.models/qwen2.5-0.5b-instruct.gguf
+LD_LIBRARY_PATH=./lib \
+./bin/engine-test ~/.models/qwen2.5-0.5b-instruct.gguf
 ```
 
 Expected output:

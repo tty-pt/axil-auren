@@ -227,3 +227,13 @@ int auren_sampler_add_grammar(struct auren_context *ctx, struct llama_sampler *s
 void auren_sampler_free(struct llama_sampler *smpl);
 ```
 Low-level control over the sampling chain (penalties, top-k, top-p, temperature, and GBNF grammars).
+
+---
+
+## Zero-Config Registry & `libren` Runtime Notes
+
+When initialized as an Axil daemon (`libaxil-auren.so`) without an explicit `auren.json` or `AUREN_MODEL_PATH`:
+- `qllm_registry_init()` scans `$AUREN_MODELS_DIR` (or `$HOME/.models/`) for `.gguf` files, deduplicates symlink targets via `realpath()`, classifies embedding models (`bge`, `embed`, `nomic`, `minilm`, `e5-`) as `embed|judge` and generative models as `chat|judge`, and binds default roles automatically.
+- `auren-upstream` checks `$AUREN_AUTH_PATH`, `$HOME/.config/auren/auth.json`, and `$HOME/.pi/agent/auth.json` for upstream credentials.
+- `libren` (`<ttypt/libren.h>`) resolves the server host once per `ren_chat_ex()` invocation and sets `TCP_NODELAY` on chat sockets; `ren-reflex.so` folds UTF-8 Latin diacritics and strips EN/PT polite filler prefixes before deterministic rule dispatch.
+

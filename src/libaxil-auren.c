@@ -412,6 +412,44 @@ setup_crb(const char *path)
 	}
 }
 
+#ifndef _WIN32
+#include <dirent.h>
+static int
+has_auto_models_dir(void)
+{
+	const char *env_dir = getenv("AUREN_MODELS_DIR");
+	const char *home = getenv("HOME");
+	char dir_path[512];
+	if (env_dir && env_dir[0])
+		snprintf(dir_path, sizeof(dir_path), "%s", env_dir);
+	else if (home && home[0])
+		snprintf(dir_path, sizeof(dir_path), "%s/.models", home);
+	else
+		return 0;
+
+	DIR *dp = opendir(dir_path);
+	if (!dp)
+		return 0;
+	struct dirent *de;
+	int found = 0;
+	while ((de = readdir(dp)) != NULL) {
+		size_t nl = strlen(de->d_name);
+		if (nl > 5 && strcasecmp(de->d_name + nl - 5, ".gguf") == 0) {
+			char fp[1024];
+			snprintf(fp, sizeof(fp), "%s/%s", dir_path, de->d_name);
+			if (access(fp, R_OK) == 0) {
+				found = 1;
+				break;
+			}
+		}
+	}
+	closedir(dp);
+	return found;
+}
+#else
+static int has_auto_models_dir(void) { return 0; }
+#endif
+
 static int
 auren_init(void)
 {
@@ -442,7 +480,8 @@ auren_init(void)
 	                 (home_auren[0] && access(home_auren, R_OK) == 0) ||
 	                 (home_dot_auren[0] && access(home_dot_auren, R_OK) == 0) ||
 	                 (home_config_auren[0] && access(home_config_auren, R_OK) == 0) ||
-	                 auren_upstream_has_credentials();
+	                 auren_upstream_has_credentials() ||
+	                 has_auto_models_dir();
 
 	if (!has_models) {
 		stl_syslog(STL_LOG_ERR, "No model configuration set; auren engine disabled\n");

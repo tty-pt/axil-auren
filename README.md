@@ -17,9 +17,13 @@ No CUDA toolchains to manage, no gigabytes of Python dependencies. `axil-auren` 
 
 ---
 
-## 1. Quickstart: Run as an Axil Module
+## 1. Quickstart: Zero-Config Axil Module & `ren` Agent
 
-`axil-auren` is designed first and foremost as a native [axil](https://github.com/tty-pt/axil) server module. It automatically discovers GGUF models in `~/.models/` and loads configuration from `~/.config/auren/config.json` (or `~/auren.json`):
+`axil-auren` is designed as a native [axil](https://github.com/tty-pt/axil) server module plus a standalone `libren` / `ren` streaming agent CLI & Unix-socket server.
+
+Zero-config out of the box:
+- **Models**: Any `.gguf` files placed in `~/.models/` (or `$AUREN_MODELS_DIR`) are automatically discovered, symlink-deduplicated, and classified (`*bge*`, `*embed*`, `*nomic*`, `*minilm*`, `*e5-*` -> `embed|judge`, all others -> `chat|judge`), with no `auren.json` required. Optional config still loads from `$AUREN_CONFIG_PATH`, `./auren.json`, `~/.config/auren/config.json`, or `~/.auren.json`.
+- **Cloud Upstreams**: Optional upstream routing (`very-fast`, `fast`, `smart`, `genius`, `antigravity/*`, `kilo/*`) reads OAuth/API credentials from `$AUREN_AUTH_PATH`, `~/.config/auren/auth.json`, or `~/.pi/agent/auth.json`.
 
 ```bash
 # Primary execution: start axil daemon loading the auren module on port 4242
@@ -30,7 +34,16 @@ npx axil -A -d -p 4242 -m axil-auren
 
 # Or via the turnkey helper launcher:
 scripts/auren-server
+
+# Interactive / IPC agent CLI (with Tier-0 ren-reflex, ren-fs, ren-bash):
+ren --listen /tmp/ren.sock
 ```
+
+### `ren` Agent & Tier-0 `ren-reflex` Router
+
+`libren` (`bin/ren`, `<ttypt/libren.h>`) provides a lightweight pure-C multi-turn agent loop over `/v1/chat/completions` with extensible `libxylem` modules (`ren-fs`, `ren-bash`, `ren-reflex`):
+- **Tier-0 Deterministic Reflexes (`ren-reflex.so`)**: Matches direct commands in `<1 ms` without an LLM round-trip (workspace switching, window management, media/volume, browser tab open/close, terminal launch, conversation control) in both English and Portuguese, including UTF-8 Latin diacritic folding (`área` = `area`, `próxima` = `proxima`), polite prefix stripping (`please`, `can you`, `por favor`, `podes`, etc.), and fail-open to Tier-1 LLM on questions or multi-clause utterances. Custom rules can be added via `~/.config/ren/reflex.tsv`.
+- **Upstream Tier Aliases**: Supports `very-fast`, `fast`, `smart`, and `genius` model aliases mapped via `auren-upstream.c` to local GGUF or authenticated cloud endpoints with automatic circuit breaking and session affinity.
 
 ### Verified `curl` Queries
 
@@ -146,9 +159,9 @@ Prebuilt packages for Linux (APT / Alpine / Arch / Fedora-RHEL), macOS (Homebrew
 
 ### Build from Source
 ```sh
-make                  # builds lib/libaxil-auren.so and bin/auren-chat
-make test             # run comprehensive unit test suite
-sudo make install     # install headers, library, and launchers to system
+make                  # builds libaxil-auren.so, libren.so, bin/ren, and ren-* mods
+make test             # run comprehensive unit, edge, stress, and ren test suite
+sudo make install     # install headers, libraries, ren modules, and services
 ```
 
 ---

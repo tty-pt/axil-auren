@@ -1338,6 +1338,24 @@ TEST(ren_reflex_deterministic_and_fallthrough)
 	ASSERT_EQ(ev_browser_open.tier0_calls, 1);
 	ASSERT_STR_EQ(ev_browser_open.tier0_op, "open_app");
 
+	struct captured_events ev_polite_en = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Can you please go to workspace 3?", "127.0.0.1", 1, test_event_cb, &ev_polite_en), -1); /* trailing '?' fails open to Tier-1 LLM */
+	ASSERT_EQ(ev_polite_en.tier0_calls, 0);
+	struct captured_events ev_polite_en_cmd = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Please pause music", "127.0.0.1", 1, test_event_cb, &ev_polite_en_cmd), 0);
+	ASSERT_EQ(ev_polite_en_cmd.tier0_calls, 1);
+	ASSERT_STR_EQ(g_reflex_last_media, "pause");
+
+	struct captured_events ev_polite_pt = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Podes mudar para a Área de Trabalho 3!", "127.0.0.1", 1, test_event_cb, &ev_polite_pt), 0);
+	ASSERT_EQ(ev_polite_pt.tier0_calls, 1);
+	ASSERT_STR_EQ(g_reflex_last_ws, "3");
+
+	struct captured_events ev_pt_accent = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Próxima música", "127.0.0.1", 1, test_event_cb, &ev_pt_accent), 0);
+	ASSERT_EQ(ev_pt_accent.tier0_calls, 1);
+	ASSERT_STR_EQ(g_reflex_last_media, "next");
+
 	/* 5. Builtin conversation_control runs without external tool */
 	struct captured_events ev_conv = {0};
 	ASSERT_EQ(ren_chat_ex(&ctx, "fim de conversa", "127.0.0.1", 1, test_event_cb, &ev_conv), 0);

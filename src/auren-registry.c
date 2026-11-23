@@ -3,12 +3,17 @@
 #include "auren-registry.h"
 #include <ttypt/stele.h>
 
+#include <ctype.h>
+#ifndef _WIN32
+#include <dirent.h>
+#endif
 #include <json-c/json.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #ifndef MOCK_BUILD
@@ -388,6 +393,140 @@ read_file_text(const char *path)
 	return buf;
 }
 
+#ifndef _WIN32
+static int
+str_contains_ci(const char *hay, const char *needle)
+{
+	size_t nlen = strlen(needle);
+	if (!hay || !nlen)
+		return 0;
+	for (; *hay; ++hay) {
+		if (strncasecmp(hay, needle, nlen) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+static int
+is_embed_filename(const char *name)
+{
+	return str_contains_ci(name, "bge") ||
+	       str_contains_ci(name, "embed") ||
+	       str_contains_ci(name, "nomic") ||
+	       str_contains_ci(name, "minilm") ||
+	       str_contains_ci(name, "e5-");
+}
+
+static int
+cmp_cstr_ptr(const void *a, const void *b)
+{
+	const char *sa = *(const char *const *)a;
+	const char *sb = *(const char *const *)b;
+	return strcmp(sa, sb);
+}
+
+static void
+scan_models_dir(int def_ctx, int def_ngl)
+{
+	const char *env_dir = getenv("AUREN_MODELS_DIR");
+	const char *home = getenv("HOME");
+	char dir_path[512];
+	if (env_dir && env_dir[0]) {
+		snprintf(dir_path, sizeof(dir_path), "%s", env_dir);
+	} else if (home && home[0]) {
+		snprintf(dir_path, sizeof(dir_path), "%s/.models", home);
+	} else {
+		return;
+	}
+
+	DIR *dp = opendir(dir_path);
+	if (!dp)
+		return;
+
+	char *names[QLLM_MAX_MODELS];
+	int n_names = 0;
+	struct dirent *de;
+	while ((de = readdir(dp)) != NULL && n_names < QLLM_MAX_MODELS) {
+		size_t nl = strlen(de->d_name);
+		if (nl > 5 && strcasecmp(de->d_name + nl - 5, ".gguf") == 0) {
+			names[n_names++] = strdup(de->d_name);
+		}
+	}
+	closedir(dp);
+	if (n_names == 0)
+		return;
+
+	qsort(names, (size_t)n_names, sizeof(names[0]), cmp_cstr_ptr);
+
+	char seen_real[QLLM_MAX_MODELS][PATH_MAX];
+	int n_seen = 0;
+	char first_chat[64] = {0};
+	char first_embed[64] = {0};
+
+	for (int i = 0; i < n_names; ++i) {
+		char full[1024];
+		snprintf(full, sizeof(full), "%s/%s", dir_path, names[i]);
+		if (access(full, R_OK) != 0) {
+			free(names[i]);
+			continue;
+		}
+		char real_p[PATH_MAX];
+		const char *canon = realpath(full, real_p) ? real_p : full;
+		int dup = 0;
+		for (int s = 0; s < n_seen; ++s) {
+			if (strcmp(seen_real[s], canon) == 0) {
+				dup = 1;
+				break;
+			}
+		}
+		if (dup) {
+			free(names[i]);
+			continue;
+		}
+		if (n_seen < QLLM_MAX_MODELS)
+			snprintf(seen_real[n_seen++], PATH_MAX, "%s", canon);
+
+		char id[64];
+		size_t stem_len = strlen(names[i]);
+		if (stem_len > 5) stem_len -= 5;
+		if (stem_len >= sizeof(id)) stem_len = sizeof(id) - 1;
+		memcpy(id, names[i], stem_len);
+		id[stem_len] = '\0';
+
+		struct qllm_config cfg;
+		memset(&cfg, 0, sizeof(cfg));
+		uint32_t caps;
+		if (is_embed_filename(names[i])) {
+			caps = QLLM_CAP_EMBED | QLLM_CAP_JUDGE;
+			cfg.n_ctx = 512;
+			cfg.enable_embeddings = 1;
+			if (!first_embed[0])
+				snprintf(first_embed, sizeof(first_embed), "%s", id);
+		} else {
+			caps = QLLM_CAP_CHAT | QLLM_CAP_JUDGE;
+			cfg.n_ctx = def_ctx;
+			if (def_ngl >= 0)
+				cfg.n_gpu_layers = def_ngl;
+			if (!first_chat[0])
+				snprintf(first_chat, sizeof(first_chat), "%s", id);
+		}
+		qllm_registry_add(id, full, caps, &cfg);
+		free(names[i]);
+	}
+
+	if (first_chat[0])
+		qllm_registry_set_default(QLLM_ROLE_CHAT, first_chat);
+	if (first_embed[0]) {
+		qllm_registry_set_default(QLLM_ROLE_EMBED, first_embed);
+		qllm_registry_set_default(QLLM_ROLE_JUDGE, first_embed);
+	} else if (first_chat[0]) {
+		qllm_registry_set_default(QLLM_ROLE_JUDGE, first_chat);
+	}
+}
+#else
+static void scan_models_dir(int def_ctx, int def_ngl) { (void)def_ctx; (void)def_ngl; }
+#endif
+
 int
 qllm_registry_init(const char *legacy_fallback_path)
 {
@@ -537,9 +676,10 @@ qllm_registry_init(const char *legacy_fallback_path)
 		qllm_registry_set_default(QLLM_ROLE_EMBED, embed_id && embed_id[0] ? embed_id : "embed-model");
 	}
 
-	/* 4. If registry is still empty, map legacy single model configuration */
+	/* 4. If registry is still empty, map legacy single model or scan ~/.models */
 	pthread_mutex_lock(&g_reg_lock);
-	if (g_reg.count == 0) {
+	int still_empty = (g_reg.count == 0);
+	if (still_empty) {
 		const char *lp = (legacy_fallback_path && legacy_fallback_path[0])
 			? legacy_fallback_path
 			: getenv("AUREN_MODEL_PATH");
@@ -559,8 +699,16 @@ qllm_registry_init(const char *legacy_fallback_path)
 			snprintf(g_reg.default_chat, sizeof(g_reg.default_chat), "default");
 			snprintf(g_reg.default_judge, sizeof(g_reg.default_judge), "default");
 			snprintf(g_reg.default_embed, sizeof(g_reg.default_embed), "default");
+			still_empty = 0;
 		}
 	}
+	pthread_mutex_unlock(&g_reg_lock);
+
+	if (still_empty) {
+		scan_models_dir(def_ctx, def_ngl);
+	}
+
+	pthread_mutex_lock(&g_reg_lock);
 	int final_count = g_reg.count;
 	pthread_mutex_unlock(&g_reg_lock);
 

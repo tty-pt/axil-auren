@@ -247,6 +247,12 @@ resolve_auth_file_path(char *out, size_t sz)
 	}
 	const char *home = getenv("HOME");
 	if (home && home[0]) {
+		char cfg_auth[512];
+		snprintf(cfg_auth, sizeof(cfg_auth), "%s/.config/auren/auth.json", home);
+		if (access(cfg_auth, R_OK) == 0) {
+			snprintf(out, sz, "%s", cfg_auth);
+			return;
+		}
 		snprintf(out, sz, "%s/.pi/agent/auth.json", home);
 		return;
 	}

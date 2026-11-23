@@ -5,6 +5,7 @@
 #include <json-c/json.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 TEST(model_registry_add_and_find)
 {
@@ -292,3 +293,69 @@ TEST(model_registry_env_path_deduplication)
 
 	qllm_registry_shutdown();
 }
+
+TEST(model_registry_auto_scan_models_dir)
+{
+	char tmpdir[] = "/tmp/auren_scan_XXXXXX";
+	ASSERT_NOT_NULL(mkdtemp(tmpdir));
+
+	char p_chat[512], p_link[512], p_emb[512];
+	snprintf(p_chat, sizeof(p_chat), "%s/qwen2.5-0.5b-instruct-q4_k_m.gguf", tmpdir);
+	snprintf(p_link, sizeof(p_link), "%s/qwen2.5-0.5b-instruct.gguf", tmpdir);
+	snprintf(p_emb, sizeof(p_emb), "%s/bge-base-en-v1.5.gguf", tmpdir);
+
+	FILE *f1 = fopen(p_chat, "wb");
+	ASSERT_NOT_NULL(f1);
+	fwrite("GGUF", 1, 4, f1);
+	fclose(f1);
+
+	FILE *f2 = fopen(p_emb, "wb");
+	ASSERT_NOT_NULL(f2);
+	fwrite("GGUF", 1, 4, f2);
+	fclose(f2);
+
+	ASSERT_EQ(symlink(p_chat, p_link), 0);
+
+	const char *old_home = getenv("HOME");
+	char *saved_home = old_home ? strdup(old_home) : NULL;
+	setenv("HOME", tmpdir, 1);
+	unsetenv("AUREN_CONFIG_PATH");
+	unsetenv("AUREN_MODELS");
+	unsetenv("AUREN_CHAT_PATH");
+	unsetenv("AUREN_JUDGE_PATH");
+	unsetenv("AUREN_EMBED_PATH");
+	unsetenv("AUREN_MODEL_PATH");
+	setenv("AUREN_MODELS_DIR", tmpdir, 1);
+
+	int rc = qllm_registry_init(NULL);
+	unsetenv("AUREN_MODELS_DIR");
+	if (saved_home) {
+		setenv("HOME", saved_home, 1);
+		free(saved_home);
+	}
+	ASSERT_EQ(rc, 0);
+
+	const char *def_chat = qllm_registry_default_id(QLLM_CAP_CHAT);
+	const char *def_emb  = qllm_registry_default_id(QLLM_CAP_EMBED);
+	const char *def_jdg  = qllm_registry_default_id(QLLM_CAP_JUDGE);
+	ASSERT_NOT_NULL(def_chat);
+	ASSERT_NOT_NULL(def_emb);
+	ASSERT_NOT_NULL(def_jdg);
+	ASSERT_STR_EQ(def_emb, "bge-base-en-v1.5");
+	ASSERT_STR_EQ(def_jdg, "bge-base-en-v1.5");
+
+	/* Symlink pointing to same target file must be deduplicated -> exactly 2 entries */
+	struct json_object *models = qllm_registry_models_json();
+	ASSERT_NOT_NULL(models);
+	struct json_object *data = json_object_object_get(models, "data");
+	ASSERT_NOT_NULL(data);
+	ASSERT_EQ((int)json_object_array_length(data), 2);
+	json_object_put(models);
+
+	qllm_registry_shutdown();
+	unlink(p_link);
+	unlink(p_chat);
+	unlink(p_emb);
+	rmdir(tmpdir);
+}
+

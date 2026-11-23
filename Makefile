@@ -135,10 +135,11 @@ install-services:
 	@if [ "${uname}" = "Linux" ] || [ -d /run/systemd/system ]; then \
 		echo "[INFO] Installing systemd services for axil-auren..."; \
 		install -d ${DESTDIR}${PREFIX}/lib/systemd/user; \
-		sed 's|@PREFIX@|${PREFIX}|g' services/systemd/axil-auren.service > ${DESTDIR}${PREFIX}/lib/systemd/user/axil-auren.service; \
-		if [ -d $(HOME)/.config/systemd/user ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; then \
-			mkdir -p $(HOME)/.config/systemd/user; \
-			sed 's|@PREFIX@|${PREFIX}|g' services/systemd/axil-auren.service > $(HOME)/.config/systemd/user/axil-auren.service; \
+		UNIT_PREFIX="$$(echo "${PREFIX}" | sed "s|^$(HOME)|%h|")"; \
+		sed "s|@PREFIX@|$${UNIT_PREFIX}|g" services/systemd/axil-auren.service > ${DESTDIR}${PREFIX}/lib/systemd/user/axil-auren.service; \
+		if [ -z "${DESTDIR}" ] && { [ -d "$(HOME)/.config/systemd/user" ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; }; then \
+			mkdir -p "$(HOME)/.config/systemd/user"; \
+			ln -sf "${PREFIX}/lib/systemd/user/axil-auren.service" "$(HOME)/.config/systemd/user/axil-auren.service"; \
 		fi; \
 	fi
 	@if [ -d /etc/init.d ] || [ -x /sbin/openrc-run ] || [ "${distro}" = "alpine" ] || [ "${distro}" = "gentoo" ]; then \
@@ -146,7 +147,7 @@ install-services:
 		install -d ${DESTDIR}${PREFIX}/share/examples/openrc; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/openrc/axil-auren > ${DESTDIR}${PREFIX}/share/examples/openrc/axil-auren; \
 		chmod 755 ${DESTDIR}${PREFIX}/share/examples/openrc/axil-auren; \
-		if [ -w /etc/init.d ]; then \
+		if [ -z "${DESTDIR}" ] && [ -w /etc/init.d ]; then \
 			install -m 755 ${DESTDIR}${PREFIX}/share/examples/openrc/axil-auren /etc/init.d/axil-auren; \
 		fi; \
 	fi
@@ -162,15 +163,15 @@ install-services:
 		install -d ${DESTDIR}${PREFIX}/share/examples/rc.d; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/rc.d/axil_auren > ${DESTDIR}${PREFIX}/share/examples/rc.d/axil_auren; \
 		chmod 755 ${DESTDIR}${PREFIX}/share/examples/rc.d/axil_auren; \
-		if [ -w /etc/rc.d ]; then \
+		if [ -z "${DESTDIR}" ] && [ -w /etc/rc.d ]; then \
 			install -m 755 ${DESTDIR}${PREFIX}/share/examples/rc.d/axil_auren /etc/rc.d/axil_auren; \
 		fi; \
 	elif [ "${uname}" = "Darwin" ]; then \
 		echo "[INFO] Installing launchd service for axil-auren..."; \
 		install -d ${DESTDIR}${PREFIX}/share/launchd; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.axil-auren.plist > ${DESTDIR}${PREFIX}/share/launchd/pt.tty.axil-auren.plist; \
-		if [ -d $(HOME)/Library/LaunchAgents ]; then \
-			sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.axil-auren.plist > $(HOME)/Library/LaunchAgents/pt.tty.axil-auren.plist; \
+		if [ -z "${DESTDIR}" ] && [ -d "$(HOME)/Library/LaunchAgents" ]; then \
+			sed 's|@PREFIX@|${PREFIX}|g' services/launchd/pt.tty.axil-auren.plist > "$(HOME)/Library/LaunchAgents/pt.tty.axil-auren.plist"; \
 		fi; \
 	elif [ "${SYS}" = "Windows" ] || [ "${uname}" = "MinGW64" ] || [ "${uname}" = "Msys" ] || [ "${uname}" = "MingW" ]; then \
 		echo "[INFO] Installing Windows services for axil-auren..."; \
@@ -182,9 +183,9 @@ install-services:
 		install -d ${DESTDIR}${PREFIX}/etc/xdg/autostart ${DESTDIR}${PREFIX}/share/applications; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/xdg/axil-auren.desktop > ${DESTDIR}${PREFIX}/etc/xdg/autostart/axil-auren.desktop; \
 		sed 's|@PREFIX@|${PREFIX}|g' services/xdg/axil-auren.desktop > ${DESTDIR}${PREFIX}/share/applications/axil-auren.desktop; \
-		if [ -d $(HOME)/.config/autostart ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; then \
-			mkdir -p $(HOME)/.config/autostart; \
-			sed 's|@PREFIX@|${PREFIX}|g' services/xdg/axil-auren.desktop > $(HOME)/.config/autostart/axil-auren.desktop; \
+		if [ -z "${DESTDIR}" ] && { [ -d "$(HOME)/.config/autostart" ] || [ -n "$$(echo "${PREFIX}" | grep -E '^($(HOME)|~)')" ]; }; then \
+			mkdir -p "$(HOME)/.config/autostart"; \
+			sed 's|@PREFIX@|${PREFIX}|g' services/xdg/axil-auren.desktop > "$(HOME)/.config/autostart/axil-auren.desktop"; \
 		fi; \
 	fi
 

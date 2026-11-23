@@ -230,6 +230,11 @@ static int has_pending_steer(void) {
     return pending;
 }
 
+int ren_is_interrupted(void) {
+    if (g_local_abort || (g_abort_flag && *g_abort_flag)) return 1;
+    return has_pending_steer();
+}
+
 static int consume_steer(char **out_text) {
     if (out_text) *out_text = NULL;
     pthread_mutex_lock(&g_ctrl_mtx);

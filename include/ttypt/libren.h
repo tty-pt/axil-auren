@@ -73,6 +73,7 @@ void ren_set_model(const char *model);
 void ren_set_abort_flag(volatile sig_atomic_t *flag);
 void ren_steer(const char *text);
 void ren_abort(void);
+int ren_is_interrupted(void);
 int ren_load_module(const char *path);
 int ren_call_tool(const char *name, const char *args, char **out_result);
 

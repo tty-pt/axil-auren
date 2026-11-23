@@ -1345,5 +1345,78 @@ TEST(ren_reflex_deterministic_and_fallthrough)
 	ren_free(&ctx);
 }
 
+static int g_probe_before = -1;
+static int g_probe_after_abort = -1;
+static int g_probe_after_steer = -1;
+
+static int mock_interrupt_probe_tool(const char *args, char **out)
+{
+	g_probe_before = ren_is_interrupted();
+	if (args && strstr(args, "steer")) {
+		ren_steer("Steer mid-tool");
+		g_probe_after_steer = ren_is_interrupted();
+	} else {
+		ren_abort();
+		g_probe_after_abort = ren_is_interrupted();
+	}
+	*out = strdup("probed");
+	return 0;
+}
+
+TEST(ren_is_interrupted_reflects_abort_and_steer_and_resets)
+{
+	signal(SIGPIPE, SIG_IGN);
+	g_probe_before = -1;
+	g_probe_after_abort = -1;
+	g_probe_after_steer = -1;
+
+	ASSERT_EQ(ren_is_interrupted(), 0);
+
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_register_tool("int_probe", "int_probe <abort|steer>", mock_interrupt_probe_tool);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 3), 0);
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+		"{\"index\":0,\"id\":\"call_p1\",\"type\":\"function\",\"function\":{\"name\":\"int_probe\",\"arguments\":\"{\\\"args\\\":\\\"abort\\\"}\"}}"
+		"]}}]}\n\n"
+		"data: [DONE]\n\n";
+	srv.responses[1] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+		"{\"index\":0,\"id\":\"call_p2\",\"type\":\"function\",\"function\":{\"name\":\"int_probe\",\"arguments\":\"{\\\"args\\\":\\\"steer\\\"}\"}}"
+		"]}}]}\n\n"
+		"data: [DONE]\n\n";
+	srv.responses[2] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Steered ok.\"}}]}\n\n"
+		"data: [DONE]\n\n";
+	mock_server_launch(&srv);
+
+	struct captured_events ev1 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Probe abort", "127.0.0.1", srv.port, test_event_cb, &ev1), -1);
+	ASSERT_EQ(g_probe_before, 0);
+	ASSERT_EQ(g_probe_after_abort, 1);
+	ASSERT_STR_EQ(ev1.done_msg, "Interrupted");
+	ASSERT_EQ(ren_is_interrupted(), 0);
+
+	g_probe_before = -1;
+	struct captured_events ev2 = {0};
+	ASSERT_EQ(ren_chat_ex(&ctx, "Probe steer", "127.0.0.1", srv.port, test_event_cb, &ev2), 0);
+	mock_server_join(&srv);
+	ASSERT_EQ(g_probe_before, 0);
+	ASSERT_EQ(g_probe_after_steer, 1);
+	ASSERT_EQ(ev2.steer_calls, 1);
+	ASSERT_STR_EQ(ev2.done_msg, "Steered ok.");
+	ASSERT_EQ(ren_is_interrupted(), 0);
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+
 
 

@@ -716,6 +716,10 @@ int main(int argc, char **argv) {
                 }
 
                 g_interrupted = 0;
+                if (g_scroll_region_active) {
+                    printf("\033[%d;1H\n", g_term_rows - 1);
+                    fflush(stdout);
+                }
                 if (ren_chat(&ctx, line, host, port) < 0) {
                     ret = 1;
                 }

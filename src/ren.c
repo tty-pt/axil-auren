@@ -14,6 +14,7 @@
 #define isatty _isatty
 #else
 #include <unistd.h>
+#include <sys/ioctl.h>
 #endif
 #include <sys/stat.h>
 #include <ttypt/stele.h>
@@ -76,6 +77,87 @@ static void load_mod_spec(const char *spec) {
         p = sep ? (sep + 1) : NULL;
     }
     free(copy);
+}
+
+static volatile sig_atomic_t g_winch_received = 0;
+static int g_term_rows = 24;
+static int g_term_cols = 80;
+static int g_scroll_region_active = 0;
+
+static void on_sigwinch(int sig) {
+    (void)sig;
+    g_winch_received = 1;
+}
+
+static void update_term_size(void) {
+#ifndef _WIN32
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 2 && ws.ws_col > 10) {
+        g_term_rows = ws.ws_row;
+        g_term_cols = ws.ws_col;
+    }
+#endif
+}
+
+static void term_enable_scroll_region(void) {
+    update_term_size();
+    if (g_term_rows > 3) {
+        /* Set scrolling region from line 1 to line (rows - 1) */
+        printf("\033[1;%dr", g_term_rows - 1);
+        /* Move cursor to line (rows - 1), col 1 */
+        printf("\033[%d;1H", g_term_rows - 1);
+        fflush(stdout);
+        g_scroll_region_active = 1;
+    }
+}
+
+static void term_restore_scroll_region(void) {
+    if (g_scroll_region_active) {
+        /* Reset scrolling region to full screen */
+        printf("\033[r");
+        /* Move cursor to bottom row */
+        printf("\033[%d;1H\n", g_term_rows);
+        fflush(stdout);
+        g_scroll_region_active = 0;
+    }
+}
+
+static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
+    if (!g_scroll_region_active) {
+        printf("%s> ", turn_busy ? "[steer] " : "");
+        fflush(stdout);
+        return;
+    }
+
+    size_t bytes = ctx ? ctx->history_len : 0;
+    size_t tokens = bytes / 4;
+
+    char k_buf[32];
+    if (bytes >= 1024 * 1024) {
+        snprintf(k_buf, sizeof(k_buf), "%.1fMB", (double)bytes / (1024.0 * 1024.0));
+    } else if (bytes >= 1024) {
+        snprintf(k_buf, sizeof(k_buf), "%.1fKB", (double)bytes / 1024.0);
+    } else {
+        snprintf(k_buf, sizeof(k_buf), "%zuB", bytes);
+    }
+
+    char tok_buf[32];
+    if (tokens >= 1000) {
+        snprintf(tok_buf, sizeof(tok_buf), "~%.1fk tok", (double)tokens / 1000.0);
+    } else {
+        snprintf(tok_buf, sizeof(tok_buf), "~%zu tok", tokens);
+    }
+
+    /* Save cursor, move to row rows col 1, clear line, draw status, restore cursor */
+    printf("\033[s");
+    printf("\033[%d;1H\033[2K", g_term_rows);
+    if (turn_busy) {
+        printf("\033[7;33m[%s | %s | busy]\033[0m \033[1m[steer]\033[0m > ", tok_buf, k_buf);
+    } else {
+        printf("\033[7;36m[%s | %s]\033[0m > ", tok_buf, k_buf);
+    }
+    fflush(stdout);
+    /* In interactive input waiting, we position the cursor right after the prompt */
 }
 
 static char *default_session_name(void) {
@@ -341,7 +423,11 @@ int main(int argc, char **argv) {
         int interactive = isatty(STDIN_FILENO);
         if (interactive) {
             stl_stop_on_signal(on_sigint);
+#ifndef _WIN32
+            stl_stop_on_signal(on_sigwinch);
+#endif
             ren_set_abort_flag(&g_interrupted);
+            term_enable_scroll_region();
         }
 
         int have_listener = 0;
@@ -388,13 +474,18 @@ int main(int argc, char **argv) {
                 need_prompt = (interactive && !stdin_closed);
             }
 
+            if (g_winch_received) {
+                g_winch_received = 0;
+                term_enable_scroll_region();
+                need_prompt = (interactive && !stdin_closed);
+            }
+
             pthread_mutex_lock(&g_turn_mtx);
             int turn_busy = g_turn_active;
             pthread_mutex_unlock(&g_turn_mtx);
 
-            if (need_prompt && !turn_busy) {
-                printf("> ");
-                fflush(stdout);
+            if (need_prompt) {
+                render_status_bar(&ctx, turn_busy);
                 need_prompt = 0;
             }
 
@@ -416,7 +507,7 @@ int main(int argc, char **argv) {
                 int done_idx = -1;
 
 #ifndef _WIN32
-                if (!stdin_closed && !turn_busy) {
+                if (!stdin_closed) {
                     stdin_idx = nfds;
                     pfds[nfds].fd = STDIN_FILENO;
                     pfds[nfds].events = POLLIN;
@@ -612,6 +703,18 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
+                pthread_mutex_lock(&g_turn_mtx);
+                int busy = g_turn_active;
+                pthread_mutex_unlock(&g_turn_mtx);
+
+                if (busy) {
+                    /* Steering mid-turn */
+                    printf("\n[steer] > %s\n", line);
+                    fflush(stdout);
+                    ren_steer(line);
+                    continue;
+                }
+
                 g_interrupted = 0;
                 if (ren_chat(&ctx, line, host, port) < 0) {
                     ret = 1;
@@ -630,10 +733,12 @@ int main(int argc, char **argv) {
             stl_ipc_close_listener(&g_listener);
         }
         free(listen_sock_path);
+        term_restore_scroll_region();
         if (interactive) printf("\n");
         save_session(&ctx, session_path);
     }
 
+    term_restore_scroll_region();
     ren_set_abort_flag(NULL);
     ren_free(&ctx);
     free(session_path);

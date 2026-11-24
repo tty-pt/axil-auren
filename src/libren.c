@@ -646,6 +646,19 @@ static void append_message(ren_context_t *ctx, const char *role, const char *con
     json_object_put(msg);
 }
 
+static void append_steer_message(ren_context_t *ctx, const char *text) {
+    if (!text || !*text) return;
+    size_t sz = strlen(text) + 16;
+    char *buf = malloc(sz);
+    if (!buf) {
+        append_message(ctx, "user", text);
+        return;
+    }
+    snprintf(buf, sz, "[steer] %s", text);
+    append_message(ctx, "user", buf);
+    free(buf);
+}
+
 int ren_compact_default(ren_context_t *ctx, size_t target_bytes) {
     if (!ctx || ctx->history_len <= target_bytes) return 0;
 
@@ -1940,7 +1953,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         char *steer_leg = NULL;
         if (consume_steer(&steer_leg)) {
             if (cb) cb("STEER", steer_leg, "", userdata);
-            append_message(ctx, "user", steer_leg);
+            append_steer_message(ctx, steer_leg);
             free(steer_leg);
             overflow_retries = 0;
             stall_repeats = 0;

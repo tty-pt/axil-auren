@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "../framework/test_utils.h"
 #include "ttypt/libren.h"
+#include "ren-complete.h"
 #include <arpa/inet.h>
 #include <json-c/json.h>
 #include <netinet/in.h>
@@ -1711,3 +1712,141 @@ TEST(ren_chat_ex_emits_token_and_tool_result_events)
 	mock_server_stop(&srv);
 	ren_free(&ctx);
 }
+
+TEST(ren_complete_slash_commands)
+{
+	char buf[128];
+	size_t len, pos;
+	ren_completion_result_t res;
+
+	/* Unique slash command completions */
+	snprintf(buf, sizeof(buf), "/n");
+	len = pos = strlen(buf);
+	ASSERT_EQ(ren_complete_line(buf, sizeof(buf), &len, &pos, &res), 1);
+	ASSERT_STR_EQ(buf, "/new");
+	ASSERT_EQ(len, 4);
+	ASSERT_EQ(pos, 4);
+	ASSERT_EQ(res.changed, 1);
+
+	snprintf(buf, sizeof(buf), "/q");
+	len = pos = strlen(buf);
+	ASSERT_EQ(ren_complete_line(buf, sizeof(buf), &len, &pos, &res), 1);
+	ASSERT_STR_EQ(buf, "/quit");
+
+	snprintf(buf, sizeof(buf), "/re");
+	len = pos = strlen(buf);
+	ASSERT_EQ(ren_complete_line(buf, sizeof(buf), &len, &pos, &res), 1);
+	ASSERT_STR_EQ(buf, "/reset");
+
+	snprintf(buf, sizeof(buf), "/st");
+	len = pos = strlen(buf);
+	ASSERT_EQ(ren_complete_line(buf, sizeof(buf), &len, &pos, &res), 1);
+	ASSERT_STR_EQ(buf, "/status");
+
+	/* Ambiguous '/' lists all built-in slash commands without mutating buf */
+	snprintf(buf, sizeof(buf), "/");
+	len = pos = 1;
+	int mc = ren_complete_line(buf, sizeof(buf), &len, &pos, &res);
+	ASSERT_EQ(mc, 5);
+	ASSERT_EQ(res.changed, 0);
+	ASSERT_STR_EQ(buf, "/");
+	ASSERT_TRUE(strstr(res.matches, "/new") != NULL);
+	ASSERT_TRUE(strstr(res.matches, "/quit") != NULL);
+	ASSERT_TRUE(strstr(res.matches, "/reset") != NULL);
+	ASSERT_TRUE(strstr(res.matches, "/status") != NULL);
+}
+
+TEST(ren_complete_file_paths_and_lcp)
+{
+	char tmpl[] = "/tmp/ren_comp_XXXXXX";
+	char *dir = mkdtemp(tmpl);
+	ASSERT_NOT_NULL(dir);
+
+	char p[512];
+	FILE *f;
+	snprintf(p, sizeof(p), "%s/alpha_one.txt", dir);
+	f = fopen(p, "w"); ASSERT_NOT_NULL(f); fclose(f);
+	snprintf(p, sizeof(p), "%s/alpha_two.txt", dir);
+	f = fopen(p, "w"); ASSERT_NOT_NULL(f); fclose(f);
+	snprintf(p, sizeof(p), "%s/beta.c", dir);
+	f = fopen(p, "w"); ASSERT_NOT_NULL(f); fclose(f);
+	snprintf(p, sizeof(p), "%s/.secret", dir);
+	f = fopen(p, "w"); ASSERT_NOT_NULL(f); fclose(f);
+	snprintf(p, sizeof(p), "%s/sub", dir);
+	ASSERT_EQ(mkdir(p, 0700), 0);
+
+	char buf[512];
+	size_t len, pos;
+	ren_completion_result_t res;
+
+	/* 1. Ambiguous file prefix extends to LCP ("alpha_") first */
+	snprintf(buf, sizeof(buf), "read %s/al", dir);
+	len = pos = strlen(buf);
+	int mc = ren_complete_line(buf, sizeof(buf), &len, &pos, &res);
+	ASSERT_EQ(mc, 2);
+	ASSERT_EQ(res.changed, 1);
+	char expected[512];
+	snprintf(expected, sizeof(expected), "read %s/alpha_", dir);
+	ASSERT_STR_EQ(buf, expected);
+
+	/* 2. Second tab on LCP does not mutate buf and reports sorted candidates */
+	mc = ren_complete_line(buf, sizeof(buf), &len, &pos, &res);
+	ASSERT_EQ(mc, 2);
+	ASSERT_EQ(res.changed, 0);
+	ASSERT_STR_EQ(res.matches, "alpha_one.txt alpha_two.txt");
+
+	/* 3. Unique file match appends trailing space and preserves mid-line suffix */
+	snprintf(buf, sizeof(buf), "open %s/be please", dir);
+	len = strlen(buf);
+	pos = (size_t)(strstr(buf, " please") - buf);
+	mc = ren_complete_line(buf, sizeof(buf), &len, &pos, &res);
+	ASSERT_EQ(mc, 1);
+	ASSERT_EQ(res.changed, 1);
+	/* Already followed by ' ', so no double space */
+	snprintf(expected, sizeof(expected), "open %s/beta.c please", dir);
+	ASSERT_STR_EQ(buf, expected);
+
+	/* 4. Unique directory match appends trailing '/' */
+	snprintf(buf, sizeof(buf), "ls %s/su", dir);
+	len = pos = strlen(buf);
+	mc = ren_complete_line(buf, sizeof(buf), &len, &pos, &res);
+	ASSERT_EQ(mc, 1);
+	snprintf(expected, sizeof(expected), "ls %s/sub/", dir);
+	ASSERT_STR_EQ(buf, expected);
+
+	/* 5. Hidden files excluded unless '.' prefix given */
+	snprintf(buf, sizeof(buf), "cat %s/", dir);
+	len = pos = strlen(buf);
+	mc = ren_complete_line(buf, sizeof(buf), &len, &pos, &res);
+	ASSERT_EQ(mc, 4); /* alpha_one, alpha_two, beta.c, sub/ (not .secret) */
+	ASSERT_TRUE(strstr(res.matches, ".secret") == NULL);
+	ASSERT_TRUE(strstr(res.matches, "sub/") != NULL);
+
+	snprintf(buf, sizeof(buf), "cat %s/.se", dir);
+	len = pos = strlen(buf);
+	mc = ren_complete_line(buf, sizeof(buf), &len, &pos, &res);
+	ASSERT_EQ(mc, 1);
+	snprintf(expected, sizeof(expected), "cat %s/.secret ", dir);
+	ASSERT_STR_EQ(buf, expected);
+
+	/* Cleanup */
+	snprintf(p, sizeof(p), "%s/alpha_one.txt", dir); unlink(p);
+	snprintf(p, sizeof(p), "%s/alpha_two.txt", dir); unlink(p);
+	snprintf(p, sizeof(p), "%s/beta.c", dir); unlink(p);
+	snprintf(p, sizeof(p), "%s/.secret", dir); unlink(p);
+	snprintf(p, sizeof(p), "%s/sub", dir); rmdir(p);
+	rmdir(dir);
+}
+
+TEST(ren_format_status_tsv)
+{
+	char out[256];
+	int n = ren_format_status(out, sizeof(out), 0, "fast", 4000, 1000000);
+	ASSERT_TRUE(n > 0);
+	ASSERT_STR_EQ(out, "STATUS\tidle\tfast\t1000\t1000000\t4000\n");
+
+	n = ren_format_status(out, sizeof(out), 1, "gemini\tpro\n", 8192, 200000);
+	ASSERT_TRUE(n > 0);
+	ASSERT_STR_EQ(out, "STATUS\tbusy\tgemini pro \t2048\t200000\t8192\n");
+}
+

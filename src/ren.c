@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <ttypt/stele.h>
 #include "ttypt/libren.h"
+#include "ren-complete.h"
 
 /* ANSI VT100 / Terminal Escape Sequences */
 #define ANSI_RESET          "\033[0m"
@@ -755,11 +756,26 @@ int main(int argc, char **argv) {
                             req[--n] = '\0';
                         }
                         if (n > 0) {
-                            int is_steer = (strncmp(req, "STEER\t", 6) == 0 || strncmp(req, "/steer ", 7) == 0);
-                            int is_stop  = (strcmp(req, "STOP") == 0 || strcmp(req, "/stop") == 0);
-                            int is_reset = (strcmp(req, "/new") == 0 || strcmp(req, "/reset") == 0);
+                            int is_steer  = (strncmp(req, "STEER\t", 6) == 0 || strncmp(req, "/steer ", 7) == 0);
+                            int is_stop   = (strcmp(req, "STOP") == 0 || strcmp(req, "/stop") == 0);
+                            int is_reset  = (strcmp(req, "/new") == 0 || strcmp(req, "/reset") == 0);
+                            int is_status = (strcmp(req, "STATUS") == 0 || strcmp(req, "/status") == 0);
 
-                            if (is_steer) {
+                            if (is_status) {
+                                join_finished_worker(0);
+                                pthread_mutex_lock(&g_turn_mtx);
+                                int active = g_turn_active;
+                                pthread_mutex_unlock(&g_turn_mtx);
+                                char sbuf[256];
+                                int sn = ren_format_status(sbuf, sizeof(sbuf), active,
+                                                           resolve_active_model(),
+                                                           ctx.history_len,
+                                                           resolve_max_context_tokens());
+                                if (sn > 0) {
+                                    (void)stl_sock_send(cli, sbuf, (size_t)sn, 0);
+                                }
+                                stl_sock_close(cli);
+                            } else if (is_steer) {
                                 const char *stext = (strncmp(req, "STEER\t", 6) == 0) ? (req + 6) : (req + 7);
                                 while (*stext == ' ' || *stext == '\t') stext++;
 
@@ -877,6 +893,24 @@ int main(int argc, char **argv) {
                         history_add(submit_line);
 
                         if (strcmp(submit_line, "/quit") == 0 || strcmp(submit_line, "/exit") == 0) break;
+                        if (strcmp(submit_line, "/status") == 0) {
+                            pthread_mutex_lock(&g_turn_mtx);
+                            int active = g_turn_active;
+                            pthread_mutex_unlock(&g_turn_mtx);
+                            char sbuf[256];
+                            if (ren_format_status(sbuf, sizeof(sbuf), active,
+                                                  resolve_active_model(),
+                                                  ctx.history_len,
+                                                  resolve_max_context_tokens()) > 0) {
+                                if (g_scroll_region_active) {
+                                    printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
+                                }
+                                printf("%s", sbuf);
+                                fflush(stdout);
+                            }
+                            need_prompt = 1;
+                            continue;
+                        }
                         if (strcmp(submit_line, "/new") == 0 || strcmp(submit_line, "/reset") == 0) {
                             ren_reset(&ctx);
                             save_session(&ctx, session_path);
@@ -931,6 +965,19 @@ int main(int argc, char **argv) {
                             fprintf(stderr, "[ren] Error: Failed to start chat worker thread\n");
                         }
                         need_prompt = 1;
+                        continue;
+                    } else if (c == '\t') {
+                        /* Tab completion for slash commands and file paths */
+                        ren_completion_result_t cres;
+                        int mc = ren_complete_line(edit_buf, sizeof(edit_buf), &edit_len, &edit_pos, &cres);
+                        if (mc > 1 && !cres.changed && cres.matches[0]) {
+                            if (g_scroll_region_active) {
+                                printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
+                            }
+                            printf("%s\n", cres.matches);
+                            fflush(stdout);
+                        }
+                        render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
                         continue;
                     } else if (c == 127 || c == '\b') {
                         /* Backspace */
@@ -1076,6 +1123,21 @@ int main(int argc, char **argv) {
                     }
                     if (nread == 0) { need_prompt = 1; continue; }
                     if (strcmp(line, "/quit") == 0 || strcmp(line, "/exit") == 0) break;
+                    if (strcmp(line, "/status") == 0) {
+                        pthread_mutex_lock(&g_turn_mtx);
+                        int active = g_turn_active;
+                        pthread_mutex_unlock(&g_turn_mtx);
+                        char sbuf[256];
+                        if (ren_format_status(sbuf, sizeof(sbuf), active,
+                                              resolve_active_model(),
+                                              ctx.history_len,
+                                              resolve_max_context_tokens()) > 0) {
+                            printf("%s", sbuf);
+                            fflush(stdout);
+                        }
+                        need_prompt = 1;
+                        continue;
+                    }
                     if (strcmp(line, "/new") == 0 || strcmp(line, "/reset") == 0) {
                         ren_reset(&ctx);
                         save_session(&ctx, session_path);

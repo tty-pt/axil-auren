@@ -17,7 +17,7 @@ LDLIBS-auren-chat-Windows := -lws2_32
 
 libaxil-auren-obj-y := src/libauren.o src/auren-engine.o src/auren-registry.o src/openai_embed.o src/openai_chat.o src/auren-collections.o src/systemone.o src/systemone-choice.o src/auren-upstream.o
 libren-obj-y :=
-ren-obj-y :=
+ren-obj-y := src/ren-complete.o
 libaxil-auren-obj-y-Linux := src/vulkan.o
 libaxil-auren-obj-y-Darwin := src/metal.o
 

@@ -6,7 +6,7 @@ TEST_SRC := $(wildcard unit/core/*.c edge/*.c stress/*.c)
 
 FRAMEWORK_SRC := framework/test_utils.c
 MOCK_SRC := mocks/llama_mock.c mocks/gguf_mock.c mocks/corm_mock.c mocks/vulkan_mock.c mocks/engine_mock.c mocks/xy_mock.c
-LIB_SRC := libauren.o auren-registry.o systemone-choice.o auren-upstream.o libren.o ren-reflex.o
+LIB_SRC := libauren.o auren-registry.o systemone-choice.o auren-upstream.o libren.o ren-reflex.o ren-complete.o
 MAIN_SRC := test_main.c
 
 ALL_SRC := $(MAIN_SRC) $(FRAMEWORK_SRC) $(MOCK_SRC) $(TEST_SRC)
@@ -42,6 +42,9 @@ libren.o: ../src/libren.c
 
 ren-reflex.o: ../mods/reflex/ren-reflex.c
 	$(CC) $(CFLAGS) -I./mocks -c -o $@ $<
+
+ren-complete.o: ../src/ren-complete.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 run: $(TARGET)
 	@T=$$(mktemp -d); HOME=$$T ./$(TARGET); R=$$?; rm -rf $$T; exit $$R

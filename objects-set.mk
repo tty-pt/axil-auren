@@ -11,3 +11,4 @@ CFLAGS-systemone-choice-o := -fPIC
 CFLAGS-auren-upstream-o := -fPIC
 CFLAGS-vulkan-o := -fPIC
 CFLAGS-ren-o :=
+CFLAGS-ren-complete-o :=

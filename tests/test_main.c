@@ -12,6 +12,8 @@ main(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 
+	setenv("REN_NO_PROJECT_CONTEXT", "1", 1);
+
 	mock_llama_init();
 	mock_gguf_init();
 	mock_corm_init();

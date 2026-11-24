@@ -1526,3 +1526,121 @@ TEST(ren_clause_comma_boundary_no_midphrase_cut)
 	mock_server_stop(&srv);
 	ren_free(&ctx);
 }
+
+static int mock_schema_tool(const char *args, char **out_result)
+{
+	*out_result = strdup(args);
+	return 0;
+}
+
+TEST(ren_tool_schema_emitted_in_tools_array)
+{
+	signal(SIGPIPE, SIG_IGN);
+	ren_context_t ctx;
+	ren_init(&ctx);
+
+	const char *custom_schema =
+		"{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}";
+	ren_register_tool_with_schema("custom_tool", "custom_tool <path>", custom_schema, mock_schema_tool);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 1), 0);
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n"
+		"data: [DONE]\n\n";
+	mock_server_launch(&srv);
+
+	int rc = ren_chat(&ctx, "hi", "127.0.0.1", srv.port);
+	mock_server_join(&srv);
+	ASSERT_EQ(rc, 0);
+
+	ASSERT_NOT_NULL(srv.req_bodies[0]);
+	ASSERT_NOT_NULL(strstr(srv.req_bodies[0], "\"name\":\"custom_tool\""));
+	ASSERT_NOT_NULL(strstr(srv.req_bodies[0], "\"required\":[\"path\"]"));
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}
+
+#define xy_install fs_xy_install
+#include "../../../mods/fs/ren-fs.c"
+#undef xy_install
+
+#define xy_install bash_xy_install
+#include "../../../mods/bash/ren-bash.c"
+#undef xy_install
+
+TEST(ren_call_tool_read_json_offset_limit)
+{
+	ren_register_tool_with_schema("read", "read <path>", READ_SCHEMA, read_file);
+
+	char tmpfile[] = "/tmp/ren_test_read_XXXXXX";
+	int fd = mkstemp(tmpfile);
+	ASSERT_TRUE(fd >= 0);
+	const char *lines = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+	(void)write(fd, lines, strlen(lines));
+	close(fd);
+
+	/* Call read with offset=2, limit=2 */
+	char req[256];
+	snprintf(req, sizeof(req), "{\"path\":\"%s\",\"offset\":2,\"limit\":2}", tmpfile);
+	char *out = NULL;
+	int rc = ren_call_tool("read", req, &out);
+	unlink(tmpfile);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_NOT_NULL(out);
+	ASSERT_STR_EQ(out, "line 2\nline 3\n");
+	free(out);
+}
+
+TEST(ren_call_tool_edit_batch_json)
+{
+	ren_register_tool_with_schema("edit", "edit <path>", EDIT_SCHEMA, edit_file);
+	ren_register_tool_with_schema("read", "read <path>", READ_SCHEMA, read_file);
+
+	char tmpfile[] = "/tmp/ren_test_edit_XXXXXX";
+	int fd = mkstemp(tmpfile);
+	ASSERT_TRUE(fd >= 0);
+	const char *content = "alpha beta gamma delta";
+	(void)write(fd, content, strlen(content));
+	close(fd);
+
+	/* Call edit with batch edits array */
+	char req[512];
+	snprintf(req, sizeof(req),
+		"{\"path\":\"%s\",\"edits\":[{\"oldText\":\"alpha\",\"newText\":\"AAA\"},{\"oldText\":\"gamma\",\"newText\":\"CCC\"}]}",
+		tmpfile);
+	char *out = NULL;
+	int rc = ren_call_tool("edit", req, &out);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_NOT_NULL(out);
+	ASSERT_STR_EQ(out, "OK");
+	free(out);
+
+	char rreq[256];
+	snprintf(rreq, sizeof(rreq), "{\"path\":\"%s\"}", tmpfile);
+	char *final_content = NULL;
+	rc = ren_call_tool("read", rreq, &final_content);
+	unlink(tmpfile);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_NOT_NULL(final_content);
+	ASSERT_STR_EQ(final_content, "AAA beta CCC delta");
+	free(final_content);
+}
+
+TEST(ren_call_tool_bash_json_command)
+{
+	ren_register_tool_with_schema("bash", "bash <command>", BASH_SCHEMA, exec_bash);
+
+	const char *req = "{\"command\":\"echo ren_bash_ok\"}";
+	char *out = NULL;
+	int rc = ren_call_tool("bash", req, &out);
+	ASSERT_EQ(rc, 0);
+	ASSERT_NOT_NULL(out);
+	ASSERT_NOT_NULL(strstr(out, "ren_bash_ok"));
+	free(out);
+}

@@ -286,7 +286,7 @@ npm-test: npm-build
 # ren modules
 mm_prefix := $(shell for d in ../libmm ${PREFIX} ${HOME}/.local /usr/local /usr; do [ -f "$$d/include/ttypt/mm.h" ] && { [ -f "$$d/lib/libmm.${SO}" ] || [ -f "$$d/lib64/libmm.${SO}" ]; } && echo "$$d" && break; done || true)
 REN_CORE_MODS := mods/fs/ren-fs.${SO} mods/bash/ren-bash.${SO} mods/reflex/ren-reflex.${SO}
-REN_MODS := ${REN_CORE_MODS}
+REN_MODS := ${REN_CORE_MODS} mods/nvim/ren-nvim.${SO}
 MOD_RPATH-Linux := -Wl,-rpath,'$$ORIGIN/..' -Wl,-rpath,'$$ORIGIN/../../lib'
 
 mods/fs/ren-fs.${SO}: mods/fs/ren-fs.c include/ttypt/libren.h lib/libren.${SO}
@@ -300,6 +300,10 @@ mods/bash/ren-bash.${SO}: mods/bash/ren-bash.c include/ttypt/libren.h lib/libren
 mods/reflex/ren-reflex.${SO}: mods/reflex/ren-reflex.c include/ttypt/libren.h lib/libren.${SO}
 	@mkdir -p mods/reflex
 	$(cc) $(CFLAGS) -fPIC -shared -o $@ mods/reflex/ren-reflex.c $(LDFLAGS) -Llib -lren -lstele ${MOD_RPATH-${uname}}
+
+mods/nvim/ren-nvim.${SO}: mods/nvim/ren-nvim.c include/ttypt/libren.h lib/libren.${SO}
+	@mkdir -p mods/nvim
+	$(cc) $(CFLAGS) -fPIC -shared -o $@ mods/nvim/ren-nvim.c $(LDFLAGS) -Llib -lren -lstele -ljson-c ${MOD_RPATH-${uname}}
 
 all: ${REN_MODS}
 

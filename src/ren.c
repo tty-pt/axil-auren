@@ -181,6 +181,7 @@ static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
     } else {
         printf("\033[7;36m[%s | %s | %s]\033[0m > ", model_name, tok_buf, k_buf);
     }
+    printf("\033[u");
     fflush(stdout);
 }
 

@@ -56,6 +56,7 @@ static int g_num_context_fns = 0;
 static ren_compact_func g_compactor_fn = NULL;
 static volatile sig_atomic_t *g_abort_flag = NULL;
 static void (*g_pre_output_cb)(void) = NULL;
+static const ren_ui_driver_t *g_ui_driver = NULL;
 
 static pthread_mutex_t g_ctrl_mtx = PTHREAD_MUTEX_INITIALIZER;
 static stl_wake_t g_wake = { STL_INVALID_SOCKET, STL_INVALID_SOCKET };
@@ -392,6 +393,14 @@ void ren_set_abort_flag(volatile sig_atomic_t *flag) {
 
 void ren_set_pre_output_cb(void (*fn)(void)) {
     g_pre_output_cb = fn;
+}
+
+void ren_register_ui_driver(const ren_ui_driver_t *driver) {
+    g_ui_driver = driver;
+}
+
+const ren_ui_driver_t *ren_get_ui_driver(void) {
+    return g_ui_driver;
 }
 
 static stl_socket_t ensure_wake_pipe_locked(void) {
@@ -1033,6 +1042,9 @@ static void append_tool_result_turn(ren_context_t *ctx, const char *tname, const
 
     printf("[tool-result] %.240s%s\n", tres, strlen(tres) > 240 ? "..." : "");
     fflush(stdout);
+    if (cb) {
+        cb("TOOL_RESULT", tname, tres, userdata);
+    }
 
     if (is_native) {
         struct json_object *tmsg = json_object_new_object();
@@ -1616,6 +1628,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                                     const char *ds = json_object_get_string(co);
                                     if (ds && ds[0] != '\0') {
                                         if (g_pre_output_cb) g_pre_output_cb();
+                                        if (cb) cb("TOKEN", ds, "", userdata);
                                         printf("%s", ds);
                                         fflush(stdout);
                                         buf_append(&full_response, &full_len, &full_cap, ds, strlen(ds));

@@ -39,9 +39,15 @@ typedef char *(*ren_context_func)(void);
  * or <0 on error (also falls back safely on overflow). */
 typedef int (*ren_compact_func)(ren_context_t *ctx, size_t target_bytes, const char *reason);
 
-/* Streaming event callback for socket IPC / TTS streaming:
- * event_type: "TIER0", "TOOL", "CLAUSE", "DONE" */
+/* Streaming event callback for socket IPC / TTS streaming / UI drivers:
+ * event_type: "TIER0", "TOKEN", "TOOL", "TOOL_RESULT", "CLAUSE", "STEER", "DONE" */
 typedef void (*ren_event_cb)(const char *event_type, const char *arg1, const char *arg2, void *userdata);
+
+typedef struct ren_ui_driver {
+    const char *name;
+    int (*run_interactive)(ren_context_t *ctx, const char *host, int port,
+                           const char *session_path);
+} ren_ui_driver_t;
 
 typedef struct ren_module {
     const char *name;
@@ -74,6 +80,8 @@ void ren_set_model(const char *model);
 void ren_discover_project_context(void);
 void ren_set_abort_flag(volatile sig_atomic_t *flag);
 void ren_set_pre_output_cb(void (*fn)(void));
+void ren_register_ui_driver(const ren_ui_driver_t *driver);
+const ren_ui_driver_t *ren_get_ui_driver(void);
 void ren_steer(const char *text);
 void ren_abort(void);
 int ren_is_interrupted(void);

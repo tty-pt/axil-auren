@@ -1644,3 +1644,70 @@ TEST(ren_call_tool_bash_json_command)
 	ASSERT_NOT_NULL(strstr(out, "ren_bash_ok"));
 	free(out);
 }
+
+static int mock_ui_run(ren_context_t *ctx, const char *host, int port, const char *sp)
+{
+	(void)ctx; (void)host; (void)port; (void)sp;
+	return 42;
+}
+
+TEST(ren_ui_driver_registration)
+{
+	const ren_ui_driver_t *prev = ren_get_ui_driver();
+	ren_ui_driver_t drv = { .name = "mock-ncurses", .run_interactive = mock_ui_run };
+	ren_register_ui_driver(&drv);
+
+	const ren_ui_driver_t *got = ren_get_ui_driver();
+	ASSERT_NOT_NULL(got);
+	ASSERT_STR_EQ(got->name, "mock-ncurses");
+	ASSERT_EQ(got->run_interactive(NULL, "127.0.0.1", 4242, NULL), 42);
+
+	ren_register_ui_driver(prev);
+}
+
+struct token_capture {
+	char tokens[512];
+	int  tool_results;
+};
+
+static void token_capture_cb(const char *ev, const char *a1, const char *a2, void *ud)
+{
+	struct token_capture *tc = ud;
+	if (strcmp(ev, "TOKEN") == 0 && a1) {
+		strncat(tc->tokens, a1, sizeof(tc->tokens) - strlen(tc->tokens) - 1);
+	} else if (strcmp(ev, "TOOL_RESULT") == 0 && a1 && a2) {
+		tc->tool_results++;
+	}
+}
+
+TEST(ren_chat_ex_emits_token_and_tool_result_events)
+{
+	signal(SIGPIPE, SIG_IGN);
+	ren_context_t ctx;
+	ren_init(&ctx);
+	ren_register_tool("bash", "bash <command>", mock_bash_tool);
+
+	struct mock_http_server srv;
+	ASSERT_EQ(mock_server_start(&srv, 2), 0);
+	srv.responses[0] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_ev1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"args\\\":\\\"echo hi\\\"}\"}}]}}]}\n\n"
+		"data: [DONE]\n\n";
+	srv.responses[1] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\n"
+		"data: {\"choices\":[{\"delta\":{\"content\":\"world!\"}}]}\n\n"
+		"data: [DONE]\n\n";
+	mock_server_launch(&srv);
+
+	struct token_capture tc = {0};
+	int rc = ren_chat_ex(&ctx, "test", "127.0.0.1", srv.port, token_capture_cb, &tc);
+	mock_server_join(&srv);
+
+	ASSERT_EQ(rc, 0);
+	ASSERT_EQ(tc.tool_results, 1);
+	ASSERT_STR_EQ(tc.tokens, "Hello world!");
+
+	mock_server_stop(&srv);
+	ren_free(&ctx);
+}

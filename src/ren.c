@@ -579,8 +579,12 @@ int main(int argc, char **argv) {
     load_session(&ctx, session_path);
 
     int ret = 0;
+    const ren_ui_driver_t *ui = ren_get_ui_driver();
     if (prompt && !listen_arg) {
         ret = ren_chat(&ctx, prompt, host, port) < 0 ? 1 : 0;
+        save_session(&ctx, session_path);
+    } else if (ui && ui->run_interactive && !listen_arg) {
+        ret = ui->run_interactive(&ctx, host, port, session_path);
         save_session(&ctx, session_path);
     } else {
         int interactive = isatty(STDIN_FILENO);

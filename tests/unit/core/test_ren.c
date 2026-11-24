@@ -1063,7 +1063,7 @@ TEST(ren_steer_mid_tool_batch_skips_remaining_preserves_ids)
 			if (tid && strcmp(tid, "call_t2") == 0 && content && strcmp(content, "Skipped: user steered.") == 0)
 				found_t2_skip = 1;
 		} else if (role && strcmp(role, "user") == 0 && content &&
-		           strcmp(content, "Stop after first tool and answer now") == 0) {
+		           strcmp(content, "[steer] Stop after first tool and answer now") == 0) {
 			found_steer_user = 1;
 		}
 	}

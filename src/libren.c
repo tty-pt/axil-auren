@@ -1315,7 +1315,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
         char *steer_txt = NULL;
         if (consume_steer(&steer_txt)) {
             if (cb) cb("STEER", steer_txt, "", userdata);
-            append_message(ctx, "user", steer_txt);
+            append_steer_message(ctx, steer_txt);
             free(steer_txt);
             overflow_retries = 0;
             stall_repeats = 0;
@@ -1456,7 +1456,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                 free(headers);
                 stl_sock_close(sock);
                 if (cb) cb("STEER", steer_hdr, "", userdata);
-                append_message(ctx, "user", steer_hdr);
+                append_steer_message(ctx, steer_hdr);
                 free(steer_hdr);
                 overflow_retries = 0;
                 stall_repeats = 0;
@@ -1512,7 +1512,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             char *steer_err = NULL;
             if (consume_steer(&steer_err)) {
                 if (cb) cb("STEER", steer_err, "", userdata);
-                append_message(ctx, "user", steer_err);
+                append_steer_message(ctx, steer_err);
                 free(steer_err);
                 overflow_retries = 0;
                 stall_repeats = 0;
@@ -1752,7 +1752,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             free_tcs(tcs, n_tcs);
             free(full_response);
             if (cb) cb("STEER", steer_stream, "", userdata);
-            append_message(ctx, "user", steer_stream);
+            append_steer_message(ctx, steer_stream);
             free(steer_stream);
             overflow_retries = 0;
             stall_repeats = 0;
@@ -1857,7 +1857,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             char *steer_tools = NULL;
             if (consume_steer(&steer_tools)) {
                 if (cb) cb("STEER", steer_tools, "", userdata);
-                append_message(ctx, "user", steer_tools);
+                append_steer_message(ctx, steer_tools);
                 free(steer_tools);
                 overflow_retries = 0;
                 stall_repeats = 0;
@@ -1888,7 +1888,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
             if (consume_steer(&steer_fin)) {
                 free(full_response);
                 if (cb) cb("STEER", steer_fin, "", userdata);
-                append_message(ctx, "user", steer_fin);
+                append_steer_message(ctx, steer_fin);
                 free(steer_fin);
                 overflow_retries = 0;
                 stall_repeats = 0;

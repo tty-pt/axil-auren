@@ -55,6 +55,7 @@ static ren_context_func g_context_fns[MAX_CONTEXT_PROVIDERS];
 static int g_num_context_fns = 0;
 static ren_compact_func g_compactor_fn = NULL;
 static volatile sig_atomic_t *g_abort_flag = NULL;
+static void (*g_pre_output_cb)(void) = NULL;
 
 static pthread_mutex_t g_ctrl_mtx = PTHREAD_MUTEX_INITIALIZER;
 static stl_wake_t g_wake = { STL_INVALID_SOCKET, STL_INVALID_SOCKET };
@@ -387,6 +388,10 @@ void ren_register_compactor(ren_compact_func fn) {
 
 void ren_set_abort_flag(volatile sig_atomic_t *flag) {
     g_abort_flag = flag;
+}
+
+void ren_set_pre_output_cb(void (*fn)(void)) {
+    g_pre_output_cb = fn;
 }
 
 static stl_socket_t ensure_wake_pipe_locked(void) {
@@ -989,6 +994,7 @@ static int pop_spoken_clause(char *unspoken, bool is_first, char *out_clause, si
 static void append_tool_result_turn(ren_context_t *ctx, const char *tname, const char *targs,
                                     const char *tool_call_id, ren_event_cb cb, void *userdata,
                                     int is_native) {
+    if (g_pre_output_cb) g_pre_output_cb();
     fprintf(stderr, "[tool] %s %s\n", tname, targs);
     if (cb) {
         cb("TOOL", tname, targs, userdata);
@@ -1596,6 +1602,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                                 if (co && json_object_is_type(co, json_type_string)) {
                                     const char *ds = json_object_get_string(co);
                                     if (ds && ds[0] != '\0') {
+                                        if (g_pre_output_cb) g_pre_output_cb();
                                         printf("%s", ds);
                                         fflush(stdout);
                                         buf_append(&full_response, &full_len, &full_cap, ds, strlen(ds));

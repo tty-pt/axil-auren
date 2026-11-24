@@ -279,19 +279,27 @@ static int join_finished_worker(int abort_if_running) {
     return 0;
 }
 
+static volatile sig_atomic_t g_turn_output_started = 0;
+
+static void on_pre_output(void) {
+    if (!g_turn_output_started) {
+        g_turn_output_started = 1;
+        if (g_scroll_region_active) {
+            printf("\033[%d;1H\n", g_term_rows - 1);
+            fflush(stdout);
+        }
+    }
+}
+
 static void *ren_chat_worker(void *arg) {
     (void)arg;
     stl_socket_t cli = g_turn_cli;
     g_interrupted = 0;
+    g_turn_output_started = 0;
     if (cli != STL_INVALID_SOCKET) {
         ren_chat_ex(g_turn_ctx, g_turn_prompt, g_turn_host, g_turn_port, sock_event_cb, &cli);
         stl_sock_close(cli);
     } else {
-        if (g_scroll_region_active) {
-            /* Position cursor inside scroll region before streaming begins */
-            printf("\033[%d;1H\n", g_term_rows - 1);
-            fflush(stdout);
-        }
         ren_chat(g_turn_ctx, g_turn_prompt, g_turn_host, g_turn_port);
     }
     g_interrupted = 0;
@@ -460,6 +468,7 @@ int main(int argc, char **argv) {
             stl_stop_on_signal(on_sigwinch);
 #endif
             ren_set_abort_flag(&g_interrupted);
+            ren_set_pre_output_cb(on_pre_output);
             term_enable_scroll_region();
         }
 
@@ -796,6 +805,7 @@ int main(int argc, char **argv) {
     }
 
     term_restore_scroll_region();
+    ren_set_pre_output_cb(NULL);
     ren_set_abort_flag(NULL);
     ren_free(&ctx);
     free(session_path);

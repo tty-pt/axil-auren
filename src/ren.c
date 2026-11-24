@@ -173,15 +173,13 @@ static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
         snprintf(tok_buf, sizeof(tok_buf), "~%zu/%zu tok", tokens, max_tokens);
     }
 
-    /* Save cursor, move to row rows col 1, clear line, draw status, restore cursor */
-    printf("\033[s");
+    /* Move to row rows col 1, clear line, draw status, and leave cursor after '>' */
     printf("\033[%d;1H\033[2K", g_term_rows);
     if (turn_busy) {
         printf("\033[7;33m[%s | %s | %s | busy]\033[0m \033[1m[steer]\033[0m > ", model_name, tok_buf, k_buf);
     } else {
         printf("\033[7;36m[%s | %s | %s]\033[0m > ", model_name, tok_buf, k_buf);
     }
-    printf("\033[u");
     fflush(stdout);
 }
 
@@ -289,6 +287,11 @@ static void *ren_chat_worker(void *arg) {
         ren_chat_ex(g_turn_ctx, g_turn_prompt, g_turn_host, g_turn_port, sock_event_cb, &cli);
         stl_sock_close(cli);
     } else {
+        if (g_scroll_region_active) {
+            /* Position cursor inside scroll region before streaming begins */
+            printf("\033[%d;1H\n", g_term_rows - 1);
+            fflush(stdout);
+        }
         ren_chat(g_turn_ctx, g_turn_prompt, g_turn_host, g_turn_port);
     }
     g_interrupted = 0;

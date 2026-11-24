@@ -122,6 +122,27 @@ static void term_restore_scroll_region(void) {
     }
 }
 
+static const char *g_active_model = NULL;
+static const char *resolve_active_model(void) {
+    if (g_active_model && *g_active_model) return g_active_model;
+    const char *env_m = getenv("REN_MODEL");
+    if (env_m && *env_m) return env_m;
+    return "fast";
+}
+
+static size_t resolve_max_context_tokens(void) {
+    const char *env_mc = getenv("REN_MAX_CONTEXT_TOKENS");
+    if (env_mc && *env_mc) {
+        long long val = atoll(env_mc);
+        if (val > 0) return (size_t)val;
+    }
+    const char *m = resolve_active_model();
+    if (strstr(m, "hydrogen") || strcmp(m, "fast") == 0) return 1000000;
+    if (strstr(m, "gemini") || strstr(m, "flash")) return 1000000;
+    if (strstr(m, "gpt-4") || strstr(m, "claude")) return 200000;
+    return 32768; /* Default for local models */
+}
+
 static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
     if (!g_scroll_region_active) {
         printf("%s> ", turn_busy ? "[steer] " : "");
@@ -131,6 +152,8 @@ static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
 
     size_t bytes = ctx ? ctx->history_len : 0;
     size_t tokens = bytes / 4;
+    size_t max_tokens = resolve_max_context_tokens();
+    const char *model_name = resolve_active_model();
 
     char k_buf[32];
     if (bytes >= 1024 * 1024) {
@@ -141,23 +164,24 @@ static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
         snprintf(k_buf, sizeof(k_buf), "%zuB", bytes);
     }
 
-    char tok_buf[32];
-    if (tokens >= 1000) {
-        snprintf(tok_buf, sizeof(tok_buf), "~%.1fk tok", (double)tokens / 1000.0);
+    char tok_buf[64];
+    if (max_tokens >= 1000000) {
+        snprintf(tok_buf, sizeof(tok_buf), "~%.1fk/%.1fM tok", (double)tokens / 1000.0, (double)max_tokens / 1000000.0);
+    } else if (max_tokens >= 1000) {
+        snprintf(tok_buf, sizeof(tok_buf), "~%.1fk/%.0fk tok", (double)tokens / 1000.0, (double)max_tokens / 1000.0);
     } else {
-        snprintf(tok_buf, sizeof(tok_buf), "~%zu tok", tokens);
+        snprintf(tok_buf, sizeof(tok_buf), "~%zu/%zu tok", tokens, max_tokens);
     }
 
     /* Save cursor, move to row rows col 1, clear line, draw status, restore cursor */
     printf("\033[s");
     printf("\033[%d;1H\033[2K", g_term_rows);
     if (turn_busy) {
-        printf("\033[7;33m[%s | %s | busy]\033[0m \033[1m[steer]\033[0m > ", tok_buf, k_buf);
+        printf("\033[7;33m[%s | %s | %s | busy]\033[0m \033[1m[steer]\033[0m > ", model_name, tok_buf, k_buf);
     } else {
-        printf("\033[7;36m[%s | %s]\033[0m > ", tok_buf, k_buf);
+        printf("\033[7;36m[%s | %s | %s]\033[0m > ", model_name, tok_buf, k_buf);
     }
     fflush(stdout);
-    /* In interactive input waiting, we position the cursor right after the prompt */
 }
 
 static char *default_session_name(void) {
@@ -256,14 +280,18 @@ static int join_finished_worker(int abort_if_running) {
     return 0;
 }
 
-static void *ren_ipc_worker(void *arg) {
+static void *ren_chat_worker(void *arg) {
     (void)arg;
     stl_socket_t cli = g_turn_cli;
     g_interrupted = 0;
-    ren_chat_ex(g_turn_ctx, g_turn_prompt, g_turn_host, g_turn_port, sock_event_cb, &cli);
+    if (cli != STL_INVALID_SOCKET) {
+        ren_chat_ex(g_turn_ctx, g_turn_prompt, g_turn_host, g_turn_port, sock_event_cb, &cli);
+        stl_sock_close(cli);
+    } else {
+        ren_chat(g_turn_ctx, g_turn_prompt, g_turn_host, g_turn_port);
+    }
     g_interrupted = 0;
     save_session(g_turn_ctx, session_path);
-    stl_sock_close(cli);
 
     pthread_mutex_lock(&g_turn_mtx);
     g_turn_cli = STL_INVALID_SOCKET;
@@ -381,6 +409,7 @@ int main(int argc, char **argv) {
         load_mod_spec(mod_specs[i]);
     }
     if (cli_model && *cli_model) {
+        g_active_model = cli_model;
         ren_set_model(cli_model);
     }
 
@@ -652,7 +681,7 @@ int main(int argc, char **argv) {
                                     g_turn_finished_pending = 0;
                                     pthread_mutex_unlock(&g_turn_mtx);
 
-                                    if (pthread_create(&g_turn_tid, NULL, ren_ipc_worker, NULL) != 0) {
+                                    if (pthread_create(&g_turn_tid, NULL, ren_chat_worker, NULL) != 0) {
                                         pthread_mutex_lock(&g_turn_mtx);
                                         g_turn_active = 0;
                                         g_turn_cli = STL_INVALID_SOCKET;
@@ -709,22 +738,42 @@ int main(int argc, char **argv) {
 
                 if (busy) {
                     /* Steering mid-turn */
-                    printf("\n[steer] > %s\n", line);
+                    if (g_scroll_region_active) {
+                        printf("\033[%d;1H\n", g_term_rows - 1);
+                    }
+                    printf("\033[1;33m[steer] > %s\033[0m\n", line);
                     fflush(stdout);
                     ren_steer(line);
+                    need_prompt = (interactive && !stdin_closed);
                     continue;
                 }
 
-                g_interrupted = 0;
+                /* Print prompt in session scrollback */
                 if (g_scroll_region_active) {
                     printf("\033[%d;1H\n", g_term_rows - 1);
-                    fflush(stdout);
                 }
-                if (ren_chat(&ctx, line, host, port) < 0) {
-                    ret = 1;
+                printf("\033[1m> %s\033[0m\n", line);
+                fflush(stdout);
+
+                g_turn_ctx = &ctx;
+                g_turn_host = host;
+                g_turn_port = port;
+                g_turn_cli = STL_INVALID_SOCKET;
+                snprintf(g_turn_prompt, sizeof(g_turn_prompt), "%s", line);
+                setup_done_pipe();
+
+                pthread_mutex_lock(&g_turn_mtx);
+                g_turn_active = 1;
+                g_turn_finished_pending = 0;
+                pthread_mutex_unlock(&g_turn_mtx);
+
+                if (pthread_create(&g_turn_tid, NULL, ren_chat_worker, NULL) != 0) {
+                    pthread_mutex_lock(&g_turn_mtx);
+                    g_turn_active = 0;
+                    pthread_mutex_unlock(&g_turn_mtx);
+                    fprintf(stderr, "[ren] Error: Failed to start chat worker thread\n");
                 }
-                g_interrupted = 0;
-                save_session(&ctx, session_path);
+                need_prompt = (interactive && !stdin_closed);
             }
         }
         join_finished_worker(1);

@@ -15,6 +15,7 @@
 #else
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #endif
 #include <sys/stat.h>
 #include <ttypt/stele.h>
@@ -90,6 +91,98 @@ static void load_mod_spec(const char *spec) {
     free(copy);
 }
 
+#define REN_HIST_CAP 128
+static char *g_history[REN_HIST_CAP];
+static int   g_hist_count = 0;
+static int   g_hist_idx   = 0;
+
+static void history_load(void) {
+    char home[512];
+    stl_home_dir(home, sizeof(home));
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/.ren/history", home);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        size_t l = strlen(line);
+        while (l > 0 && (line[l - 1] == '\r' || line[l - 1] == '\n')) {
+            line[--l] = '\0';
+        }
+        if (l == 0) continue;
+        if (g_hist_count < REN_HIST_CAP) {
+            g_history[g_hist_count++] = strdup(line);
+        } else {
+            free(g_history[0]);
+            memmove(&g_history[0], &g_history[1], sizeof(char *) * (REN_HIST_CAP - 1));
+            g_history[REN_HIST_CAP - 1] = strdup(line);
+        }
+    }
+    fclose(f);
+}
+
+static void history_save_entry(const char *entry) {
+    if (!entry || !*entry) return;
+    char home[512];
+    stl_home_dir(home, sizeof(home));
+    char dir[1024], path[1024];
+    snprintf(dir, sizeof(dir), "%s/.ren", home);
+    stl_mkdir_p(dir);
+    snprintf(path, sizeof(path), "%s/.ren/history", home);
+    FILE *f = fopen(path, "a");
+    if (f) {
+        fprintf(f, "%s\n", entry);
+        fclose(f);
+    }
+}
+
+static void history_add(const char *entry) {
+    if (!entry || !*entry) return;
+    /* Do not duplicate immediate last entry */
+    if (g_hist_count > 0 && strcmp(g_history[g_hist_count - 1], entry) == 0) {
+        g_hist_idx = g_hist_count;
+        return;
+    }
+    if (g_hist_count < REN_HIST_CAP) {
+        g_history[g_hist_count++] = strdup(entry);
+    } else {
+        free(g_history[0]);
+        memmove(&g_history[0], &g_history[1], sizeof(char *) * (REN_HIST_CAP - 1));
+        g_history[REN_HIST_CAP - 1] = strdup(entry);
+    }
+    g_hist_idx = g_hist_count;
+    history_save_entry(entry);
+}
+
+#ifndef _WIN32
+static struct termios g_orig_termios;
+static int g_raw_mode_active = 0;
+
+static void term_disable_raw_mode(void) {
+    if (g_raw_mode_active) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig_termios);
+        g_raw_mode_active = 0;
+    }
+}
+
+static int term_enable_raw_mode(void) {
+    if (!isatty(STDIN_FILENO)) return 0;
+    if (g_raw_mode_active) return 0;
+    if (tcgetattr(STDIN_FILENO, &g_orig_termios) < 0) return -1;
+    struct termios raw = g_orig_termios;
+    /* Disable canonical mode, local echo, and extended input processing */
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) return -1;
+    g_raw_mode_active = 1;
+    return 0;
+}
+#else
+static int term_enable_raw_mode(void) { return 0; }
+static void term_disable_raw_mode(void) {}
+#endif
+
 static volatile sig_atomic_t g_winch_received = 0;
 static int g_term_rows = 24;
 static int g_term_cols = 80;
@@ -154,11 +247,11 @@ static size_t resolve_max_context_tokens(void) {
     return 32768; /* Default for local models */
 }
 
-static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
+static int render_status_bar(const ren_context_t *ctx, int turn_busy) {
     if (!g_scroll_region_active) {
         printf("%s> ", turn_busy ? "[steer] " : "");
         fflush(stdout);
-        return;
+        return 2;
     }
 
     size_t bytes = ctx ? ctx->history_len : 0;
@@ -186,11 +279,28 @@ static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
 
     /* Move to row rows col 1, clear line, draw status, and leave cursor after '>' */
     printf(ANSI_GOTO_LINE_FMT ANSI_CLEAR_LINE, g_term_rows);
+    int bar_len = 0;
     if (turn_busy) {
         printf(ANSI_INVERSE_YELLOW "[%s | %s | %s | busy]" ANSI_RESET " "
                ANSI_BOLD "[steer]" ANSI_RESET " > ", model_name, tok_buf, k_buf);
+        bar_len = snprintf(NULL, 0, "[%s | %s | %s | busy] [steer] > ", model_name, tok_buf, k_buf);
     } else {
         printf(ANSI_INVERSE_CYAN "[%s | %s | %s]" ANSI_RESET " > ", model_name, tok_buf, k_buf);
+        bar_len = snprintf(NULL, 0, "[%s | %s | %s] > ", model_name, tok_buf, k_buf);
+    }
+    fflush(stdout);
+    return bar_len > 0 ? bar_len : 2;
+}
+
+static void render_line_edit(const ren_context_t *ctx, int turn_busy, const char *buf, size_t len, size_t pos) {
+    int prompt_cols = render_status_bar(ctx, turn_busy);
+    if (len > 0) {
+        fwrite(buf, 1, len, stdout);
+    }
+    /* Move cursor to pos */
+    int cursor_col = prompt_cols + 1 + (int)pos;
+    if (g_scroll_region_active) {
+        printf("\033[%d;%dH", g_term_rows, cursor_col);
     }
     fflush(stdout);
 }
@@ -481,7 +591,9 @@ int main(int argc, char **argv) {
 #endif
             ren_set_abort_flag(&g_interrupted);
             ren_set_pre_output_cb(on_pre_output);
+            history_load();
             term_enable_scroll_region();
+            term_enable_raw_mode();
         }
 
         int have_listener = 0;
@@ -515,6 +627,11 @@ int main(int argc, char **argv) {
 
         char *line = NULL;
         size_t cap = 0;
+        char edit_buf[4096] = {0};
+        size_t edit_len = 0;
+        size_t edit_pos = 0;
+        int hist_nav = -1;
+        char hist_stash[4096] = {0};
         int stdin_closed = 0;
 #ifdef _WIN32
         if (have_listener && !interactive) {
@@ -539,7 +656,11 @@ int main(int argc, char **argv) {
             pthread_mutex_unlock(&g_turn_mtx);
 
             if (need_prompt) {
-                render_status_bar(&ctx, turn_busy);
+                if (g_raw_mode_active) {
+                    render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                } else {
+                    render_status_bar(&ctx, turn_busy);
+                }
                 need_prompt = 0;
             }
 
@@ -726,79 +847,274 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            /* 2. Handle interactive STDIN line in terminal */
+            /* 2. Handle interactive STDIN in terminal */
             if (handle_stdin) {
-                ssize_t nread = ren_read_line(&line, &cap, stdin);
-                if (nread <= 0) {
-                    if (errno == EINTR && g_interrupted) {
-                        clearerr(stdin);
-                        g_interrupted = 0;
-                        if (interactive) printf("\n");
-                        need_prompt = !stdin_closed;
+                if (g_raw_mode_active) {
+                    char c = 0;
+                    ssize_t nr = read(STDIN_FILENO, &c, 1);
+                    if (nr <= 0) {
+                        if (have_listener) { stdin_closed = 1; continue; }
+                        break;
+                    }
+
+                    if (c == '\r' || c == '\n') {
+                        edit_buf[edit_len] = '\0';
+                        char submit_line[4096];
+                        snprintf(submit_line, sizeof(submit_line), "%s", edit_buf);
+                        edit_len = 0;
+                        edit_pos = 0;
+                        hist_nav = -1;
+                        hist_stash[0] = '\0';
+
+                        if (submit_line[0] == '\0') {
+                            need_prompt = 1;
+                            continue;
+                        }
+                        history_add(submit_line);
+
+                        if (strcmp(submit_line, "/quit") == 0 || strcmp(submit_line, "/exit") == 0) break;
+                        if (strcmp(submit_line, "/new") == 0 || strcmp(submit_line, "/reset") == 0) {
+                            ren_reset(&ctx);
+                            save_session(&ctx, session_path);
+                            if (g_scroll_region_active) {
+                                printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
+                            }
+                            printf("[session cleared]\n");
+                            fflush(stdout);
+                            need_prompt = 1;
+                            continue;
+                        }
+
+                        pthread_mutex_lock(&g_turn_mtx);
+                        int busy = g_turn_active;
+                        pthread_mutex_unlock(&g_turn_mtx);
+
+                        if (busy) {
+                            /* Steering mid-turn */
+                            if (g_scroll_region_active) {
+                                printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
+                            }
+                            printf(ANSI_BOLD_YELLOW "[steer] > %s" ANSI_RESET "\n", submit_line);
+                            fflush(stdout);
+                            ren_steer(submit_line);
+                            need_prompt = 1;
+                            continue;
+                        }
+
+                        /* Print prompt in session scrollback */
+                        if (g_scroll_region_active) {
+                            printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
+                        }
+                        printf(ANSI_BOLD "> %s" ANSI_RESET "\n", submit_line);
+                        fflush(stdout);
+
+                        g_turn_ctx = &ctx;
+                        g_turn_host = host;
+                        g_turn_port = port;
+                        g_turn_cli = STL_INVALID_SOCKET;
+                        snprintf(g_turn_prompt, sizeof(g_turn_prompt), "%s", submit_line);
+                        setup_done_pipe();
+
+                        pthread_mutex_lock(&g_turn_mtx);
+                        g_turn_active = 1;
+                        g_turn_finished_pending = 0;
+                        pthread_mutex_unlock(&g_turn_mtx);
+
+                        if (pthread_create(&g_turn_tid, NULL, ren_chat_worker, NULL) != 0) {
+                            pthread_mutex_lock(&g_turn_mtx);
+                            g_turn_active = 0;
+                            pthread_mutex_unlock(&g_turn_mtx);
+                            fprintf(stderr, "[ren] Error: Failed to start chat worker thread\n");
+                        }
+                        need_prompt = 1;
+                        continue;
+                    } else if (c == 127 || c == '\b') {
+                        /* Backspace */
+                        if (edit_pos > 0) {
+                            memmove(edit_buf + edit_pos - 1, edit_buf + edit_pos, edit_len - edit_pos + 1);
+                            edit_len--;
+                            edit_pos--;
+                            render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                        }
+                        continue;
+                    } else if (c == 1) {
+                        /* Ctrl+A -> Home */
+                        edit_pos = 0;
+                        render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                        continue;
+                    } else if (c == 5) {
+                        /* Ctrl+E -> End */
+                        edit_pos = edit_len;
+                        render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                        continue;
+                    } else if (c == 21) {
+                        /* Ctrl+U -> Clear line before cursor */
+                        if (edit_pos > 0) {
+                            memmove(edit_buf, edit_buf + edit_pos, edit_len - edit_pos + 1);
+                            edit_len -= edit_pos;
+                            edit_pos = 0;
+                            render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                        }
+                        continue;
+                    } else if (c == 11) {
+                        /* Ctrl+K -> Clear line after cursor */
+                        edit_buf[edit_pos] = '\0';
+                        edit_len = edit_pos;
+                        render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                        continue;
+                    } else if (c == 3) {
+                        /* Ctrl+C */
+                        if (turn_busy) {
+                            ren_abort();
+                        } else if (edit_len > 0) {
+                            edit_len = 0;
+                            edit_pos = 0;
+                            hist_nav = -1;
+                            render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                        }
+                        continue;
+                    } else if (c == 4) {
+                        /* Ctrl+D -> Exit on empty buffer */
+                        if (edit_len == 0 && !turn_busy) break;
+                        continue;
+                    } else if (c == 27) {
+                        /* Escape sequence */
+                        char seq[3] = {0};
+                        if (read(STDIN_FILENO, &seq[0], 1) == 1 && read(STDIN_FILENO, &seq[1], 1) == 1) {
+                            if (seq[0] == '[') {
+                                if (seq[1] == 'A') {
+                                    /* Up Arrow: History previous */
+                                    if (g_hist_count > 0) {
+                                        if (hist_nav == -1) {
+                                            edit_buf[edit_len] = '\0';
+                                            snprintf(hist_stash, sizeof(hist_stash), "%s", edit_buf);
+                                            hist_nav = g_hist_count - 1;
+                                        } else if (hist_nav > 0) {
+                                            hist_nav--;
+                                        }
+                                        if (hist_nav >= 0 && hist_nav < g_hist_count) {
+                                            snprintf(edit_buf, sizeof(edit_buf), "%s", g_history[hist_nav]);
+                                            edit_len = strlen(edit_buf);
+                                            edit_pos = edit_len;
+                                            render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                                        }
+                                    }
+                                } else if (seq[1] == 'B') {
+                                    /* Down Arrow: History next */
+                                    if (hist_nav != -1) {
+                                        if (hist_nav + 1 < g_hist_count) {
+                                            hist_nav++;
+                                            snprintf(edit_buf, sizeof(edit_buf), "%s", g_history[hist_nav]);
+                                            edit_len = strlen(edit_buf);
+                                            edit_pos = edit_len;
+                                        } else {
+                                            hist_nav = -1;
+                                            snprintf(edit_buf, sizeof(edit_buf), "%s", hist_stash);
+                                            edit_len = strlen(edit_buf);
+                                            edit_pos = edit_len;
+                                        }
+                                        render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                                    }
+                                } else if (seq[1] == 'C') {
+                                    /* Right Arrow */
+                                    if (edit_pos < edit_len) {
+                                        edit_pos++;
+                                        render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                                    }
+                                } else if (seq[1] == 'D') {
+                                    /* Left Arrow */
+                                    if (edit_pos > 0) {
+                                        edit_pos--;
+                                        render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                                    }
+                                } else if (seq[1] == 'H') {
+                                    /* Home */
+                                    edit_pos = 0;
+                                    render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                                } else if (seq[1] == 'F') {
+                                    /* End */
+                                    edit_pos = edit_len;
+                                    render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                                } else if (seq[1] == '3') {
+                                    /* Delete key: \033[3~ */
+                                    char tilde = 0;
+                                    if (read(STDIN_FILENO, &tilde, 1) == 1 && tilde == '~') {
+                                        if (edit_pos < edit_len) {
+                                            memmove(edit_buf + edit_pos, edit_buf + edit_pos + 1, edit_len - edit_pos);
+                                            edit_len--;
+                                            render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    } else if ((unsigned char)c >= 32) {
+                        /* Normal printable character */
+                        if (edit_len + 1 < sizeof(edit_buf) - 1) {
+                            memmove(edit_buf + edit_pos + 1, edit_buf + edit_pos, edit_len - edit_pos + 1);
+                            edit_buf[edit_pos] = c;
+                            edit_len++;
+                            edit_pos++;
+                            render_line_edit(&ctx, turn_busy, edit_buf, edit_len, edit_pos);
+                        }
                         continue;
                     }
-                    if (have_listener) {
-                        stdin_closed = 1;
+                } else {
+                    /* Fallback non-interactive mode: plain fgets/read_line */
+                    ssize_t nread = ren_read_line(&line, &cap, stdin);
+                    if (nread <= 0) {
+                        if (have_listener) { stdin_closed = 1; continue; }
+                        break;
+                    }
+                    while (nread > 0 && (line[nread - 1] == '\n' || line[nread - 1] == '\r')) {
+                        line[--nread] = '\0';
+                    }
+                    if (nread == 0) { need_prompt = 1; continue; }
+                    if (strcmp(line, "/quit") == 0 || strcmp(line, "/exit") == 0) break;
+                    if (strcmp(line, "/new") == 0 || strcmp(line, "/reset") == 0) {
+                        ren_reset(&ctx);
+                        save_session(&ctx, session_path);
+                        printf("[session cleared]\n");
+                        need_prompt = 1;
                         continue;
                     }
-                    break;
-                }
 
-                while (nread > 0 && (line[nread - 1] == '\n' || line[nread - 1] == '\r')) {
-                    line[--nread] = '\0';
-                }
-                need_prompt = (interactive && !stdin_closed);
-                if (nread == 0) continue;
-                if (strcmp(line, "/quit") == 0 || strcmp(line, "/exit") == 0) break;
-                if (strcmp(line, "/new") == 0 || strcmp(line, "/reset") == 0) {
-                    ren_reset(&ctx);
-                    save_session(&ctx, session_path);
-                    printf("[session cleared]\n");
-                    continue;
-                }
-
-                pthread_mutex_lock(&g_turn_mtx);
-                int busy = g_turn_active;
-                pthread_mutex_unlock(&g_turn_mtx);
-
-                if (busy) {
-                    /* Steering mid-turn */
-                    if (g_scroll_region_active) {
-                        printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
-                    }
-                    printf(ANSI_BOLD_YELLOW "[steer] > %s" ANSI_RESET "\n", line);
-                    fflush(stdout);
-                    ren_steer(line);
-                    need_prompt = (interactive && !stdin_closed);
-                    continue;
-                }
-
-                /* Print prompt in session scrollback */
-                if (g_scroll_region_active) {
-                    printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
-                }
-                printf(ANSI_BOLD "> %s" ANSI_RESET "\n", line);
-                fflush(stdout);
-
-                g_turn_ctx = &ctx;
-                g_turn_host = host;
-                g_turn_port = port;
-                g_turn_cli = STL_INVALID_SOCKET;
-                snprintf(g_turn_prompt, sizeof(g_turn_prompt), "%s", line);
-                setup_done_pipe();
-
-                pthread_mutex_lock(&g_turn_mtx);
-                g_turn_active = 1;
-                g_turn_finished_pending = 0;
-                pthread_mutex_unlock(&g_turn_mtx);
-
-                if (pthread_create(&g_turn_tid, NULL, ren_chat_worker, NULL) != 0) {
                     pthread_mutex_lock(&g_turn_mtx);
-                    g_turn_active = 0;
+                    int busy = g_turn_active;
                     pthread_mutex_unlock(&g_turn_mtx);
-                    fprintf(stderr, "[ren] Error: Failed to start chat worker thread\n");
+
+                    if (busy) {
+                        printf(ANSI_BOLD_YELLOW "[steer] > %s" ANSI_RESET "\n", line);
+                        fflush(stdout);
+                        ren_steer(line);
+                        need_prompt = 1;
+                        continue;
+                    }
+
+                    printf(ANSI_BOLD "> %s" ANSI_RESET "\n", line);
+                    fflush(stdout);
+
+                    g_turn_ctx = &ctx;
+                    g_turn_host = host;
+                    g_turn_port = port;
+                    g_turn_cli = STL_INVALID_SOCKET;
+                    snprintf(g_turn_prompt, sizeof(g_turn_prompt), "%s", line);
+                    setup_done_pipe();
+
+                    pthread_mutex_lock(&g_turn_mtx);
+                    g_turn_active = 1;
+                    g_turn_finished_pending = 0;
+                    pthread_mutex_unlock(&g_turn_mtx);
+
+                    if (pthread_create(&g_turn_tid, NULL, ren_chat_worker, NULL) != 0) {
+                        pthread_mutex_lock(&g_turn_mtx);
+                        g_turn_active = 0;
+                        pthread_mutex_unlock(&g_turn_mtx);
+                        fprintf(stderr, "[ren] Error: Failed to start chat worker thread\n");
+                    }
+                    need_prompt = 1;
                 }
-                need_prompt = (interactive && !stdin_closed);
             }
         }
         join_finished_worker(1);
@@ -811,11 +1127,13 @@ int main(int argc, char **argv) {
             stl_ipc_close_listener(&g_listener);
         }
         free(listen_sock_path);
+        term_disable_raw_mode();
         term_restore_scroll_region();
         if (interactive) printf("\n");
         save_session(&ctx, session_path);
     }
 
+    term_disable_raw_mode();
     term_restore_scroll_region();
     ren_set_pre_output_cb(NULL);
     ren_set_abort_flag(NULL);

@@ -24,6 +24,7 @@
 typedef struct {
     char *name;
     char *usage;
+    char *schema_json;
     ren_tool_func fn;
 } ren_tool_entry_t;
 
@@ -103,11 +104,13 @@ static void rebuild_system_prompt(void) {
     }
 }
 
-void ren_register_tool(const char *name, const char *usage, ren_tool_func fn) {
+void ren_register_tool_with_schema(const char *name, const char *usage, const char *schema_json, ren_tool_func fn) {
     for (int i = 0; i < g_num_tools; i++) {
         if (strcmp(g_tools[i].name, name) == 0) {
             free(g_tools[i].usage);
+            free(g_tools[i].schema_json);
             g_tools[i].usage = strdup(usage);
+            g_tools[i].schema_json = (schema_json && *schema_json) ? strdup(schema_json) : NULL;
             g_tools[i].fn = fn;
             rebuild_system_prompt();
             return;
@@ -116,9 +119,14 @@ void ren_register_tool(const char *name, const char *usage, ren_tool_func fn) {
     if (g_num_tools >= MAX_TOOLS) return;
     g_tools[g_num_tools].name = strdup(name);
     g_tools[g_num_tools].usage = strdup(usage);
+    g_tools[g_num_tools].schema_json = (schema_json && *schema_json) ? strdup(schema_json) : NULL;
     g_tools[g_num_tools].fn = fn;
     g_num_tools++;
     rebuild_system_prompt();
+}
+
+void ren_register_tool(const char *name, const char *usage, ren_tool_func fn) {
+    ren_register_tool_with_schema(name, usage, NULL, fn);
 }
 
 void ren_register_prompt_hint(const char *hint) {
@@ -597,18 +605,25 @@ static struct json_object *build_chat_request_json(ren_context_t *ctx, const cha
             json_object_object_add(fn, "name", json_object_new_string(g_tools[i].name));
             json_object_object_add(fn, "description", json_object_new_string(g_tools[i].usage));
 
-            struct json_object *params = json_object_new_object();
-            json_object_object_add(params, "type", json_object_new_string("object"));
-            struct json_object *props = json_object_new_object();
-            struct json_object *args_prop = json_object_new_object();
-            json_object_object_add(args_prop, "type", json_object_new_string("string"));
-            json_object_object_add(args_prop, "description", json_object_new_string(g_tools[i].usage));
-            json_object_object_add(props, "args", args_prop);
-            json_object_object_add(params, "properties", props);
+            struct json_object *params = NULL;
+            if (g_tools[i].schema_json && *g_tools[i].schema_json) {
+                params = json_tokener_parse(g_tools[i].schema_json);
+            }
+            if (!params || !json_object_is_type(params, json_type_object)) {
+                if (params) json_object_put(params);
+                params = json_object_new_object();
+                json_object_object_add(params, "type", json_object_new_string("object"));
+                struct json_object *props = json_object_new_object();
+                struct json_object *args_prop = json_object_new_object();
+                json_object_object_add(args_prop, "type", json_object_new_string("string"));
+                json_object_object_add(args_prop, "description", json_object_new_string(g_tools[i].usage));
+                json_object_object_add(props, "args", args_prop);
+                json_object_object_add(params, "properties", props);
 
-            struct json_object *required = json_object_new_array();
-            json_object_array_add(required, json_object_new_string("args"));
-            json_object_object_add(params, "required", required);
+                struct json_object *required = json_object_new_array();
+                json_object_array_add(required, json_object_new_string("args"));
+                json_object_object_add(params, "required", required);
+            }
 
             json_object_object_add(fn, "parameters", params);
             json_object_object_add(entry, "function", fn);
@@ -623,8 +638,14 @@ static struct json_object *build_chat_request_json(ren_context_t *ctx, const cha
     return req;
 }
 
-static char *unpack_tool_args(const char *raw_args) {
+static char *unpack_tool_args(const char *tool_name, const char *raw_args) {
     if (!raw_args || !*raw_args) return strdup("");
+    /* If tool has an explicit custom schema, preserve the JSON payload */
+    for (int i = 0; i < g_num_tools; i++) {
+        if (strcmp(g_tools[i].name, tool_name) == 0 && g_tools[i].schema_json) {
+            return strdup(raw_args);
+        }
+    }
     struct json_object *obj = json_tokener_parse(raw_args);
     if (obj && json_object_is_type(obj, json_type_object)) {
         static const char *const keys[] = {
@@ -907,7 +928,7 @@ static char *build_native_turn_sig(const ren_tc_accum_t *tcs, int n_tcs) {
     if (!sig) return NULL;
     sig[0] = '\0';
     for (int i = 0; i < n_tcs; i++) {
-        char *ua = unpack_tool_args(tcs[i].args);
+        char *ua = unpack_tool_args(tcs[i].name, tcs[i].args);
         if (i > 0) buf_append(&sig, &len, &cap, "\x1e", 1);
         buf_append(&sig, &len, &cap, tcs[i].name, strlen(tcs[i].name));
         buf_append(&sig, &len, &cap, "\x1f", 1);
@@ -1581,7 +1602,7 @@ int ren_chat_ex(ren_context_t *ctx, const char *prompt, const char *host, int po
                     }
                     break;
                 }
-                char *targs = unpack_tool_args(tcs[i].args);
+                char *targs = unpack_tool_args(tcs[i].name, tcs[i].args);
                 append_tool_result_turn(ctx, tcs[i].name, targs ? targs : "",
                                         tcs[i].id, cb, userdata, 1);
                 free(targs);

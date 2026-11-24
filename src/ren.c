@@ -15,6 +15,8 @@
 #else
 #include <unistd.h>
 #endif
+#include <dirent.h>
+#include <sys/stat.h>
 #include <ttypt/stele.h>
 #include "ttypt/libren.h"
 
@@ -220,6 +222,218 @@ static ssize_t ren_read_line(char **buf, size_t *cap, FILE *fp) {
     return (ssize_t)len;
 }
 
+static char *read_file_text(const char *path, size_t max_bytes) {
+    if (!path || !*path) return NULL;
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0) {
+        fclose(f);
+        return NULL;
+    }
+    size_t to_read = (max_bytes > 0 && (size_t)sz > max_bytes) ? max_bytes : (size_t)sz;
+    char *buf = malloc(to_read + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t n = fread(buf, 1, to_read, f);
+    buf[n] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static void discover_skills_in_dir(const char *skills_dir, char **skills_buf, size_t *skills_len, size_t *skills_cap) {
+    DIR *d = opendir(skills_dir);
+    if (!d) return;
+
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char skill_file[1024];
+        snprintf(skill_file, sizeof(skill_file), "%s/%s/SKILL.md", skills_dir, de->d_name);
+        char *text = read_file_text(skill_file, 8192);
+        if (!text) continue;
+
+        /* Parse frontmatter between --- and --- */
+        char name[128] = {0};
+        char desc[1024] = {0};
+        char *fm_start = strstr(text, "---");
+        if (fm_start) {
+            char *fm_end = strstr(fm_start + 3, "---");
+            if (fm_end) {
+                char *line = fm_start + 3;
+                while (line < fm_end) {
+                    while (line < fm_end && (*line == '\r' || *line == '\n' || *line == ' ')) line++;
+                    if (line >= fm_end) break;
+                    char *next = strchr(line, '\n');
+                    if (!next || next > fm_end) next = fm_end;
+                    if (strncmp(line, "name:", 5) == 0) {
+                        char *val = line + 5;
+                        while (val < next && (*val == ' ' || *val == '\t')) val++;
+                        size_t nlen = (size_t)(next - val);
+                        while (nlen > 0 && (val[nlen - 1] == '\r' || val[nlen - 1] == ' ')) nlen--;
+                        if (nlen < sizeof(name)) {
+                            memcpy(name, val, nlen);
+                            name[nlen] = '\0';
+                        }
+                    } else if (strncmp(line, "description:", 12) == 0) {
+                        char *val = line + 12;
+                        while (val < next && (*val == ' ' || *val == '\t')) val++;
+                        size_t dlen = (size_t)(next - val);
+                        while (dlen > 0 && (val[dlen - 1] == '\r' || val[dlen - 1] == ' ')) dlen--;
+                        if (dlen < sizeof(desc)) {
+                            memcpy(desc, val, dlen);
+                            desc[dlen] = '\0';
+                        }
+                    }
+                    line = next + 1;
+                }
+            }
+        }
+        free(text);
+
+        if (!name[0]) {
+            snprintf(name, sizeof(name), "%.127s", de->d_name);
+        }
+
+        /* Append skill summary */
+        char entry[2048];
+        int elen = snprintf(entry, sizeof(entry), "  - skill: %s\n    file: %s\n    description: %s\n",
+                            name, skill_file, desc[0] ? desc : "No description provided.");
+        if (elen > 0) {
+            if (*skills_len + (size_t)elen + 1 > *skills_cap) {
+                while (*skills_len + (size_t)elen + 1 > *skills_cap) *skills_cap *= 2;
+                char *nb = realloc(*skills_buf, *skills_cap);
+                if (nb) *skills_buf = nb;
+            }
+            if (*skills_buf) {
+                memcpy(*skills_buf + *skills_len, entry, (size_t)elen);
+                *skills_len += (size_t)elen;
+                (*skills_buf)[*skills_len] = '\0';
+            }
+        }
+    }
+    closedir(d);
+}
+
+static void discover_project_context(void) {
+    char cwd[1024];
+    if (!getcwd(cwd, sizeof(cwd))) return;
+
+    /* Search upward from cwd for .ren/prompt.md, REN.md, AGENTS.md, or skills */
+    char cur[1024];
+    snprintf(cur, sizeof(cur), "%s", cwd);
+
+    char prompt_md_path[2048] = {0};
+    char agents_md_path[2048] = {0};
+    char skills_dir[2048] = {0};
+
+    while (1) {
+        char test_path[2048];
+
+        /* Check .ren/prompt.md or REN.md */
+        if (!prompt_md_path[0]) {
+            snprintf(test_path, sizeof(test_path), "%s/.ren/prompt.md", cur);
+            if (access(test_path, R_OK) == 0) {
+                snprintf(prompt_md_path, sizeof(prompt_md_path), "%s", test_path);
+            } else {
+                snprintf(test_path, sizeof(test_path), "%s/REN.md", cur);
+                if (access(test_path, R_OK) == 0) {
+                    snprintf(prompt_md_path, sizeof(prompt_md_path), "%s", test_path);
+                }
+            }
+        }
+
+        /* Check AGENTS.md */
+        if (!agents_md_path[0]) {
+            snprintf(test_path, sizeof(test_path), "%s/AGENTS.md", cur);
+            if (access(test_path, R_OK) == 0) {
+                snprintf(agents_md_path, sizeof(agents_md_path), "%s", test_path);
+            }
+        }
+
+        /* Check .agents/skills */
+        if (!skills_dir[0]) {
+            snprintf(test_path, sizeof(test_path), "%s/.agents/skills", cur);
+            if (access(test_path, R_OK) == 0) {
+                snprintf(skills_dir, sizeof(skills_dir), "%s", test_path);
+            }
+        }
+
+        /* Stop if we reached root */
+        if (strcmp(cur, "/") == 0 || strcmp(cur, ".") == 0 || !cur[0]) break;
+        char *slash = strrchr(cur, '/');
+        if (!slash) break;
+        if (slash == cur) {
+            cur[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+    }
+
+    /* 1. If .ren/prompt.md exists, set it as system prompt / identity */
+    if (prompt_md_path[0]) {
+        char *txt = read_file_text(prompt_md_path, 65536);
+        if (txt) {
+            ren_set_system_prompt(txt);
+            free(txt);
+        }
+    }
+
+    /* 2. If AGENTS.md exists, register as prompt hint */
+    if (agents_md_path[0]) {
+        char *txt = read_file_text(agents_md_path, 65536);
+        if (txt) {
+            ren_register_prompt_hint(txt);
+            free(txt);
+        }
+    }
+
+    /* 3. If skills exist, discover and list them */
+    size_t scap = 4096, slen = 0;
+    char *sbuf = malloc(scap);
+    if (sbuf) {
+        sbuf[0] = '\0';
+        const char *hdr = "<available_skills>\nUse the 'read' tool to inspect a skill's SKILL.md when relevant:\n";
+        size_t hlen = strlen(hdr);
+        memcpy(sbuf, hdr, hlen);
+        slen = hlen;
+        sbuf[slen] = '\0';
+
+        if (skills_dir[0]) {
+            discover_skills_in_dir(skills_dir, &sbuf, &slen, &scap);
+        }
+
+        char home[512];
+        stl_home_dir(home, sizeof(home));
+        char user_skills[1024];
+        snprintf(user_skills, sizeof(user_skills), "%s/.config/agents/skills", home);
+        if (access(user_skills, R_OK) == 0) {
+            discover_skills_in_dir(user_skills, &sbuf, &slen, &scap);
+        }
+
+        const char *tail = "</available_skills>";
+        size_t tlen = strlen(tail);
+        if (slen + tlen + 1 > scap) {
+            scap = slen + tlen + 1;
+            char *nb = realloc(sbuf, scap);
+            if (nb) sbuf = nb;
+        }
+        if (sbuf) {
+            memcpy(sbuf + slen, tail, tlen);
+            slen += tlen;
+            sbuf[slen] = '\0';
+            if (slen > hlen + tlen) {
+                ren_register_prompt_hint(sbuf);
+            }
+        }
+        free(sbuf);
+    }
+}
+
 int main(int argc, char **argv) {
     stl_ignore_pipe();
     const char *host = "127.0.0.1";
@@ -293,6 +507,10 @@ int main(int argc, char **argv) {
 
     ren_context_t ctx;
     ren_init(&ctx);
+
+    /* Discover project-level .ren/prompt.md, AGENTS.md, and skills */
+    discover_project_context();
+
     for (int i = 0; i < n_mod_specs; i++) {
         load_mod_spec(mod_specs[i]);
     }

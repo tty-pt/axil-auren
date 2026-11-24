@@ -64,6 +64,7 @@ int ren_compact_default(ren_context_t *ctx, size_t target_bytes);
 
 /* Tool, prompt-hint, Tier-0, context, compactor, and interrupt registration */
 void ren_register_tool(const char *name, const char *usage, ren_tool_func fn);
+void ren_register_tool_with_schema(const char *name, const char *usage, const char *schema_json, ren_tool_func fn);
 void ren_register_prompt_hint(const char *hint);
 void ren_register_tier0(ren_tier0_func fn);
 void ren_register_context_provider(ren_context_func fn);

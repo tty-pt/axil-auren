@@ -20,6 +20,17 @@
 #include <ttypt/stele.h>
 #include "ttypt/libren.h"
 
+/* ANSI VT100 / Terminal Escape Sequences */
+#define ANSI_RESET          "\033[0m"
+#define ANSI_BOLD           "\033[1m"
+#define ANSI_BOLD_YELLOW    "\033[1;33m"
+#define ANSI_INVERSE_YELLOW "\033[7;33m"
+#define ANSI_INVERSE_CYAN   "\033[7;36m"
+#define ANSI_CLEAR_LINE     "\033[2K"
+#define ANSI_RESET_SCROLL   "\033[r"
+#define ANSI_GOTO_LINE_FMT  "\033[%d;1H"
+#define ANSI_SCROLL_FMT     "\033[1;%dr"
+
 static char *session_path = NULL;
 static char *listen_sock_path = NULL;
 static stl_ipc_listener_t g_listener = { STL_INVALID_SOCKET, 0, {0}, 0 };
@@ -103,9 +114,9 @@ static void term_enable_scroll_region(void) {
     update_term_size();
     if (g_term_rows > 3) {
         /* Set scrolling region from line 1 to line (rows - 1) */
-        printf("\033[1;%dr", g_term_rows - 1);
+        printf(ANSI_SCROLL_FMT, g_term_rows - 1);
         /* Move cursor to line (rows - 1), col 1 */
-        printf("\033[%d;1H", g_term_rows - 1);
+        printf(ANSI_GOTO_LINE_FMT, g_term_rows - 1);
         fflush(stdout);
         g_scroll_region_active = 1;
     }
@@ -114,9 +125,9 @@ static void term_enable_scroll_region(void) {
 static void term_restore_scroll_region(void) {
     if (g_scroll_region_active) {
         /* Reset scrolling region to full screen */
-        printf("\033[r");
+        printf(ANSI_RESET_SCROLL);
         /* Move cursor to bottom row */
-        printf("\033[%d;1H\n", g_term_rows);
+        printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows);
         fflush(stdout);
         g_scroll_region_active = 0;
     }
@@ -174,11 +185,12 @@ static void render_status_bar(const ren_context_t *ctx, int turn_busy) {
     }
 
     /* Move to row rows col 1, clear line, draw status, and leave cursor after '>' */
-    printf("\033[%d;1H\033[2K", g_term_rows);
+    printf(ANSI_GOTO_LINE_FMT ANSI_CLEAR_LINE, g_term_rows);
     if (turn_busy) {
-        printf("\033[7;33m[%s | %s | %s | busy]\033[0m \033[1m[steer]\033[0m > ", model_name, tok_buf, k_buf);
+        printf(ANSI_INVERSE_YELLOW "[%s | %s | %s | busy]" ANSI_RESET " "
+               ANSI_BOLD "[steer]" ANSI_RESET " > ", model_name, tok_buf, k_buf);
     } else {
-        printf("\033[7;36m[%s | %s | %s]\033[0m > ", model_name, tok_buf, k_buf);
+        printf(ANSI_INVERSE_CYAN "[%s | %s | %s]" ANSI_RESET " > ", model_name, tok_buf, k_buf);
     }
     fflush(stdout);
 }
@@ -285,7 +297,7 @@ static void on_pre_output(void) {
     if (!g_turn_output_started) {
         g_turn_output_started = 1;
         if (g_scroll_region_active) {
-            printf("\033[%d;1H\n", g_term_rows - 1);
+            printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
             fflush(stdout);
         }
     }
@@ -752,9 +764,9 @@ int main(int argc, char **argv) {
                 if (busy) {
                     /* Steering mid-turn */
                     if (g_scroll_region_active) {
-                        printf("\033[%d;1H\n", g_term_rows - 1);
+                        printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
                     }
-                    printf("\033[1;33m[steer] > %s\033[0m\n", line);
+                    printf(ANSI_BOLD_YELLOW "[steer] > %s" ANSI_RESET "\n", line);
                     fflush(stdout);
                     ren_steer(line);
                     need_prompt = (interactive && !stdin_closed);
@@ -763,9 +775,9 @@ int main(int argc, char **argv) {
 
                 /* Print prompt in session scrollback */
                 if (g_scroll_region_active) {
-                    printf("\033[%d;1H\n", g_term_rows - 1);
+                    printf(ANSI_GOTO_LINE_FMT "\n", g_term_rows - 1);
                 }
-                printf("\033[1m> %s\033[0m\n", line);
+                printf(ANSI_BOLD "> %s" ANSI_RESET "\n", line);
                 fflush(stdout);
 
                 g_turn_ctx = &ctx;

@@ -5,6 +5,7 @@
 #include <json-c/json.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 TEST(upstream_resolve_aliases)
 {
@@ -308,14 +309,44 @@ TEST(upstream_large_system_prompt_and_many_tool_calls)
 	ASSERT_NOT_NULL(full_json);
 	/* Verify 40KB system prompt tail marker was not truncated */
 	ASSERT_NOT_NULL(strstr(full_json, "_TAIL_MARKER"));
-	/* Verify unsigned turn 1 was degraded into a text observation while signed turn 80 kept functionCall + thoughtSignature */
+	/* Verify unsigned turn 1 was degraded into a text observation without poisoning the model role,
+	 * while signed turn 80 kept functionCall + thoughtSignature */
 	ASSERT_NOT_NULL(strstr(full_json, "Observation from `tool_num_1`"));
+	ASSERT_TRUE(strstr(full_json, "signature is unavailable") == NULL);
 	ASSERT_NOT_NULL(strstr(full_json, "tool_num_80"));
 	ASSERT_NOT_NULL(strstr(full_json, big_sig));
 
 	free(big_sys);
 	json_object_put(openai_req);
 	json_object_put(agy_req);
+}
+
+TEST(upstream_thought_signature_disk_persistence)
+{
+	char tmp_path[128];
+	snprintf(tmp_path, sizeof(tmp_path), "/tmp/test_auren_thought_sigs_%ld.tsv", (long)getpid());
+	unlink(tmp_path);
+
+	setenv("AUREN_SIG_CACHE_PATH", tmp_path, 1);
+	ASSERT_EQ(auren_upstream_init(), 0);
+
+	auren_upstream_cache_thought_sig("call_persist_1", "sig_alpha_111");
+	auren_upstream_cache_thought_sig("call_persist_2", "sig_beta_222");
+
+	/* Simulate daemon restart: wipe in-memory cache, verify miss, then reload from disk */
+	auren_upstream_shutdown();
+	char lookup[256] = {0};
+	ASSERT_EQ(auren_upstream_lookup_thought_sig("call_persist_1", lookup, sizeof(lookup)), 0);
+
+	ASSERT_EQ(auren_upstream_init(), 0);
+	ASSERT_EQ(auren_upstream_lookup_thought_sig("call_persist_1", lookup, sizeof(lookup)), 1);
+	ASSERT_STR_EQ(lookup, "sig_alpha_111");
+	ASSERT_EQ(auren_upstream_lookup_thought_sig("call_persist_2", lookup, sizeof(lookup)), 1);
+	ASSERT_STR_EQ(lookup, "sig_beta_222");
+
+	auren_upstream_shutdown();
+	unsetenv("AUREN_SIG_CACHE_PATH");
+	unlink(tmp_path);
 }
 
 TEST(upstream_agy_sse_valid_and_rejected_completions)

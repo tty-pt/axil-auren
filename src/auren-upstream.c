@@ -119,6 +119,8 @@ struct sig_cache_entry {
 
 static struct sig_cache_entry g_sig_cache[SIG_CACHE_SIZE];
 static int g_sig_cache_idx = 0;
+static char g_sig_cache_path[512] = {0};
+static int g_sig_cache_disk_lines = 0;
 static pthread_mutex_t g_sig_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_tool_call_seq = 0;
 
@@ -198,17 +200,50 @@ generate_uuid(char *out, size_t sz)
 		b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
 }
 
-void
-auren_upstream_cache_thought_sig(const char *tool_call_id, const char *sig)
+static void
+resolve_sig_cache_path(char *out, size_t sz)
 {
-	if (!tool_call_id || !tool_call_id[0] || !sig || !sig[0])
+	const char *env_path = getenv("AUREN_SIG_CACHE_PATH");
+	if (env_path) {
+		if (env_path[0] && strcmp(env_path, "none") != 0)
+			snprintf(out, sz, "%s", env_path);
+		else
+			out[0] = '\0';
 		return;
+	}
+	const char *home = getenv("HOME");
+	if (home && home[0]) {
+		snprintf(out, sz, "%s/.cache/auren/thought_sigs.tsv", home);
+		return;
+	}
+	out[0] = '\0';
+}
 
-	pthread_mutex_lock(&g_sig_lock);
+static void
+sig_cache_ensure_parent_dir(const char *path)
+{
+	char dir[512];
+	snprintf(dir, sizeof(dir), "%s", path);
+	char *slash = strrchr(dir, '/');
+	if (!slash || slash == dir)
+		return;
+	*slash = '\0';
+	/* Create grandparent (e.g. ~/.cache) if needed, then parent (e.g. ~/.cache/auren) */
+	char *parent = strrchr(dir, '/');
+	if (parent && parent != dir) {
+		*parent = '\0';
+		mkdir(dir, 0700);
+		*parent = '/';
+	}
+	mkdir(dir, 0700);
+}
+
+static void
+sig_cache_insert_locked(const char *tool_call_id, const char *sig)
+{
 	for (int i = 0; i < SIG_CACHE_SIZE; ++i) {
 		if (g_sig_cache[i].call_id[0] && strcmp(g_sig_cache[i].call_id, tool_call_id) == 0) {
 			snprintf(g_sig_cache[i].sig, sizeof(g_sig_cache[i].sig), "%s", sig);
-			pthread_mutex_unlock(&g_sig_lock);
 			return;
 		}
 	}
@@ -216,6 +251,102 @@ auren_upstream_cache_thought_sig(const char *tool_call_id, const char *sig)
 	snprintf(g_sig_cache[idx].call_id, sizeof(g_sig_cache[idx].call_id), "%s", tool_call_id);
 	snprintf(g_sig_cache[idx].sig, sizeof(g_sig_cache[idx].sig), "%s", sig);
 	g_sig_cache_idx++;
+}
+
+static void
+sig_cache_compact_locked(void)
+{
+	if (!g_sig_cache_path[0])
+		return;
+	sig_cache_ensure_parent_dir(g_sig_cache_path);
+	char tmp_path[544];
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", g_sig_cache_path);
+	int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0)
+		return;
+	FILE *f = fdopen(fd, "w");
+	if (!f) {
+		close(fd);
+		unlink(tmp_path);
+		return;
+	}
+	int written = 0;
+	for (int i = 0; i < SIG_CACHE_SIZE; ++i) {
+		if (g_sig_cache[i].call_id[0] && g_sig_cache[i].sig[0]) {
+			fprintf(f, "%s\t%s\n", g_sig_cache[i].call_id, g_sig_cache[i].sig);
+			written++;
+		}
+	}
+	if (fclose(f) == 0 && rename(tmp_path, g_sig_cache_path) == 0) {
+		g_sig_cache_disk_lines = written;
+	} else {
+		unlink(tmp_path);
+	}
+}
+
+static void
+sig_cache_load_locked(void)
+{
+	resolve_sig_cache_path(g_sig_cache_path, sizeof(g_sig_cache_path));
+	g_sig_cache_disk_lines = 0;
+	if (!g_sig_cache_path[0])
+		return;
+	FILE *f = fopen(g_sig_cache_path, "r");
+	if (!f)
+		return;
+	char *line = malloc(SIG_CACHE_SIG_MAX + 256);
+	if (!line) {
+		fclose(f);
+		return;
+	}
+	while (fgets(line, SIG_CACHE_SIG_MAX + 256, f)) {
+		char *tab = strchr(line, '\t');
+		if (!tab || tab == line)
+			continue;
+		*tab = '\0';
+		char *sig = tab + 1;
+		size_t slen = strlen(sig);
+		while (slen > 0 && (sig[slen - 1] == '\n' || sig[slen - 1] == '\r'))
+			sig[--slen] = '\0';
+		if (sig[0]) {
+			sig_cache_insert_locked(line, sig);
+			g_sig_cache_disk_lines++;
+		}
+	}
+	free(line);
+	fclose(f);
+	if (g_sig_cache_disk_lines >= SIG_CACHE_SIZE * 2)
+		sig_cache_compact_locked();
+}
+
+void
+auren_upstream_cache_thought_sig(const char *tool_call_id, const char *sig)
+{
+	if (!tool_call_id || !tool_call_id[0] || !sig || !sig[0])
+		return;
+
+	pthread_mutex_lock(&g_sig_lock);
+	sig_cache_insert_locked(tool_call_id, sig);
+	if (g_sig_cache_path[0] &&
+	    !strpbrk(tool_call_id, "\t\r\n") &&
+	    !strpbrk(sig, "\t\r\n")) {
+		if (g_sig_cache_disk_lines >= SIG_CACHE_SIZE * 2) {
+			sig_cache_compact_locked();
+		} else {
+			sig_cache_ensure_parent_dir(g_sig_cache_path);
+			int fd = open(g_sig_cache_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+			if (fd >= 0) {
+				FILE *f = fdopen(fd, "a");
+				if (f) {
+					fprintf(f, "%s\t%s\n", tool_call_id, sig);
+					fclose(f);
+					g_sig_cache_disk_lines++;
+				} else {
+					close(fd);
+				}
+			}
+		}
+	}
 	pthread_mutex_unlock(&g_sig_lock);
 }
 
@@ -638,12 +769,21 @@ auren_upstream_init(void)
 	pthread_mutex_lock(&g_auth.lock);
 	auth_load_locked();
 	pthread_mutex_unlock(&g_auth.lock);
+	pthread_mutex_lock(&g_sig_lock);
+	sig_cache_load_locked();
+	pthread_mutex_unlock(&g_sig_lock);
 	return 0;
 }
 
 void
 auren_upstream_shutdown(void)
 {
+	pthread_mutex_lock(&g_sig_lock);
+	memset(g_sig_cache, 0, sizeof(g_sig_cache));
+	g_sig_cache_idx = 0;
+	g_sig_cache_path[0] = '\0';
+	g_sig_cache_disk_lines = 0;
+	pthread_mutex_unlock(&g_sig_lock);
 	curl_global_cleanup();
 }
 
@@ -1208,12 +1348,10 @@ auren_upstream_build_antigravity_request(
 
 					if (turn_dropped) {
 						/* Gemini 3/4 rejects functionCall parts without a thoughtSignature on the first call.
-						 * Degrade unsigned historical tool calls into a placeholder text part if needed. */
-						if (json_object_array_length(parts) == 0) {
-							struct json_object *p = json_object_new_object();
-							json_object_object_add(p, "text", json_object_new_string("[Earlier tool call omitted because its signature is unavailable.]"));
-							json_object_array_add(parts, p);
-						}
+						 * Never synthesize a boilerplate model text turn here: repeating an error-like string
+						 * in the model role poisons in-context learning and causes the model to parrot it
+						 * instead of emitting function calls. Leaving `parts` empty lets append_content_turn()
+						 * skip the empty model turn while paired tool results fold into user observations. */
 					} else {
 						for (size_t tc_i = 0; tc_i < num_tc; ++tc_i) {
 							struct json_object *tc = json_object_array_get_idx(tc_arr, tc_i);

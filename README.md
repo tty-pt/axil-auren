@@ -39,11 +39,12 @@ scripts/auren-server
 ren --listen /tmp/ren.sock
 ```
 
-### `ren` Agent & Tier-0 `ren-reflex` Router
+### `ren` Agent, Modules & Tier-0 `ren-reflex` Router
 
-`libren` (`bin/ren`, `<ttypt/libren.h>`) provides a lightweight pure-C multi-turn agent loop over `/v1/chat/completions` with extensible `libxylem` modules (`ren-fs`, `ren-bash`, `ren-reflex`):
-- **Tier-0 Deterministic Reflexes (`ren-reflex.so`)**: Matches direct commands in `<1 ms` without an LLM round-trip (workspace switching, window management, media/volume, browser tab open/close, terminal launch, conversation control) in both English and Portuguese, including UTF-8 Latin diacritic folding (`área` = `area`, `próxima` = `proxima`), polite prefix stripping (`please`, `can you`, `por favor`, `podes`, etc.), and fail-open to Tier-1 LLM on questions or multi-clause utterances. Custom rules can be added via `~/.config/ren/reflex.tsv`.
-- **Upstream Tier Aliases**: Supports `very-fast`, `fast`, `smart`, and `genius` model aliases mapped via `auren-upstream.c` to local GGUF or authenticated cloud endpoints with automatic circuit breaking and session affinity.
+`libren` (`bin/ren`, `<ttypt/libren.h>`) provides a lightweight pure-C multi-turn agent loop over `/v1/chat/completions` with a pure-C line editor (history ring, Tab completion via `src/ren-complete.c`, bottom powerline prompt with live context usage, async live steering), pluggable `ren_ui_driver_t` UI events (`TOKEN`/`TOOL_RESULT`), IPC `STATUS` query, project context & `AGENTS.md`/skills discovery, and extensible `libxylem` modules:
+- **Core Modules (`mods/`)**: `mods/fs/ren-fs.c` (read/write/edit with structured JSON tool schemas), `mods/bash/ren-bash.c` (shell execution), `mods/nvim/ren-nvim.c` (Neovim RPC tools: `nvim_context`, `nvim_diagnostics`, `nvim_jump`, `nvim_reload`), and `mods/reflex/ren-reflex.c` (Tier-0 router). External modules such as `ren-mm` and `ren-jarvis` live in their owner repos and load via `REN_MOD_DIR` (see [docs/MOD_MM.md](docs/MOD_MM.md)).
+- **Tier-0 Deterministic Reflexes (`mods/reflex/ren-reflex.c`)**: Matches direct commands in `<1 ms` without an LLM round-trip (workspace switching, window management, media/volume, browser tab open/close, terminal launch, conversation control) in both English and Portuguese, including UTF-8 Latin diacritic folding (`área` = `area`, `próxima` = `proxima`), polite prefix stripping (`please`, `can you`, `por favor`, `podes`, etc.), and fail-open to Tier-1 LLM on questions or multi-clause utterances. Custom rules can be added via `~/.config/ren/reflex.tsv`.
+- **Upstream Tier Aliases**: Supports `very-fast`, `fast`, `smart`, and `genius` model aliases mapped via `src/auren-upstream.c` to local GGUF or authenticated cloud endpoints with HTTP/2 pooling, circuit breaking, persistent thought signatures, and session affinity.
 
 ### Verified `curl` Queries
 
@@ -152,7 +153,7 @@ cc inference_demo.c $(pkg-config --cflags --libs axil-auren) -o inference_demo
 
 ---
 
-## 5. Installation & Build
+## 5. Installation, Services & Build
 
 ### Prebuilt Packages
 Prebuilt packages for Linux (APT / Alpine / Arch / Fedora-RHEL), macOS (Homebrew), Windows (winget / MSYS2), and OpenBSD are distributed via [tty.pt packages](https://github.com/tty-pt/ci/blob/main/docs/install.md). Use **axil-auren** as the package name.
@@ -161,8 +162,10 @@ Prebuilt packages for Linux (APT / Alpine / Arch / Fedora-RHEL), macOS (Homebrew
 ```sh
 make                  # builds libaxil-auren.so, libren.so, bin/ren, and ren-* mods
 make test             # run comprehensive unit, edge, stress, and ren test suite
-sudo make install     # install headers, libraries, ren modules, and services
+sudo make install     # install headers, libraries, ren modules, and OS services
 ```
+
+Cross-platform service definitions live under `services/` (`services/systemd/axil-auren.service`, `services/openrc/axil-auren`, `services/freebsd/axil-auren`, `services/rc.d/axil_auren`, `services/launchd/pt.tty.axil-auren.plist`, `services/xdg/axil-auren.desktop`, `services/windows/axil-auren.xml`, and `services/windows/install-service.ps1`) and are installed via `make install-services`. On Windows (`MinGW64`), setting `VULKAN_SDK` automatically enables the `ggml` Vulkan backend and VRAM probe.
 
 ---
 

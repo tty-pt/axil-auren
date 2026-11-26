@@ -1,18 +1,37 @@
+## [Unreleased]
+
+- **`ren` Line Editor, Pluggable UI Driver, Structured Tools & `ren-nvim` (`src/ren.c`, `src/libren.c`, `src/ren-complete.{c,h}`, `include/ttypt/libren.h`, `mods/`)**:
+  - Added `ren_register_tool_with_schema()`, `edit_file` tool with structured JSON schemas (`READ_SCHEMA`/`WRITE_SCHEMA`/`EDIT_SCHEMA` in `mods/fs/ren-fs.c`, bash schema in `mods/bash/ren-bash.c`), and automatic project context / `AGENTS.md` & skills discovery (`16bf7b0`, `dfd33c2`).
+  - Built pure-C interactive line editor with history ring, arrow/editing keys, ANSI escape constants, and Tab completion (`src/ren-complete.{c,h}`), plus IPC `STATUS` query (`f9b8666`, `d431410`, `c91df99`).
+  - Added pluggable `ren_ui_driver_t` API with `TOKEN`/`TOOL_RESULT` events, fixed bottom powerline prompt with live context usage, and async interactive turns for live mid-turn steering (`173edd1`, `c505a7c`, `4c00e77`).
+  - Added Neovim RPC plugin module `mods/nvim/ren-nvim.c` (`nvim_context`, `nvim_diagnostics`, `nvim_jump`, `nvim_reload`) (`ec3f9ef`).
+  - Ported `libren`, `ren`, `ren-fs`, and `ren-bash` to `libstele` IPC and process APIs (`b017e11`).
+  - Fixed streamed TTS clause splitting on comma boundaries before bare spaces (`bca83b1`), applied `[steer]` prefix via `append_steer_message()` across all steer paths (`9c98e55`, `ce523fe`), and fixed bottom prompt cursor placement and scroll-region restoration (`5ff83be`, `b264814`, `d4d181b`, `2d04cf2`).
+- **Upstream Thought-Signature Persistence (`src/auren-upstream.c`, `tests/unit/core/test_upstream.c`)**:
+  - Persisted Antigravity/Gemini thought signatures to disk across daemon restarts and prevented omission poisoning on cached tool calls (`79e04fd`).
+- **Build & Service Hardening (`Makefile`, `src/libauren.c`, `services/systemd/axil-auren.service`)**:
+  - Auto-enabled `ggml` Vulkan backend and Vulkan VRAM probe on Win32 builds when `VULKAN_SDK` is set (`137bf32`, `ddcaf04`).
+  - Emitted `%h` paths in user systemd units, symlinked config units with `DESTDIR` guards (`68fd526`), and raised `axil` max request body buffer (`-B 33554432`, 32 MiB) in `services/systemd/axil-auren.service` (`1dbdfc9`).
+
 ## [1.6.0] - 2026-11-23
 
 - **Zero-Config `~/.models/*.gguf` Auto-Discovery (`src/auren-registry.c`, `src/libaxil-auren.c`)**:
   - Automatically scans `$AUREN_MODELS_DIR` or `~/.models/` for `.gguf` files when no JSON config or `AUREN_MODEL_PATH` is set, deduplicates symlinks via `realpath()`, classifies embedding filenames (`bge`, `embed`, `nomic`, `minilm`, `e5-`) as `embed|judge` and generative models as `chat|judge`, and assigns default roles automatically.
-  - Updated `auren_init()` to allow daemon startup without an explicit config file whenever `~/.models/*.gguf` contains valid models.
-- **Standalone Upstream Auth Discovery (`src/auren-upstream.c`)**:
-  - Added `$AUREN_AUTH_PATH` and `~/.config/auren/auth.json` lookup ahead of `~/.pi/agent/auth.json` fallback for cloud upstream routing (`very-fast`, `fast`, `smart`, `genius`, `antigravity/*`, `kilo/*`), circuit breaker, and session affinity.
-- **`ren` Agent CLI, IPC Socket Server & `libren` Runtime (`src/libren.c`, `src/ren.c`, `include/ttypt/libren.h`)**:
-  - Built pure-C streaming agent runtime (`libren.so`) and `ren --listen` Unix-socket IPC daemon with extensible `libxylem` modules (`ren-fs`, `ren-bash`, `ren-reflex`), multi-context providers, cooperative `ren_is_interrupted()` cancellation, mid-stream steer/abort, stall detection, and overflow compaction.
-  - Replaced per-turn `gethostbyname()` in `ren_chat_ex()` with pre-loop `getaddrinfo()` resolution and enabled `TCP_NODELAY`, eliminating DNS and Nagle latency on multi-turn tool loops.
+  - Updated `auren_init()` to allow daemon startup without an explicit config file whenever `~/.models/*.gguf` contains valid models (`572fd4f`).
+- **Unified Upstream Router, Protocol Translator & Deferred Hardening (`src/auren-upstream.{c,h}`, `src/libaxil-auren.c`, `src/auren-engine.c`, `src/openai_chat.c`)**:
+  - Added unified OpenAI upstream router and protocol translator with 4-tier routing (`very-fast`, `fast`, `smart`, `genius`), HTTP/2 `libcurl` connection pooling, circuit breakers, session affinity, `reasoning_effort` forwarding, SSE `[DONE]` length fix, and `$AUREN_AUTH_PATH` / `~/.config/auren/auth.json` lookup ahead of `~/.pi/agent/auth.json` (`7bd4fa4`, `00ac113`, `e076e1b`, `572fd4f`).
+  - Hardened deferred upstream response drains with socket fd epoch guards (`8998822`, `ec34fac`), tracked worker PID to avoid `pthread_join` across `fork()` (`868f9b4`), and added upstream unit tests (`tests/unit/core/test_upstream.c`).
+- **`ren` Agent CLI, IPC Socket Server & `libren` Runtime (`src/libren.c`, `src/ren.c`, `include/ttypt/libren.h`, `docs/MOD_MM.md`)**:
+  - Built pure-C streaming agent runtime (`libren.so`) and `ren --listen` Unix-socket IPC daemon with extensible `libxylem` modules (`mods/fs/ren-fs.c`, `mods/bash/ren-bash.c`, `mods/reflex/ren-reflex.c`), multi-context providers, `ren_call_tool()`, cooperative `ren_is_interrupted()` cancellation, mid-stream steer/abort, stall detection, and overflow compaction (`d14e8c3`, `4be5787`, `2c7644d`, `0591fbf`, `1de338f`).
+  - Prevented JSON history corruption on trim and socket FD leaks to child processes (`3485b08`), added SSE chunk validation and `tests/unit/core/test_ren.c` (`2ddb8b5`), replaced per-turn `gethostbyname()` with pre-loop `getaddrinfo()` + `TCP_NODELAY` (`572fd4f`), and removed obsolete `npm/dist/axil-auren.wasm` (`d14e8c3`).
+  - Decoupled core `ren` from `mod_mm` and `mod_jarvis` (moved to their owner repositories with `REN_MOD_DIR` discovery) and added `docs/MOD_MM.md` (`d628886`, `ea6e159`, `94ce95e`, `f463707`).
 - **Tier-0 Deterministic `ren-reflex` Router (`mods/reflex/ren-reflex.c`)**:
-  - Added sub-millisecond `<1 ms` deterministic EN/PT command matching for workspaces, windows, media/volume, browser tab open/close, terminal launch, and conversation control, plus custom TSV overrides via `~/.config/ren/reflex.tsv` and fail-open to Tier-1 LLM on questions or multi-clause input.
-  - Added UTF-8 Latin diacritic folding (`área` -> `area`, `próxima` -> `proxima`), polite filler prefix stripping (`please`, `can you`, `por favor`, `podes`, etc.), and expanded natural Portuguese shortcuts.
-- **Documentation (`README.md`, `docs/USAGE.md`, `docs/API.md`)**:
-  - Documented zero-config `~/.models/*.gguf` auto-discovery, `~/.config/auren/auth.json` credential resolution, `ren-reflex`, and replaced user-specific paths with `$HOME` / `$PREFIX`.
+  - Added sub-millisecond `<1 ms` deterministic EN/PT command matching for workspaces, windows, media/volume, browser tab open/close, mute, terminal launch, and conversation control, plus custom TSV overrides via `~/.config/ren/reflex.tsv` and fail-open to Tier-1 LLM on questions or multi-clause input (`0591fbf`, `33c61f5`).
+  - Added UTF-8 Latin diacritic folding (`área` -> `area`, `próxima` -> `proxima`), polite filler prefix stripping (`please`, `can you`, `por favor`, `podes`, etc.), and expanded natural Portuguese shortcuts (`572fd4f`).
+- **Cross-Platform Service Definitions & Build (`Makefile`, `services/`)**:
+  - Added `systemd`, OpenBSD `rc.d`, FreeBSD `rc.d`, OpenRC, macOS `launchd`, XDG desktop autostart, and Windows service files with `install-services` target (`96c0ca2`, `ae32706`), and sanitized shared library `$ORIGIN` RPATH (`039614b`).
+- **Documentation (`README.md`, `docs/USAGE.md`, `docs/API.md`, `docs/MOD_MM.md`)**:
+  - Documented zero-config `~/.models/*.gguf` auto-discovery, `~/.config/auren/auth.json` credential resolution, `ren-reflex`, and replaced user-specific paths with `$HOME` / `$PREFIX` (`572fd4f`).
 
 ## [1.5.3] - 2026-11-16
 
